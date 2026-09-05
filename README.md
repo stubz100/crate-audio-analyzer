@@ -6,6 +6,8 @@ Not a sampler, drum machine, or plugin — a standalone search engine over `D:\_
 
 **Full specification:** [.docs/samples_final.md](.docs/samples_final.md) — the living spec, updated as the design evolves. [.docs/samples001.md](.docs/samples001.md) and [.docs/samples002.md](.docs/samples002.md) are the historical proposal/discussion trail behind it.
 
+**Development journal:** [.docs/crate_journal.md](.docs/crate_journal.md) — session-by-session progress against the phase plan.
+
 ## Status
 
 Phase 0 (foundations) — complete. Next: Phase 1 (ingestion & metadata).

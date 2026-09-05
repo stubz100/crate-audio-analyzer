@@ -18,8 +18,9 @@ Crate: a standalone local search/mapping tool over a large personal sample libra
 ## Project layout
 
 ```
-src/crate/    application package (src layout)
-.docs/        specification and design history
+src/crate/              application package (src layout)
+.docs/samples_final.md  the living spec (source of truth for design)
+.docs/crate_journal.md  development journal — progress against the phase roadmap
 ```
 
 Dependencies are grouped by phase in `pyproject.toml` (`analysis`, `ml`, `map` extras) rather than installed all at once — don't add `torch`/`umap-learn` to the base dependency set until the phase that actually needs them (spec §12).
@@ -38,3 +39,4 @@ uv run crate
 - Dependency management: `uv`, not pip/poetry directly.
 - Src layout (`src/crate/`), not a flat package.
 - Build one phase's deliverable at a time per the roadmap in spec §12 — don't jump ahead to a later phase's feature while an earlier one is incomplete.
+- **Maintain the dev journal.** Read `.docs/crate_journal.md` at session start for current status. Every work session ends with a journal entry appended (Done / Decided / Verified / Next) *before* the work is committed, and the roadmap status table updated whenever a phase's status changes. Never let it fall behind the git log — it is the record of implementation progress against the phase plan.
