@@ -1,0 +1,43 @@
+[project]
+name = "crate"
+version = "0.1.0"
+description = "A local similarity-search and mapping tool for a large sample library, built for a Bitwig Studio workflow."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7",
+]
+
+# Added incrementally as later phases need them — see .docs/samples_final.md §12.
+# Not installed by default; use `uv sync --extra analysis` etc. when a phase calls for it.
+[project.optional-dependencies]
+# Phase 2/3: heuristic analysis + transient segmentation.
+# aubio was evaluated and dropped — source-only distribution (no wheels since 2019)
+# means a hidden MSVC toolchain dependency, GPLv3, and it optimizes descriptor
+# extraction, which isn't the bottleneck. See .docs/samples_final.md §10.
+analysis = [
+    "librosa>=0.10",
+    "soundfile>=0.12",
+    "numpy>=1.26",
+    "scipy>=1.11",
+]
+# Phase 4/5: CLAP embeddings, Qwen2-Audio captioning/latent spike.
+ml = [
+    "torch>=2.2",
+    "transformers>=4.40",
+    "laion-clap",
+]
+# Phase 6: 2D projection for the map view.
+map = [
+    "umap-learn>=0.5",
+]
+
+[project.scripts]
+crate = "crate.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/crate"]
