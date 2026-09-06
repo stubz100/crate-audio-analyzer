@@ -23,7 +23,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
 | 6 | Map View | ⬜ not started |
 | 7 | List, Search, Filter | ⬜ not started |
-| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log (hash in the 2026-09-06 Phase 8 entry); ranking / map layout / anchored-only wait for Phases 7 / 6 / 9 |
+| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`; ranking / map layout / anchored-only wait for Phases 7 / 6 / 9 |
 | 9 | Header Interactions | ⬜ not started |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
@@ -563,7 +563,7 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 ## 2026-09-06 — Phase 8 pulled forward: the Recompute tab
 
-**Phase:** 8, library-scope half · commit hash cited in the follow-up entry
+**Phase:** 8, library-scope half · `7bfd001`
 
 **Done**
 
