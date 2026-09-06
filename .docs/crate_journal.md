@@ -19,7 +19,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 2 | Heuristic Analysis | ✅ done — `f650889` (build + review fixes); closed out against 943 real samples, `5e055b2` |
 | 3 | Transient Segmentation | ✅ done — `5e055b2` (nodes S/T, both profiles, settings, segment tables, manual path; validated on 472 real samples). UI for manual markers is Phase 9; lazy render is Phase 4.5/9 |
 | 4 | Embeddings & Classification | ✅ done — `1e1b585` (nodes D/C2/X/E on transformers' CLAP; Facet A 68% on 335 labeled files; full index embedded at 0.21 s/sample) |
-| 4.5 | "Listen and grab" (pull-forward) | ✅ done — `PENDING_H45` (sortable/filterable list, segments drill-down, Qt Multimedia preview, lazy segment render, file-URL drag-out) |
+| 4.5 | "Listen and grab" (pull-forward) | ✅ done — `f715d03` (sortable/filterable list, segments drill-down, Qt Multimedia preview, lazy segment render, file-URL drag-out) |
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
 | 6 | Map View | ⬜ not started |
 | 7 | List, Search, Filter | ⬜ not started |
@@ -536,7 +536,7 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 ## 2026-09-06 — Phase 4.5: "listen and grab"
 
-**Phase:** 4.5 ✅ · `PENDING_H45`
+**Phase:** 4.5 ✅ · `f715d03`
 
 **Done**
 
