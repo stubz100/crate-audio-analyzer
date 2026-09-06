@@ -7,12 +7,23 @@ the phase that needs it. Timestamps are ISO-8601 UTC strings.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
-#: Default index location, relative to the working directory (spec §15 /
-#: journal decision): repo-local, already anticipated by .gitignore.
-DEFAULT_DB_RELPATH = Path(".crate_cache") / "crate.db"
+SCHEMA_VERSION = 1  # bump + migrate here when a later phase reshapes the schema
+
+
+def default_db_path() -> Path:
+    """Stable per-user index location (Windows-only project, spec §3).
+
+    A cwd-relative default silently created a second empty index when the
+    CLI ran from another folder (2026-09-06 review); LOCALAPPDATA is stable
+    regardless of invocation directory. Reverses the 2026-09-05 repo-local
+    decision — see journal.
+    """
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+    return Path(base) / "Crate" / "crate.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (              -- audio files only (spec §8)
@@ -39,12 +50,26 @@ CREATE TABLE IF NOT EXISTS samples (              -- audio files only (spec §8)
 
 def open_db(db_path: Path | str) -> sqlite3.Connection:
     """Open the index database at `db_path`, creating it (and its parent
-    directory) if needed, and ensure the schema exists. Idempotent."""
+    directory) if needed, and ensure the schema exists. Idempotent.
+
+    Schema versioning (2026-09-06 review): `PRAGMA user_version` is the
+    migration anchor for later phases — a DB written by a newer build is
+    refused loudly instead of failing deep in a query.
+    """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > SCHEMA_VERSION:
+        conn.close()
+        raise RuntimeError(
+            f"index at {db_path} uses schema v{version}; "
+            f"this build understands up to v{SCHEMA_VERSION}"
+        )
     conn.executescript(SCHEMA)
+    if version < SCHEMA_VERSION:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
     return conn

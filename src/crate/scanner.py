@@ -3,17 +3,21 @@
 Recursively walks a library root, keeps one skeleton `samples` row per
 supported audio file, and diffs against the previous run using the cheap
 change key (`file_size` + `file_mtime`, spec §8). The full content hash is
-computed ONLY for files whose size/mtime changed — hashing all 340GB on
-every re-scan would be a disk-bound non-starter (spec §8).
+computed ONLY for files whose size/mtime changed (spec §8); if the new hash
+matches the stored one, the file is demoted to `unchanged` so later phases
+never re-analyze identical content (backup restore, NAS re-sync, re-extract).
 
 Formats (spec §3): `.wav` and `.flac` are supported (~77% of the library).
 `.rx2` is skip-and-log (spec §3 decision, §13 risk #5); everything else is
 skip-and-log by extension. Unreadable audio headers are logged, not fatal
 (spec §7 node B guarantee) — such files keep a row with NULL metadata.
 
-One database represents one library root: removal on re-scan only touches
-rows under the scanned root, so scanning a different root into the same DB
-never deletes the first root's rows.
+Error safety (2026-09-06 review): entries the walk cannot list or stat are
+counted as walk errors and PROTECTED from removal — a locked folder or a
+momentarily unreadable drive must never be mistaken for a deletion.
+
+One database may hold several roots: removal on re-scan only touches rows
+under the scanned root, so subset scans never delete other roots' rows.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +39,8 @@ log = logging.getLogger(__name__)
 SUPPORTED_EXTS = {".wav", ".flac"}
 RX2_EXT = ".rx2"
 _HASH_CHUNK_BYTES = 1024 * 1024
+_COMMIT_BATCH = 5000  # a crash mid-scan loses at most one batch, not the run
+_ERROR_SAMPLES = 5    # per-issue examples surfaced in the summary
 
 
 @dataclass
@@ -43,11 +50,13 @@ class ScanSummary:
     root: str = ""
     added: int = 0
     changed: int = 0
-    unchanged: int = 0
+    unchanged: int = 0  # includes hash-demoted files (content identical)
     removed: int = 0
     unreadable: int = 0  # supported ext, header unreadable (row kept, NULL metadata)
+    walk_errors: int = 0  # listing/stat failures; affected rows kept, never removed
     skipped_rx2: int = 0
     skipped_other: dict[str, int] = field(default_factory=dict)
+    error_samples: list[str] = field(default_factory=list)
     elapsed_s: float = 0.0
 
     def format(self) -> str:
@@ -60,6 +69,12 @@ class ScanSummary:
             lines.append(
                 f"unreadable headers: {self.unreadable} (rows kept with NULL metadata)"
             )
+        if self.walk_errors:
+            lines.append(
+                f"walk errors: {self.walk_errors} (affected rows kept; "
+                f"re-scan once readable)"
+            )
+        lines.extend(f"  ! {sample}" for sample in self.error_samples)
         lines.append(f"skipped .rx2: {self.skipped_rx2} (skip-and-log per spec §3)")
         if self.skipped_other:
             total = sum(self.skipped_other.values())
@@ -76,6 +91,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _sample_error(summary: ScanSummary, message: str) -> None:
+    if len(summary.error_samples) < _ERROR_SAMPLES:
+        summary.error_samples.append(message)
+
+
 def _hash_file(path: Path) -> str:
     h = hashlib.blake2b()
     with open(path, "rb") as f:
@@ -87,23 +107,80 @@ def _hash_file(path: Path) -> str:
 def _read_metadata(path: Path) -> tuple[float, int, int] | None:
     """Header-only read via sf.info: (duration_s, sample_rate, channels).
 
-    Returns None (and logs) if the header is unreadable — decode failures
-    are logged, not fatal (spec §7 node B).
+    Returns None if the header is unreadable — decode failures are logged,
+    not fatal (spec §7 node B). The exception itself is logged at DEBUG
+    (stream with `-v`) so a broken install is distinguishable from corrupt
+    files (2026-09-06 review).
     """
     try:
         info = sf.info(str(path))
         return info.duration, info.samplerate, info.channels
-    except Exception:
-        log.warning("unreadable audio header: %s", path)
+    except Exception as exc:
+        log.debug(
+            "unreadable audio header: %s (%s: %s)", path, type(exc).__name__, exc
+        )
         return None
+
+
+def _metadata_or_null(path: Path, summary: ScanSummary) -> tuple:
+    """`_read_metadata` + unreadable bookkeeping — shared by both branches,
+    so first-scan and re-scan can never silently diverge (2026-09-06)."""
+    meta = _read_metadata(path)
+    if meta is None:
+        summary.unreadable += 1
+        _sample_error(summary, f"unreadable header: {path}")
+        return (None, None, None)
+    return meta
+
+
+def _under_root_prefix(root: Path) -> str:
+    """Prefix matching every path strictly under `root` — drive-root safe.
+
+    `str(Path("D:\\"))` already ends in a separator, so naive
+    `str(root) + os.sep` doubles it and matches nothing (2026-09-06 review);
+    `os.path.join` normalizes both cases.
+    """
+    return os.path.join(str(root), "")
+
+
+def _walk_files(
+    root: Path, on_error: Callable[[str, OSError, bool], None]
+) -> Iterator[tuple[os.DirEntry, str]]:
+    """Yield `(entry, rel_folder)` for every file under `root`, depth-first.
+
+    Built on `os.scandir` rather than `os.walk` (2026-09-06 review):
+    `DirEntry.stat()` reuses the listing's metadata on Windows (no second
+    syscall), `rel_folder` is computed once per directory, and a listing
+    failure surfaces via `on_error(path, exc, subtree=True)` instead of
+    being silently swallowed. Entry-level failures pass `subtree=False`.
+    """
+    stack: list[tuple[Path, str]] = [(root, "")]
+    while stack:
+        dirpath, rel_folder = stack.pop()
+        try:
+            entries = list(os.scandir(dirpath))
+        except OSError as exc:
+            on_error(str(dirpath), exc, True)
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    sub = f"{rel_folder}/{entry.name}" if rel_folder else entry.name
+                    stack.append((Path(entry.path), sub))
+                elif entry.is_file(follow_symlinks=False):
+                    yield entry, rel_folder
+            except OSError as exc:
+                on_error(entry.path, exc, False)
 
 
 def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
     """Run node `A` over `root` against the DB on `conn`. Returns a summary.
 
-    Inserts skeleton rows for new files, updates `last_scanned_at` for
-    unchanged ones, re-reads metadata + hashes changed ones (spec §8: hash
-    only when size/mtime changed), and removes rows whose file vanished.
+    Inserts skeleton rows for new files, refreshes `last_scanned_at`/`folder`
+    for unchanged ones, demotes hash-identical ones (content unchanged even
+    though mtime moved), re-reads metadata and re-hashes genuinely changed
+    ones (spec §8), and removes rows whose file vanished — never rows under
+    a directory the walk could not read (those are walk errors).
     """
     root = Path(root).resolve()
     if not root.is_dir():
@@ -112,74 +189,105 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
     summary = ScanSummary(root=str(root))
     started = time.perf_counter()
     now = _now_iso()
-    root_prefix = str(root) + os.sep
+    root_prefix = _under_root_prefix(root)
 
     known: dict[str, sqlite3.Row] = {
-        row["filepath"]: row for row in conn.execute("SELECT * FROM samples")
+        row["filepath"]: row
+        for row in conn.execute(
+            "SELECT filepath, file_size, file_mtime, file_hash FROM samples"
+        )
     }
 
     seen: set[str] = set()
+    failed_dirs: list[str] = []     # listing failed → subtree rows protected
+    failed_files: set[str] = set()  # stat/hash failed → that row protected
     inserts: list[tuple] = []
-    touches: list[tuple] = []  # unchanged rows: last_scanned_at only
-    updates: list[tuple] = []  # changed rows: metadata + change key + hash
+    touches: list[tuple] = []    # unchanged: last_scanned_at + folder refresh
+    retouches: list[tuple] = []  # mtime moved, hash equal: change-key refresh
+    updates: list[tuple] = []    # genuinely changed: metadata + key + hash
 
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for name in filenames:
-            path = Path(dirpath) / name
-            ext = path.suffix.lower()
-            if ext not in SUPPORTED_EXTS:
-                if ext == RX2_EXT:
-                    summary.skipped_rx2 += 1
-                else:
-                    key = ext or "<no-ext>"
-                    summary.skipped_other[key] = summary.skipped_other.get(key, 0) + 1
-                continue
+    def _on_walk_error(path_str: str, exc: OSError, subtree: bool) -> None:
+        summary.walk_errors += 1
+        _sample_error(
+            summary, f"walk error: {path_str} ({type(exc).__name__}: {exc})"
+        )
+        log.debug("walk error: %s (%s: %s)", path_str, type(exc).__name__, exc)
+        if subtree:
+            failed_dirs.append(os.path.join(path_str, ""))
+        else:
+            failed_files.add(path_str)
 
-            try:
-                st = path.stat()
-            except OSError:
-                log.warning("cannot stat, skipping: %s", path)
-                continue
+    for entry, rel_folder in _walk_files(root, _on_walk_error):
+        name = entry.name
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in SUPPORTED_EXTS:
+            if ext == RX2_EXT:
+                summary.skipped_rx2 += 1
+            else:
+                key = ext or "<no-ext>"
+                summary.skipped_other[key] = summary.skipped_other.get(key, 0) + 1
+            continue
 
-            filepath = str(path)
-            seen.add(filepath)
-            rel_folder = path.parent.relative_to(root).as_posix()
-            if rel_folder == ".":
-                rel_folder = ""
+        path_str = entry.path
+        try:
+            st = entry.stat()
+        except OSError as exc:
+            _on_walk_error(path_str, exc, subtree=False)
+            continue
 
-            old = known.get(filepath)
-            if old is None:
-                meta = _read_metadata(path)
-                if meta is None:
-                    summary.unreadable += 1
-                    meta = (None, None, None)
-                inserts.append(
-                    (
-                        filepath, name, rel_folder,
-                        meta[0], meta[1], meta[2],
-                        now, now, st.st_size, st.st_mtime,
-                    )
+        seen.add(path_str)
+        old = known.get(path_str)
+        if old is None:
+            meta = _metadata_or_null(Path(path_str), summary)
+            inserts.append(
+                (
+                    path_str, name, rel_folder,
+                    meta[0], meta[1], meta[2],
+                    now, now, st.st_size, st.st_mtime,
                 )
-                summary.added += 1
-            elif old["file_size"] == st.st_size and old["file_mtime"] == st.st_mtime:
-                touches.append((now, filepath))
+            )
+            summary.added += 1
+        elif old["file_size"] == st.st_size and old["file_mtime"] == st.st_mtime:
+            touches.append((now, rel_folder, path_str))
+            summary.unchanged += 1
+        else:
+            try:
+                new_hash = _hash_file(Path(path_str))
+            except OSError as exc:
+                _on_walk_error(path_str, exc, subtree=False)
+                continue  # already in `seen`: row kept as-is
+            size_same = old["file_size"] == st.st_size
+            if (
+                size_same
+                and old["file_hash"] is not None
+                and old["file_hash"] == new_hash
+            ):
+                # Content identical despite mtime change (backup restore, NAS
+                # re-sync, touch): refresh the change key but don't mark
+                # changed — later phases must not re-analyze identical bytes.
+                retouches.append(
+                    (now, rel_folder, st.st_size, st.st_mtime, path_str)
+                )
                 summary.unchanged += 1
             else:
-                meta = _read_metadata(path)
-                if meta is None:
-                    summary.unreadable += 1
-                    meta = (None, None, None)
+                meta = _metadata_or_null(Path(path_str), summary)
                 updates.append(
                     (
                         name, rel_folder,
                         meta[0], meta[1], meta[2],
-                        now, st.st_size, st.st_mtime, _hash_file(path),
-                        filepath,
+                        now, st.st_size, st.st_mtime, new_hash, path_str,
                     )
                 )
                 summary.changed += 1
 
-    conn.executemany(
+    def _executemany(sql: str, rows: list[tuple]) -> None:
+        """Chunked executemany: a crash mid-scan loses at most one batch,
+        not the whole (potentially multi-hour, full-library) scan."""
+        for start in range(0, len(rows), _COMMIT_BATCH):
+            conn.executemany(sql, rows[start : start + _COMMIT_BATCH])
+            conn.commit()
+
+    _executemany(
         """
         INSERT INTO samples
             (filepath, filename, folder, duration_s, sample_rate, channels,
@@ -188,10 +296,19 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
         """,
         inserts,
     )
-    conn.executemany(
-        "UPDATE samples SET last_scanned_at = ? WHERE filepath = ?", touches
+    _executemany(
+        "UPDATE samples SET last_scanned_at = ?, folder = ? WHERE filepath = ?",
+        touches,
     )
-    conn.executemany(
+    _executemany(
+        """
+        UPDATE samples
+        SET last_scanned_at = ?, folder = ?, file_size = ?, file_mtime = ?
+        WHERE filepath = ?
+        """,
+        retouches,
+    )
+    _executemany(
         """
         UPDATE samples
         SET filename = ?, folder = ?,
@@ -202,19 +319,23 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
         updates,
     )
 
-    # Removal: only rows under this root whose file vanished (one DB may
-    # hold several roots; a scan never deletes another root's rows).
+    # Removal: only rows under this root whose file truly vanished. One DB
+    # may hold several roots, so other roots' rows are never touched. Rows
+    # under a failed listing, or whose stat/hash failed, are PROTECTED — an
+    # unreadable entry is unknown state, not a deletion (2026-09-06 review).
     vanished = [
         filepath
         for filepath in known
-        if filepath not in seen and filepath.startswith(root_prefix)
+        if filepath not in seen
+        and filepath.startswith(root_prefix)
+        and filepath not in failed_files
+        and not any(filepath.startswith(d) for d in failed_dirs)
     ]
     if vanished:
-        conn.executemany(
+        _executemany(
             "DELETE FROM samples WHERE filepath = ?", [(fp,) for fp in vanished]
         )
         summary.removed = len(vanished)
 
-    conn.commit()
     summary.elapsed_s = time.perf_counter() - started
     return summary

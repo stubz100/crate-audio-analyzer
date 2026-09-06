@@ -14,7 +14,7 @@ import pytest
 import soundfile as sf
 
 from crate.db import open_db
-from crate.scanner import scan_library
+from crate.scanner import _under_root_prefix, scan_library
 
 
 def _write_audio(path: Path, seconds: float = 0.05, samplerate: int = 8000) -> Path:
@@ -164,3 +164,111 @@ def test_missing_root_raises(tmp_path):
             scan_library(conn, tmp_path / "does-not-exist")
     finally:
         conn.close()
+
+
+# --- Regression tests for the 2026-09-06 review ---
+
+
+def test_under_root_prefix_handles_drive_roots():
+    # Finding 4: naive str(root)+os.sep doubled the separator on drive roots.
+    assert _under_root_prefix(Path("D:\\")) == "D:\\"
+    assert _under_root_prefix(Path("E:\\lib")) == "E:\\lib\\"
+    # Paths strictly under the root match; siblings must not.
+    assert "D:\\x.wav".startswith(_under_root_prefix(Path("D:\\")))
+    assert not "E:\\library\\x.wav".startswith(_under_root_prefix(Path("E:\\lib")))
+
+
+def test_identical_content_is_demoted_to_unchanged(scanned_tree):
+    # Finding 3: a backup-restore/NAS-resync changes mtime but not bytes.
+    root, conn = scanned_tree
+    scan_library(conn, root)
+    target = root / "a.wav"
+
+    # First mtime change: no stored hash yet, so it reports changed and hashes.
+    st = target.stat()
+    os.utime(target, (st.st_atime, st.st_mtime + 10))
+    second = scan_library(conn, root)
+    assert second.changed == 1
+    assert _rows(conn)[str(target)]["file_hash"] is not None
+
+    # Second mtime change: stored hash matches -> demoted to unchanged.
+    st = target.stat()
+    os.utime(target, (st.st_atime, st.st_mtime + 10))
+    third = scan_library(conn, root)
+    assert third.changed == 0
+    assert third.unchanged == 3  # a.wav (demoted) + b.wav + c.flac
+    assert third.removed == 0
+
+
+def test_unreadable_directory_protects_rows(scanned_tree, monkeypatch):
+    # Finding 1: a locked/unreadable folder must not delete its rows.
+    import crate.scanner as scanner_mod
+
+    root, conn = scanned_tree
+    scan_library(conn, root)
+    before = set(_rows(conn))
+    assert len(before) == 3
+
+    real_scandir = scanner_mod.os.scandir
+    locked = (root / "sub").resolve()
+
+    def guarded_scandir(path, *args, **kwargs):
+        if Path(path).resolve() == locked:
+            raise PermissionError("simulated lock")
+        return real_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(scanner_mod.os, "scandir", guarded_scandir)
+    summary = scan_library(conn, root)
+    assert summary.walk_errors == 1
+    assert summary.removed == 0  # rows under 'sub' survive the unreadable walk
+    assert set(_rows(conn)) == before
+
+
+def test_hash_failure_protects_row(scanned_tree, monkeypatch):
+    # Finding 1: a file that cannot be hashed mid-scan keeps its row.
+    import crate.scanner as scanner_mod
+
+    root, conn = scanned_tree
+    scan_library(conn, root)
+    target = root / "a.wav"
+    _write_audio(target, seconds=0.2)  # size change -> changed branch -> hash
+
+    def boom(path):
+        raise PermissionError("simulated lock")
+
+    monkeypatch.setattr(scanner_mod, "_hash_file", boom)
+    summary = scan_library(conn, root)
+    assert summary.walk_errors == 1
+    assert summary.removed == 0
+    assert str(target) in _rows(conn)  # row survives, metadata untouched
+
+
+def test_parent_root_rescan_refreshes_folder(tmp_path):
+    # Finding 6: scanning a parent root must refresh `folder`, not leave it stale.
+    root = tmp_path / "lib"
+    _write_audio(root / "sub" / "x.wav")
+    conn = open_db(tmp_path / "crate.db")
+    try:
+        scan_library(conn, root / "sub")
+        row = _rows(conn)[str(root / "sub" / "x.wav")]
+        assert row["folder"] == ""
+
+        summary = scan_library(conn, root)
+        assert summary.unchanged == 1
+        assert _rows(conn)[str(root / "sub" / "x.wav")]["folder"] == "sub"
+    finally:
+        conn.close()
+
+
+def test_file_becomes_unreadable_after_good_scan(scanned_tree):
+    # Finding 14 gap: a file that corrupts after a good scan keeps its row.
+    root, conn = scanned_tree
+    scan_library(conn, root)
+    target = root / "a.wav"
+    target.write_bytes(b"corrupted")  # size + mtime change
+    summary = scan_library(conn, root)
+    assert summary.changed == 1
+    assert summary.unreadable == 1
+    row = _rows(conn)[str(target)]
+    assert row["duration_s"] is None
+    assert row["file_hash"] is not None

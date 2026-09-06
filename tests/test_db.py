@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from crate.db import SCHEMA, open_db
 
 
@@ -74,3 +76,28 @@ def test_filepath_is_unique(tmp_path):
             raise AssertionError("duplicate filepath was accepted")
     finally:
         conn.close()
+
+
+def test_schema_version_is_stamped(tmp_path):
+    # Finding 5: PRAGMA user_version anchors future migrations.
+    conn = open_db(tmp_path / "crate.db")
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+    assert version == 1
+
+
+def test_newer_schema_is_refused(tmp_path):
+    # Finding 5: a DB written by a newer build must fail loudly, not corrupt.
+    import crate.db as db_mod
+
+    db_path = tmp_path / "crate.db"
+    conn = open_db(db_path)
+    conn.close()
+    raw = sqlite3.connect(db_path)
+    raw.execute(f"PRAGMA user_version = {db_mod.SCHEMA_VERSION + 98}")
+    raw.commit()
+    raw.close()
+    with pytest.raises(RuntimeError):
+        open_db(db_path)

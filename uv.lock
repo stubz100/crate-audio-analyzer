@@ -348,7 +348,10 @@ name = "crate"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pyside6" },
+    { name = "soundfile" },
 ]
 
 [package.optional-dependencies]
@@ -379,9 +382,11 @@ dev = [
 requires-dist = [
     { name = "laion-clap", marker = "extra == 'ml'" },
     { name = "librosa", marker = "extra == 'analysis'", specifier = ">=0.10" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'analysis'", specifier = ">=1.26" },
     { name = "pyside6", specifier = ">=6.7" },
     { name = "scipy", marker = "extra == 'analysis'", specifier = ">=1.11" },
+    { name = "soundfile", specifier = ">=0.12" },
     { name = "soundfile", marker = "extra == 'analysis'", specifier = ">=0.12" },
     { name = "torch", marker = "extra == 'ml'", specifier = ">=2.2" },
     { name = "transformers", marker = "extra == 'ml'", specifier = ">=4.40" },

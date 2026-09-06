@@ -1,6 +1,6 @@
 # Sample Library Search & Mapping Tool — Specification
 
-**Status: living spec.** *Last updated: 2026-09-05 (post-Phase-0 review pass).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
+**Status: living spec.** *Last updated: 2026-09-06 (post-Phase-1 review: §12 deliverable split).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
 
 ---
 
@@ -411,8 +411,8 @@ Bitwig exposes no public API for injecting tags into its own browser database, s
 ## 12. Development Plan
 
 **Phase 0 — Foundations.** Project scaffold, dependency setup, confirm stack.
-**Phase 1 — Ingestion & Metadata.** File scanner (full-root walk, incremental re-scan, format filtering), SQLite schema, embedded WAV metadata.
-**Phase 2 — Heuristic Analysis.** Full amplitude/pitch/timbre/spectrum descriptor set, tempo/loop-ness, structural typing.
+**Phase 1 — Ingestion & Metadata.** File scanner (full-root walk, incremental re-scan, format filtering), SQLite schema, audio-header metadata (duration/rate/channels via `sf.info`). *The `smpl`/ACID chunk reader this line originally listed is deliberately reassigned to Phase 2, whose `analysis` table (`embedded_metadata_json`) is where its output lives — §10 always had it there (journal 2026-09-06).*
+**Phase 2 — Heuristic Analysis.** Full amplitude/pitch/timbre/spectrum descriptor set, tempo/loop-ness (incl. the `smpl`/ACID chunk reader reassigned from Phase 1), structural typing.
 **Phase 3 — Transient Segmentation.** Detection (both profiles), configurable sensitivity/length/mode/cap, `segments`+`segment_*` tables, manual create/edit/delete path.
 **Phase 4 — Embeddings & Classification.** CLAP for samples and segments; classifier for both facets (full for samples, inherited/lighter for segments).
 **Phase 5 — Qwen2-Audio Integration + Latent-Similarity Spike.** Small-subset benchmark (per §3's real-scale arithmetic) of captioning cost/quality; latent-axis evaluation per §5.3. Deliverable: measured per-file cost, a go/no-go on the latent axis.
