@@ -25,10 +25,13 @@ dependencies = [
 # extraction, which isn't the bottleneck. See .docs/samples_final.md §10.
 [project.optional-dependencies]
 # Phase 4/5: CLAP embeddings, Qwen2-Audio captioning/latent spike.
+# CLAP is loaded through transformers' native ClapModel (laion/clap-htsat-*
+# checkpoints) rather than the `laion-clap` package: same weights, one
+# maintained dependency instead of a research repo with its own pins
+# (torchaudio, h5py, wget ...) — Phase 4, 2026-09-06.
 ml = [
     "torch>=2.2",
     "transformers>=4.40",
-    "laion-clap",
 ]
 # Phase 6: 2D projection for the map view.
 map = [
@@ -40,6 +43,7 @@ crate = "crate.main:main"
 crate-scan = "crate.cli:scan_main"
 crate-analyze = "crate.cli:analyze_main"
 crate-segment = "crate.cli:segment_main"
+crate-embed = "crate.cli:embed_main"
 
 [dependency-groups]
 dev = [

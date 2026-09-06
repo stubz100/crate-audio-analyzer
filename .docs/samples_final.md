@@ -1,6 +1,6 @@
 # Sample Library Search & Mapping Tool — Specification
 
-**Status: living spec.** *Last updated: 2026-09-06 (Phase 3: segment tables + `samples.segments_detected_at` in §8; detection notes in §6.2).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
+**Status: living spec.** *Last updated: 2026-09-06 (Phase 4: `embedding`/`text_tags` columns in §8, Facet A settings in §9.6, CLAP-via-transformers note in §10).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
 
 ---
 
@@ -65,6 +65,8 @@ Two mitigations follow directly from this, both in §9.6's settings:
 - **An "embed segments" toggle**, alongside the Qwen2-Audio toggle — segment detection is cheap and can stay on while the expensive per-segment embedding is deferred.
 
 This is the concrete justification for §9.6's whole design: nothing expensive ever targets "everything" by accident.
+
+*Measured, Phase 4 (2026-09-06):* CLAP on this CPU runs at **0.05 s per 10-second clip** batched, and a full index pass came to **0.21 s per sample including its segments** (943 samples + 1,429 segment windows in 196 s, with a second model run competing for the CPU). Extrapolated: **~6.5 h for the 110k-file library with segments**, not 25–40 h — the estimate above was an order of magnitude pessimistic for CLAP. Heuristic analysis (0.26 s/file) and segmentation (0.39 s/candidate) are now the comparable costs.
 
 ---
 
@@ -147,7 +149,7 @@ A 1c drum loop is *made of* individual hits; a lot of multi-transient foley/synt
 
 Runs for anything not already a clean single-hit one-shot, fully configurable (§9.6):
 
-- **Onset-detection profile**, auto-selected by content class: *tight/percussive* (HFC/complex-domain) for Rhythmic/Loop content; *loose/gesture* (energy-based, with onset-merging) for multi-transient-hit content — this governs *how onsets are detected*.
+- **Onset-detection profile**, auto-selected by content class: *tight/percussive* (HFC/complex-domain) for Rhythmic/Loop content; *loose/gesture* (energy-based, with onset-merging) for multi-transient-hit content — this governs *how onsets are detected*. *(Implemented: `auto` reads both facets — tight when Facet B is Loop or Facet A is Rhythmic, loose otherwise; before Phase 4 has run, or when Facet A is flagged, only Facet B decides.)*
 - **Transient sensitivity**: configurable threshold for how strong a transient must be to count as a candidate at all.
 - **Boundary mode** — *how a segment ends*, orthogonal to the profile above: **transient-to-transient** (stop at the next onset, breakbeat-chop style) or **transient-to-fixed-length** (extend a fixed duration regardless of internal sub-transients, for gestures that should stay whole). Default: transient-to-transient. In fixed-length mode, the fixed duration reuses the **max segment length** setting.
 - **Length constraints** (auto-detection only): configurable min/max length (seconds or % of parent duration). Too-short → **dropped** (noise). Too-long → **truncated at the max**, not dropped — an obvious transient still yields a segment.
@@ -268,13 +270,16 @@ analysis                                            -- samples only
   spectral_centroid, spectral_bandwidth, spectral_rolloff, spectral_flatness
 
 embedding                                           -- samples only
-  sample_id (FK), model_name, vector (blob)
+  sample_id (FK), model_name, vector (blob),        -- float32, L2-normalised (cosine = dot)
+  embedded_at                                       -- stale when older than samples.content_changed_at
   -- model_name: 'clap', or 'qwen2audio-latent' if §5.3's spike is adopted
   -- map coordinates live in map_position, not here — see map_layout below
 
 text_tags                                           -- MACHINE output only; samples only, segments inherit
-  sample_id (FK), tag_or_caption, source_model, is_user_confirmed (bool)
-  -- source_model: 'clap-zeroshot' | 'qwen2audio-caption'
+  sample_id (FK), tag_or_caption, source_model, score, is_user_confirmed (bool), created_at
+  -- source_model: 'clap-zeroshot' (tag chips, score = cosine) | 'clap-class' (node E's best
+  --               Facet A guess with its confidence — kept even when the sample is flagged,
+  --               so a low-confidence call is visible, not lost) | 'qwen2audio-caption'
   -- Flow: models write here as suggestions. When you accept or edit a suggested chip,
   --       it is promoted into tags/sample_tags below. text_tags is therefore the raw
   --       model layer (regenerable, disposable); tags/sample_tags is the curated layer
@@ -397,7 +402,8 @@ Policy: **no map layout, ranking, or attribute recomputation ever runs automatic
 |---|---|---|
 | Include Qwen2-Audio captioning | On/off (§5.2) | Off |
 | Embed segments | On/off — segment *detection* is cheap and stays on regardless; this governs the expensive per-segment CLAP pass (`C2`), the library's real cost multiplier (§3) | On |
-| Min length for segment embedding | Below this, a segment is still indexed but not embedded — sub-~200ms windows rarely yield a useful CLAP vector (§3) | ~200ms |
+| Min length for segment embedding | Below this, a segment is still indexed but not embedded — sub-~200ms windows rarely yield a useful CLAP vector (§3) | 200 ms |
+| Facet A confidence threshold | Node `E`: below this softmax confidence the content class is **flagged, not assigned** (`content_class` NULL, best guess kept as a `clap-class` tag). Four classes, so 0.25 is chance. Re-runnable from stored vectors without audio (`crate-embed --reclassify`). Measured on 335 labeled files: 0.5 assigns 90% of samples at 73% accuracy, 0.65 assigns 75% at 77% | 0.5 |
 | Transient sensitivity | Threshold to trigger a candidate boundary | *(tuning pass expected)* |
 | Min/max segment length | Seconds or % of parent duration; drop-short/truncate-long (§6.2) | *(tuning pass expected)* |
 | Segmentation boundary mode | Transient-to-transient / transient-to-fixed-length (§6.2) | Transient-to-transient |
@@ -418,7 +424,7 @@ Single-process Python for v1 — no C++ or Rust component planned.
 | Desktop UI | **PySide6 (Qt)** | Native OS drag-and-drop, one process/one language; PySide6 is a binding around real Qt C++, so map-rendering performance is a rendering-approach question (GPU-painted canvas vs. per-point widgets), not a language question |
 | Audio I/O & classic DSP | **librosa + soundfile** (no aubio) | `librosa` covers onset/tempo/pitch (`onset.onset_detect`, `beat.beat_track`, `yin`) on numpy/scipy, wheel-installs cleanly, MIT-licensed. **aubio was evaluated and dropped** — see note below |
 | WAV loop metadata | **Custom `smpl`/ACID chunk reader** | Neither `soundfile` nor `librosa` exposes these chunks, so node `C`'s "read embedded tempo/key/loop metadata" needs a small purpose-written parser (`smpl` is a simple struct; ACID is a documented fmt-chunk extension). Small, but real Phase 2 work — not free |
-| Similarity/tagging embeddings | **CLAP** (always), **Qwen2-Audio** (optional caption, §5.2; optional latent axis, §5.3) | PyTorch models — no meaningful non-Python path exists for these regardless |
+| Similarity/tagging embeddings | **CLAP** (always), **Qwen2-Audio** (optional caption, §5.2; optional latent axis, §5.3) | PyTorch models — no meaningful non-Python path exists for these regardless. CLAP is loaded through transformers' native `ClapModel` (`laion/clap-htsat-unfused`, 48 kHz, 10 s window) rather than the `laion-clap` package: same weights, one maintained dependency. Clips longer than 10 s are cropped to their **first** 10 s deterministically — the extractor's default takes a random window and would make embeddings non-reproducible (Phase 4) |
 | Dimensionality reduction | **UMAP** | Preserves local+global structure; supports out-of-sample `.transform()`, which is what makes anchored-only map recompute (§9.6) cheap |
 | Storage | **SQLite** | Zero-ops, portable; Python's stdlib `sqlite3` is a thin wrapper over the same native library every other language would bind to — never actually a constraining factor regardless of language choice |
 | Playback | **sounddevice** or Qt Multimedia | Simple low-latency preview |

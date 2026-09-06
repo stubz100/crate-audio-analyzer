@@ -10,12 +10,14 @@ Not a sampler, drum machine, or plugin — a standalone search engine over `D:\_
 
 ## Status
 
-Phases 1–2 (ingestion & metadata, heuristic analysis) — complete, validated against the real library. Phase 3 (transient segmentation) — in progress. Next: Phase 4 (CLAP embeddings & classification).
+Phases 1–3 (ingestion & metadata, heuristic analysis, transient segmentation) — complete, validated against the real library. Phase 4 (CLAP embeddings & classification) — in progress. Next: Phase 4.5 ("listen and grab").
 
 ```bash
-crate-scan      # index a library root (incremental)
+uv sync --extra ml   # Phase 4 onwards: torch + transformers (CLAP downloads on first use, ~600 MB)
+crate-scan      # index a library root (incremental; moves keep their rows)
 crate-analyze   # descriptors, tempo/loop-ness, structural type
 crate-segment   # find one-shot hits buried inside longer samples
+crate-embed     # CLAP vectors, zero-shot tag chips, content class
 ```
 
 ## Development

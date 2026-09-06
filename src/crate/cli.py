@@ -1,11 +1,12 @@
 r"""Command-line runners: `crate-scan` (Phase 1), `crate-analyze` (Phase 2),
-`crate-segment` (Phase 3).
+`crate-segment` (Phase 3), `crate-embed` (Phase 4).
 
 Examples:
     crate-scan                                # full library, default DB
     crate-scan --root "D:\_soundPacks\Some Pack" --db subset.db
     crate-analyze --db subset.db --limit 60   # time a subset first (spec §3)
     crate-segment --db subset.db --max-segments 8
+    crate-embed --db subset.db --limit 20      # time CLAP on a subset first (spec §3)
 
 Every command takes `--db` and `-v`, logs progress at INFO — these are the
 multi-hour stages of spec §3, so a silent run is not acceptable — and per-file
@@ -25,6 +26,7 @@ from typing import Any
 from .analysis import ONE_SHOT_MAX_DURATION_S, analyze_pending
 from .config import DEFAULT_LIBRARY_PATH
 from .db import default_db_path, open_db
+from .embedding import DEFAULT_CHECKPOINT, EmbedSettings, embed_pending, reclassify
 from .scanner import scan_library
 from .segmentation import (
     BOUNDARY_MODES,
@@ -66,6 +68,10 @@ def _run(args: argparse.Namespace, job: Callable[[Any], Any]) -> int:
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO, format=_LOG_FORMAT
     )
+    # The model stack logs every HTTP request at INFO; that is noise on a
+    # multi-hour run, not progress. Our own loggers keep the chosen level.
+    for noisy in ("httpx", "huggingface_hub", "urllib3", "filelock", "transformers"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     conn = open_db(args.db)
     try:
         summary = job(conn)
@@ -218,6 +224,71 @@ def segment_main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             resegment=args.resegment,
             analyze_segments=not args.no_segment_analysis,
+        ),
+    )
+
+
+def embed_main(argv: list[str] | None = None) -> int:
+    """`crate-embed` — CLAP embeddings, zero-shot tags, Facet A (spec §7 nodes
+    D/C2/X/E, Phase 4)."""
+    parser = _parser(
+        "crate-embed",
+        "Embed samples (and their segments) with CLAP, write zero-shot tag "
+        "chips, and assign the Facet A content class (spec §7 nodes D, C2, X, E). "
+        "First use downloads the checkpoint (~600 MB). Time a subset first: this "
+        "is the library's dominant cost (spec §3).",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="embed at most N samples — time a subset before the full library",
+    )
+    parser.add_argument(
+        "--reembed", action="store_true",
+        help="re-embed every analysed sample and segment, not just new/stale ones",
+    )
+    parser.add_argument(
+        "--reclassify", action="store_true",
+        help="re-run tags + Facet A from the stored vectors only (no audio, no "
+        "model audio pass) — cheap prompt/threshold tuning",
+    )
+    parser.add_argument(
+        "--no-segments", action="store_true",
+        help="skip per-segment embeddings (the §3 cost multiplier); segment "
+        "detection is unaffected",
+    )
+    parser.add_argument(
+        "--min-segment-length", type=int, default=200, metavar="MS",
+        help="segments shorter than this are indexed but not embedded (default: %(default)s ms)",
+    )
+    parser.add_argument(
+        "--confidence-threshold", type=float, default=0.5, metavar="P",
+        help="Facet A below this is flagged, not assigned (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--checkpoint", default=DEFAULT_CHECKPOINT,
+        help="CLAP checkpoint on the Hugging Face hub (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=8, metavar="N",
+        help="clips per model forward pass (default: %(default)s)",
+    )
+    args = parser.parse_args(argv)
+    try:
+        settings = EmbedSettings(
+            embed_segments=not args.no_segments,
+            min_segment_length_ms=args.min_segment_length,
+            confidence_threshold=args.confidence_threshold,
+            checkpoint=args.checkpoint,
+            batch_size=args.batch_size,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.reclassify:
+        return _run(args, lambda conn: reclassify(conn, settings=settings))
+    return _run(
+        args,
+        lambda conn: embed_pending(
+            conn, settings=settings, limit=args.limit, reembed=args.reembed
         ),
     )
 

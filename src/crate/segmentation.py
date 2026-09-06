@@ -204,11 +204,19 @@ class SegmentationSummary:
 # (§11), and a recomputation would honour neither (2026-09-06 review).
 
 
-def choose_profile(settings: SegmentationSettings, structural_type_value: str) -> str:
-    """Resolve `auto` against the parent's structural type (spec §6.2)."""
+def choose_profile(
+    settings: SegmentationSettings,
+    structural_type_value: str,
+    content_class: str | None = None,
+) -> str:
+    """Resolve `auto` against the parent's types (spec §6.2: tight for
+    Rhythmic/Loop content, loose for the rest). Facet A arrives in Phase 4 and
+    is NULL until then, or when flagged low-confidence."""
     if settings.profile != PROFILE_AUTO:
         return settings.profile
-    return PROFILE_TIGHT if structural_type_value == "loop" else PROFILE_LOOSE
+    if structural_type_value == "loop" or content_class == "rhythmic":
+        return PROFILE_TIGHT
+    return PROFILE_LOOSE
 
 
 # --- node T: detection ------------------------------------------------------------
@@ -360,9 +368,10 @@ def detect(
     sr: int,
     settings: SegmentationSettings,
     structural_type_value: str = "multi-hit",
+    content_class: str | None = None,
 ) -> DetectionResult:
     """Node `T` end to end on one decoded buffer."""
-    profile = choose_profile(settings, structural_type_value)
+    profile = choose_profile(settings, structural_type_value, content_class)
     transients = detect_transients(y, sr, settings, profile)
     result = build_segments(transients, y.size / sr if sr else 0.0, settings)
     result.profile = profile
@@ -464,6 +473,8 @@ def _refresh_manual_segments(
             "cache_rendered_at = NULL WHERE id = ?",
             (int(out_of_range), segment_id),
         )
+        # Its vector was of the old audio too: drop it, crate-embed refills it.
+        conn.execute("DELETE FROM segment_embedding WHERE segment_id = ?", (segment_id,))
         if analyze_segments:
             _write_segment_analysis(conn, segment_id, y, sr, start_ms, end_ms)
     return flagged
@@ -477,6 +488,7 @@ def segment_sample(
     settings: SegmentationSettings,
     analyze_segments: bool = True,
     refresh_manual: bool = False,
+    content_class: str | None = None,
 ) -> DetectionResult | None:
     """Node `T` for one sample: detect, replace its automatic segments, and
     record the §6.2 counters on the parent. Returns None if it cannot decode.
@@ -490,7 +502,7 @@ def segment_sample(
         return None
     y, sr = loaded
 
-    result = detect(y, sr, settings, structural_type_value)
+    result = detect(y, sr, settings, structural_type_value, content_class)
     _clear_auto_segments(conn, sample_id)
     now = now_iso()
     for candidate in result.segments:
@@ -564,7 +576,7 @@ def segment_pending(
     run_started_at = now_iso()
 
     sql = (
-        "SELECT s.id, s.filepath, k.structural_type, "
+        "SELECT s.id, s.filepath, k.structural_type, k.content_class, "
         "       (s.segments_detected_at IS NOT NULL "
         "        AND s.segments_detected_at < s.content_changed_at) AS is_stale "
         "FROM samples s JOIN classification k ON k.sample_id = s.id "
@@ -581,7 +593,7 @@ def segment_pending(
     worklist = conn.execute(sql).fetchall()
     total = len(worklist)
 
-    for sample_id, filepath, structural_type_value, is_stale in worklist:
+    for sample_id, filepath, structural_type_value, content_class, is_stale in worklist:
         # Per-sample isolation (2026-09-06 review): one exotic file must not
         # take the run down. Decode failures return None; anything else is
         # rolled back, counted, and skipped.
@@ -596,6 +608,7 @@ def segment_pending(
             result = segment_sample(
                 conn, sample_id, filepath, structural_type_value, settings,
                 analyze_segments, refresh_manual=bool(is_stale),
+                content_class=content_class,
             )
             if result is None:
                 conn.rollback()
@@ -703,6 +716,8 @@ def update_segment(
         "cache_rendered_at = NULL, detected_at = ? WHERE id = ?",
         (new_start, new_end, now_iso(), segment_id),
     )
+    # New bounds, new window: the stored vector no longer describes it.
+    conn.execute("DELETE FROM segment_embedding WHERE segment_id = ?", (segment_id,))
     if analyze_segment:
         _describe_segment(conn, segment_id, row[2], new_start, new_end)
     conn.commit()

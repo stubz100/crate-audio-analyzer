@@ -18,7 +18,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 1 | Ingestion & Metadata | ✅ done — `58da501` (build) + `46f131e`, `9d5acea` (review fixes) |
 | 2 | Heuristic Analysis | ✅ done — `f650889` (build + review fixes); closed out against 943 real samples, `5e055b2` |
 | 3 | Transient Segmentation | ✅ done — `5e055b2` (nodes S/T, both profiles, settings, segment tables, manual path; validated on 472 real samples). UI for manual markers is Phase 9; lazy render is Phase 4.5/9 |
-| 4 | Embeddings & Classification | ⬜ not started |
+| 4 | Embeddings & Classification | ✅ done — `PENDING_H4` (nodes D/C2/X/E on transformers' CLAP; Facet A 68% on 335 labeled files; full index embedded at 0.21 s/sample) |
 | 4.5 | "Listen and grab" (pull-forward) | ⬜ not started |
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
 | 6 | Map View | ⬜ not started |
@@ -485,7 +485,7 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 ## 2026-09-06 — Review fixes 2/2: simplification
 
-**Phase:** post-review fixes (Phases 1–3) · commit cited in the next entry
+**Phase:** post-review fixes (Phases 1–3) · `2d59ed0`
 
 **Done**
 
@@ -497,3 +497,27 @@ Directions from the review discussion: (1) frame envelope, then check the number
 - Unused imports and the leftover assertion removed.
 
 **Verified** — `uv run pytest tests -q` → **100 passed**; `crate-analyze --limit 5 --reanalyze` on the real index writes complete rows (0 NULL descriptor vectors across `analysis` and `segment_analysis`).
+
+## 2026-09-06 — Phase 4: CLAP embeddings, zero-shot tags, Facet A
+
+**Phase:** 4 ✅ · `PENDING_H4`
+
+**Done**
+
+- `embedding.py` — node **D** (one CLAP vector per sample, unconditional), **C2** (one per segment, gated by *Embed segments* and *Min length for segment embedding* = 200 ms), **X** (top-5 zero-shot chips from a 32-tag vocabulary, cosine scores), **E** (Facet A from four 12-prompt sets, best-of scoring, softmax confidence, flagged below 0.5 with the best guess kept as a `clap-class` tag; Rhythmic-vs-Melodic ties broken by the HPSS harmonic ratio; segments inherit the parent's class with `structural_type = 'one-shot'`). Schema **v6**: `embedding`, `text_tags`. `crate-embed` CLI with `--reclassify` (tags + Facet A from stored vectors, no audio). Manual corrections protected.
+- Model access behind a two-method `Encoder` protocol: a deterministic fake drives 16 tests; the real `ClapEncoder` loads transformers' `ClapModel` (`laion/clap-htsat-unfused`) lazily, decodes at 48 kHz, crops to the **first** 10 s deterministically. transformers 5 returns an output object from `get_*_features`; `projected_features` takes `pooler_output` (measured (n, 512)) and still accepts 4.x tensors.
+- `ml` extra is now `torch` + `transformers`; `laion-clap` dropped (same weights, one maintained dependency). Segmentation hooks: `auto` profile is tight for Facet A Rhythmic; a segment's vector is dropped when its bounds or its parent's content change. CLI silences the model stack's per-request INFO logging.
+
+**Decided**
+
+- **Prompt counts equalised, best-of scoring kept.** On 335 labeled files the mean and prompt-centroid ensembles collapsed Vocal to ~10%; best-of favours the class with more prompts, so every class got twelve. 60.3% → **68.4%** best-guess accuracy.
+- The "Wood Guitar" folder I labeled Melodic is knocks on a guitar body (harmonic ratio ≤ 0.10, tagged percussion/glitch): excluding it, **72.7%**. Per class: Rhythmic 98%, Other 85%, Melodic 50%, Vocal 33% — short vocal chops and breaths read as percussion; §11's manual correction is the intended path, and flagged samples keep their guess visible.
+- Threshold stays 0.5 (assigns 90% at 73% accuracy; 0.65 would assign 75% at 77%). `classification.source_model` remains Facet B's; Facet A's provenance is the `clap-class` tag.
+
+**Verified**
+
+- `uv run pytest tests -q` → **116 passed, 1 skipped** (the real-model smoke test; passes with `CRATE_REAL_CLAP=1`).
+- Real index (`.crate_cache/crate.db`, v6): **943 samples + 1,429 segments** embedded (484 segments under 200 ms skipped, shortest embedded exactly 200 ms), 0 failed, **195.9 s = 0.21 s/sample with segments** while a second model run shared the CPU; isolated: 8 × 10 s clips in 0.41 s = **0.05 s/clip**; model load 3.1 s from `F:\HF_HOME`. `--reclassify` over all 943: 6.8 s. Facet A on two drum/foley packs: rhythmic 835 / other 45 / melodic 11 / vocal 7 / flagged 45.
+- §3 cost model corrected in the spec: ~6.5 h for the full library with segments, not 25–40 h.
+
+**Next** — Phase 4.5 "listen and grab": preview player + native drag-out on a plain sortable list, the first daily-drivable checkpoint. Then tune Facet A by ear against real corrections rather than folder names.

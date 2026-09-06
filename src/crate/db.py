@@ -19,7 +19,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 # v1 = Phase 1: `samples`
 # v2 = Phase 2: `analysis` + `classification`
 # v3 = Phase 2 review: staleness timestamps (`samples.content_changed_at`,
@@ -29,6 +29,7 @@ SCHEMA_VERSION = 5
 #      `segment_classification` (spec §6, §8)
 # v5 = Phase 3 review: `segments.needs_review` (a manual segment whose parent's
 #      content changed underneath it)
+# v6 = Phase 4: `embedding` + `text_tags` (spec §8; nodes D, X, E)
 
 
 def now_iso() -> str:
@@ -184,13 +185,45 @@ CREATE TABLE IF NOT EXISTS segment_analysis (
     spectral_flatness  REAL
 );
 
-CREATE TABLE IF NOT EXISTS segment_embedding (       -- Phase 4 (CLAP, windowed)
+CREATE TABLE IF NOT EXISTS segment_embedding (       -- Phase 4 (CLAP, windowed), node C2
     segment_id INTEGER NOT NULL
                REFERENCES segments(id) ON DELETE CASCADE,
     model_name TEXT NOT NULL,
-    vector     BLOB NOT NULL,
+    vector     BLOB NOT NULL,                        -- float32, L2-normalised
     UNIQUE (segment_id, model_name)
+    -- no timestamp: re-detection replaces auto segments (new ids), and a manual
+    -- segment's row is deleted when its bounds or parent content change
 );
+
+-- Phase 4 (spec §8): node D. The conceptual similarity vector and the text-
+-- search backbone. Map coordinates never live here (see map_layout, §8).
+CREATE TABLE IF NOT EXISTS embedding (
+    sample_id   INTEGER NOT NULL
+                REFERENCES samples(id) ON DELETE CASCADE,
+    model_name  TEXT NOT NULL,                       -- 'clap' (| 'qwen2audio-latent', §5.3)
+    vector      BLOB NOT NULL,                       -- float32, L2-normalised
+    embedded_at TEXT,                                -- stale when older than
+                                                     -- samples.content_changed_at
+    UNIQUE (sample_id, model_name)
+);
+
+-- Phase 4 (spec §8): MACHINE output only — the raw, regenerable layer. Nodes
+-- X (zero-shot tags) and, later, X1 (captions). Accepting a chip promotes it
+-- into the curated tags/sample_tags layer (Phase 7); these rows are disposable.
+CREATE TABLE IF NOT EXISTS text_tags (
+    id                INTEGER PRIMARY KEY,
+    sample_id         INTEGER NOT NULL
+                      REFERENCES samples(id) ON DELETE CASCADE,
+    tag_or_caption    TEXT NOT NULL,
+    source_model      TEXT NOT NULL,                 -- 'clap-zeroshot' | 'clap-class' |
+                                                     -- 'qwen2audio-caption'
+    score             REAL,                          -- zero-shot: cosine similarity;
+                                                     -- clap-class: softmax confidence
+    is_user_confirmed INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT,
+    UNIQUE (sample_id, source_model, tag_or_caption)
+);
+CREATE INDEX IF NOT EXISTS idx_text_tags_sample ON text_tags(sample_id);
 
 CREATE TABLE IF NOT EXISTS segment_classification (  -- Phase 4; structural_type is fixed
     segment_id        INTEGER NOT NULL UNIQUE
@@ -252,6 +285,7 @@ _MIGRATIONS: dict[int, list] = {
     3: [_migrate_v3],   # v2 -> v3: staleness timestamps + spec §8 classification columns
     4: [_migrate_v4],   # v3 -> v4: segment tables + samples.segments_detected_at
     5: [_migrate_v5],   # v4 -> v5: segments.needs_review
+    6: [],              # v5 -> v6: embedding + text_tags; CREATE IF NOT EXISTS covers it
 }
 
 
