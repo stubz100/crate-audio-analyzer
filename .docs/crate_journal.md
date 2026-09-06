@@ -15,7 +15,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | Phase | Name | Status |
 |---|---|---|
 | 0 | Foundations | ✅ done — `5bef7d8` |
-| 1 | Ingestion & Metadata | 🟡 ready — deps installed, no code yet |
+| 1 | Ingestion & Metadata | ✅ done |
 | 2 | Heuristic Analysis | ⬜ not started |
 | 3 | Transient Segmentation | ⬜ not started |
 | 4 | Embeddings & Classification | ⬜ not started |
@@ -92,3 +92,35 @@ Session-by-session record of what was actually built, decided, and verified — 
 2. `src/crate/db.py` — SQLite schema; `samples` table in its full spec §8 shape.
 3. `src/crate/scanner.py` — node `A`: full-root walk, extension filtering (wav/flac in; `.rx2` skip-and-log; containers skip-and-log), skeleton rows, incremental re-scan via size+mtime diff.
 4. `tests/` — synthetic fixture tree, per §3's "test on a small subset" principle.
+
+## 2026-09-05 — Phase 1 implemented: scanner, schema, CLI
+
+**Phase:** 1 — Ingestion & Metadata ✅ (commit cited below once recorded)
+
+**Done**
+
+- `src/crate/db.py` — `open_db()` + the full spec §8 `samples` schema (all 15 columns created up front; Phase 3's `segment_candidates_found`/`segments_capped`/`effective_sensitivity` start NULL). `filepath` UNIQUE; timestamps ISO-8601 UTC.
+- `src/crate/scanner.py` — node `A` (spec §7): recursive walk, extension filtering (`.wav`/`.flac` in; `.rx2` skip-and-log; everything else skip-and-log by extension), skeleton rows via header-only `sf.info`, incremental diff on `file_size`+`file_mtime`, blake2b content hash computed **only** when size/mtime changed (spec §8), removal scoped to rows under the scanned root, `ScanSummary` as the node-A worklist.
+- `src/crate/cli.py` + `crate-scan` console script — `--root` (default `D:\_soundPacks`), `--db` (default `<cwd>/.crate_cache/crate.db`), `-v`.
+- `tests/test_db.py` + `tests/test_scanner.py` — 12 tests over synthetic fixture trees (real WAV/FLAC written with soundfile): first scan, case-insensitive extensions, no-change re-scan, add/remove, change re-hash, mtime-only change, unreadable header, removal scoped to root, missing root.
+- `pyproject.toml` — pytest added as a dev dependency group; `.pytest_cache/` added to `.gitignore`.
+
+**Decided**
+
+- `folder` stored POSIX-style relative to the scan root (`""` = root level) — keeps later folder-scope matching simple.
+- Unreadable audio header → row kept with NULL metadata, counted as `unreadable` (faithful to "skeleton row per new file" + node B's "failures logged, not fatal"); Phase 12's corrupt-file handling owns these.
+- One DB may hold several roots; a scan only removes rows under its own root prefix, so subset DBs and a full-library DB never clobber each other.
+- Hash algorithm: blake2b, streamed in 1 MiB chunks.
+
+**Verified**
+
+- `uv run pytest tests -v` → **12 passed** in 2.1 s.
+- Real subset: `crate-scan --root "D:\_soundPacks\ModeAudio - Raw Material [WAV]"` → added 322 / 2.8 s, 1 `.pdf` skip-and-logged; second run → unchanged 322 / 0.1 s. Incremental behavior proven against the real library.
+- DB spot-check: rows carry correct metadata (e.g. `Kitchen Appliances\Kettle_Boil02.wav` — 37.5 s, 44.1 kHz, stereo), relative folders, NULL hashes for first-inserted files per spec §8.
+
+**Next** (Phase 2 — Heuristic Analysis)
+
+1. `analysis` table (spec §8) + node `B`/`C`: full decode, descriptor set per §5.1 (amplitude/pitch/timbre/spectrum via librosa; HPSS harmonic ratio as the pitch gate; `yin` default f0).
+2. Tempo/onset/loop-ness incl. the custom `smpl`/ACID chunk reader (spec §10 — real Phase 2 work).
+3. Facet B structural typing inputs (duration/onset count/periodicity) prepared for node `E` in Phase 4.
+4. Run against the ModeAudio subset DB built this session.

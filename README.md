@@ -10,7 +10,7 @@ Not a sampler, drum machine, or plugin — a standalone search engine over `D:\_
 
 ## Status
 
-Phase 0 (foundations) — complete. Next: Phase 1 (ingestion & metadata).
+Phase 1 (ingestion & metadata) — complete. Next: Phase 2 (heuristic analysis).
 
 ## Development
 
