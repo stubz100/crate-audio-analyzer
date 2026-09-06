@@ -18,7 +18,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 1 | Ingestion & Metadata | ✅ done — `58da501` (build) + `46f131e`, `9d5acea` (review fixes) |
 | 2 | Heuristic Analysis | ✅ done — `f650889` (build + review fixes); closed out against 943 real samples, `5e055b2` |
 | 3 | Transient Segmentation | ✅ done — `5e055b2` (nodes S/T, both profiles, settings, segment tables, manual path; validated on 472 real samples). UI for manual markers is Phase 9; lazy render is Phase 4.5/9 |
-| 4 | Embeddings & Classification | ✅ done — `PENDING_H4` (nodes D/C2/X/E on transformers' CLAP; Facet A 68% on 335 labeled files; full index embedded at 0.21 s/sample) |
+| 4 | Embeddings & Classification | ✅ done — `1e1b585` (nodes D/C2/X/E on transformers' CLAP; Facet A 68% on 335 labeled files; full index embedded at 0.21 s/sample) |
 | 4.5 | "Listen and grab" (pull-forward) | ⬜ not started |
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
 | 6 | Map View | ⬜ not started |
@@ -500,7 +500,7 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 ## 2026-09-06 — Phase 4: CLAP embeddings, zero-shot tags, Facet A
 
-**Phase:** 4 ✅ · `PENDING_H4`
+**Phase:** 4 ✅ · `1e1b585`
 
 **Done**
 
