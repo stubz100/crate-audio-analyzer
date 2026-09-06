@@ -1,6 +1,6 @@
 # Sample Library Search & Mapping Tool — Specification
 
-**Status: living spec.** *Last updated: 2026-09-06 (Phase 4: `embedding`/`text_tags` columns in §8, Facet A settings in §9.6, CLAP-via-transformers note in §10).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
+**Status: living spec.** *Last updated: 2026-09-06 (Phase 4.5: lazy render cache location in §6.5; drag-out mechanism note in §11).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
 
 ---
 
@@ -174,7 +174,7 @@ A segment is not a peer entity to a real file — it's a lightweight index recor
 
 ### 6.5 Lazy rendering
 
-Detection and embedding happen in-memory during analysis (cheap, no disk write). Audio is only physically rendered to a small cached WAV (short fade-out) the first time you preview or drag that specific segment — the cache is disposable/LRU-evictable, trivially regenerable from parent + offsets.
+Detection and embedding happen in-memory during analysis (cheap, no disk write). Audio is only physically rendered to a small cached WAV (short fade-out) the first time you preview or drag that specific segment — the cache is disposable/LRU-evictable, trivially regenerable from parent + offsets. *(Implemented, Phase 4.5: `%LOCALAPPDATA%\Crate\cache\segments\seg_<id>.wav`, parent's native rate/channels/PCM subtype, 2 ms fade-in + 20 ms fade-out; `segments.cache_path` is cleared when the markers or the parent's content change. Eviction is still Phase 12.)*
 
 ### 6.6 Scope boundary
 
@@ -439,7 +439,7 @@ Single-process Python for v1 — no C++ or Rust component planned.
 
 Bitwig exposes no public API for injecting tags into its own browser database, so integration stays shallow and robust:
 
-- **Primary: native drag-and-drop.** Real file path handed to the OS on drag (Qt's `CF_HDROP`) — works exactly like dragging from Explorer.
+- **Primary: native drag-and-drop.** Real file path handed to the OS on drag (Qt's `CF_HDROP`) — works exactly like dragging from Explorer. *(Implemented, Phase 4.5: the list models' `mimeData` sets file URLs; a segment is rendered first. Verified offscreen that the mime data carries the right URLs — a real drop into Bitwig is the user's first-run check.)*
 - **Secondary:** reveal-in-Explorer / copy path.
 - **Optional:** crate export to a folder of same-volume hardlinks, so a result set can persist inside Bitwig's own browser if pointed at that folder. Two caveats worth building for rather than discovering: hardlinks only work within one volume, and they silently go stale if the source file is later moved or renamed outside Crate — so exported crates need a dangling-link check when opened.
 - **Explicitly out of scope:** a Bitwig Controller Script or VST3 bridge — a different, riskier engineering surface (Java-based extension API) that drag-and-drop already makes unnecessary for the stated need.

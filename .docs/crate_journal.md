@@ -19,7 +19,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 2 | Heuristic Analysis | ✅ done — `f650889` (build + review fixes); closed out against 943 real samples, `5e055b2` |
 | 3 | Transient Segmentation | ✅ done — `5e055b2` (nodes S/T, both profiles, settings, segment tables, manual path; validated on 472 real samples). UI for manual markers is Phase 9; lazy render is Phase 4.5/9 |
 | 4 | Embeddings & Classification | ✅ done — `1e1b585` (nodes D/C2/X/E on transformers' CLAP; Facet A 68% on 335 labeled files; full index embedded at 0.21 s/sample) |
-| 4.5 | "Listen and grab" (pull-forward) | ⬜ not started |
+| 4.5 | "Listen and grab" (pull-forward) | ✅ done — `PENDING_H45` (sortable/filterable list, segments drill-down, Qt Multimedia preview, lazy segment render, file-URL drag-out) |
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
 | 6 | Map View | ⬜ not started |
 | 7 | List, Search, Filter | ⬜ not started |
@@ -524,7 +524,7 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 ## 2026-09-06 — Quick review after Phase 4
 
-**Phase:** 4 review + fixes · commit cited in the next entry
+**Phase:** 4 review + fixes · `cc55c68`
 
 **Done** — two hypotheses from re-reading `embedding.py`, both probed before fixing:
 
@@ -533,3 +533,30 @@ Directions from the review discussion: (1) frame envelope, then check the number
 - Found by the new tests: the progress log divided by zero in the segments-only path (it counted parents; it now counts visits). The junction test unlinks its junction on the way out.
 
 **Verified** — `uv run pytest tests -q` → **118 passed, 1 skipped**; `crate-embed` on the real index visits 0 samples (nothing orphaned).
+
+## 2026-09-06 — Phase 4.5: "listen and grab"
+
+**Phase:** 4.5 ✅ · `PENDING_H45`
+
+**Done**
+
+- `render.py` — node `J`'s file half (§6.5): a segment becomes a WAV in `%LOCALAPPDATA%\Crate\cache\segments` the first time it is previewed or dragged — parent sliced at its native rate/channels/PCM subtype, 2 ms fade-in, 20 ms fade-out, path remembered on the row; a segment past the end of its file is refused (`needs_review`), one that overruns is clamped.
+- `catalog.py` — the list's read side, no Qt: one row per sample (never per segment, §6.4) with type, class, BPM, key, top-3 chips, hit count and a flag count; per-sample segments; status counts.
+- `listmodel.py` — `SampleTableModel` / `SegmentTableModel`; `mimeData` sets file URLs (→ `CF_HDROP` on Windows), one per row, a segment rendered first; numeric sort role.
+- `main.py` — the window: library path (Phase 0), filter across all columns, sortable sample table, the selected sample's segments underneath, Qt Multimedia preview (play/stop, Space, double-click, auto-play on select persisted in QSettings), drag-out from either table, status bar. `crate --db PATH`. Nothing computes here (§9.6).
+
+**Decided**
+
+- Qt Multimedia over `sounddevice`: no new dependency, plays the same file the drag hands out, and a segment preview therefore goes through the same render as its drag (§6.5 "first time you preview *or* drag").
+- Segments are shown only in the selected sample's drill-down, never in the main list (§6.4); Phase 7 adds the nested sub-hit rows on match.
+- Auto-play on select defaults on — this is an audition tool; the checkbox persists.
+
+**Verified**
+
+- `uv run pytest tests -q` → **130 passed, 1 skipped** (offscreen Qt: model rows/URLs, numeric sort + cross-column filter, segment drag renders first, window loads and drills down; render: native rate/channels/subtype, fades, cache reuse, `force`, edit invalidation, clamping, refusal).
+- Real index offscreen: window up with **943 rows in 0.81 s**, preview device present (Focusrite), a loop selected → 5 segments, segment render + select **77 ms**, filter "kick" → 223 rows.
+- Not verifiable here: an actual drop into Bitwig. The mime data carries the right file URLs; the first real drag is the user's check.
+
+**Next**
+
+- Use it: `uv run crate`, drag a hit into Bitwig. Then Phase 7 (list/search/filter proper, nested sub-hit rows, Attributes tab) completes the first daily-drivable milestone (spec §12); Phase 5's Qwen2-Audio spike can wait behind that.
