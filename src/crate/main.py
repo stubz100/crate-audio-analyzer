@@ -22,10 +22,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .config import DEFAULT_LIBRARY_PATH
+
 ORG_NAME = "Crate"
 APP_NAME = "Crate"
 SETTINGS_KEY_LIBRARY_PATH = "library/root_path"
-DEFAULT_LIBRARY_PATH = r"D:\_soundPacks"
 
 
 class MainWindow(QMainWindow):
