@@ -10,7 +10,13 @@ Not a sampler, drum machine, or plugin — a standalone search engine over `D:\_
 
 ## Status
 
-Phase 1 (ingestion & metadata) — complete. Phase 2 (heuristic analysis) — in progress: descriptor set, structural typing (validated against labeled library folders), `smpl`/ACID reader, stale-analysis flagging. Next: close Phase 2, then Phase 3 (transient segmentation).
+Phases 1–2 (ingestion & metadata, heuristic analysis) — complete, validated against the real library. Phase 3 (transient segmentation) — in progress. Next: Phase 4 (CLAP embeddings & classification).
+
+```bash
+crate-scan      # index a library root (incremental)
+crate-analyze   # descriptors, tempo/loop-ness, structural type
+crate-segment   # find one-shot hits buried inside longer samples
+```
 
 ## Development
 

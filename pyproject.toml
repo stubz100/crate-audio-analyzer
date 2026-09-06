@@ -39,6 +39,7 @@ map = [
 crate = "crate.main:main"
 crate-scan = "crate.cli:scan_main"
 crate-analyze = "crate.cli:analyze_main"
+crate-segment = "crate.cli:segment_main"
 
 [dependency-groups]
 dev = [

@@ -16,8 +16,8 @@ Session-by-session record of what was actually built, decided, and verified — 
 |---|---|---|
 | 0 | Foundations | ✅ done — `5bef7d8` |
 | 1 | Ingestion & Metadata | ✅ done — `58da501` (build) + `46f131e`, `9d5acea` (review fixes) |
-| 2 | Heuristic Analysis | 🚧 in progress — nodes B/C, descriptors, Facet B (tuned on 500 labeled library files), smpl/ACID reader, stale-analysis flagging, one-shot cap setting — `f650889`. Remaining before ✅: real-DB run + loop-pack review |
-| 3 | Transient Segmentation | ⬜ not started |
+| 2 | Heuristic Analysis | ✅ done — `f650889` (build + review fixes); closed out against 943 real samples, `PENDING_H` |
+| 3 | Transient Segmentation | ✅ done — `PENDING_H` (nodes S/T, both profiles, settings, segment tables, manual path; validated on 472 real samples). UI for manual markers is Phase 9; lazy render is Phase 4.5/9 |
 | 4 | Embeddings & Classification | ⬜ not started |
 | 4.5 | "Listen and grab" (pull-forward) | ⬜ not started |
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
@@ -365,3 +365,52 @@ Directions from the review discussion: (1) frame envelope, then check the number
 - Repository metadata after the push: public, default branch `master`.
 
 **Next** — unchanged: close out Phase 2 (real-DB run + loop-pack review), then Phase 3.
+
+## 2026-09-06 — Phase 2 closed out; Phase 3 built (transient segmentation)
+
+**Phase:** 2 ✅ + 3 ✅ · `PENDING_H`
+
+**Done — Phase 2 close-out** (the run the previous entry listed as remaining)
+
+- Scanned two roots into the real index (`.crate_cache/crate.db`, migrated v1 → v3 in place, 322 rows preserved): the ModeAudio foley pack (322) and `AUDIOMODERN_SHIFT2_AM036` (621), then analysed all **943** files — 0 failures, 247.8 s (0.26 s/file).
+- Facet B against folder-name ground truth in the drum pack:
+
+  | folder | n | loop | multi-hit | one-shot |
+  |---|---|---|---|---|
+  | Main Loops | 49 | 49 | 0 | 0 |
+  | Loop Elements | 295 | 291 | 4 | 0 |
+  | Foley Only Loops | 22 | 22 | 0 | 0 |
+  | Percussive One Shot Samples | 205 | 0 | 25 | 180 |
+  | Percussive Foley One Shots | 50 | 0 | 17 | 33 |
+  | ModeAudio (all foley one-shots) | 322 | 0 | 64 | 258 |
+
+  **98.9% loop recall (362/366), zero false loops in 577 one-shot files.** Tempo policy held exactly: 362 loops all carry a tempo, no non-loop does. Caveat: 200 of the 621 drum-pack files were in the 500-file tuning set, so this is only partly held out; ModeAudio's 322 and 421 of the pack's files were unseen.
+- Neither pack carries ACID or `smpl` chunks, so every loop here was found acoustically or by the filename-BPM tier — `key` stayed NULL across all 943, as designed.
+
+**Done — Phase 3** (spec §6, nodes `S` + `T`)
+
+- `db.py` **schema v4**: `segments`, `segment_analysis`, `segment_embedding` (Phase 4), `segment_classification` (Phase 4), plus `samples.segments_detected_at`. `ON DELETE CASCADE` throughout, `UNIQUE (sample_id, start_ms, end_ms, detection_method)`, `CHECK (end_ms > start_ms)`.
+- `segmentation.py`: node `S` gate (delegates to Facet B's own one-shot test, so gate and taxonomy cannot drift), both §6.2 profiles, all four controls, the cap with its warning, manual create/edit/delete, and node `C2`'s descriptor half.
+- `analysis.py` refactor: descriptor work extracted into `describe_buffer()` / `CoreDescriptors`, so `analysis` and `segment_analysis` are filled by one function and cannot drift. `analyze_file` is now decode + metadata + loop decision on top of it. All 60 Phase 2 tests passed unchanged across the refactor.
+- `crate-segment` CLI exposing every §9.6 setting.
+
+**Decided**
+
+- **Backtracking is bounded to ~46 ms and applies to the tight profile only.** Unbounded, it reached **128 ms** back — far enough to pull the previous hit's tail into the segment. The loose profile's windowed-RMS envelope already rises before the attack, so backtracking it as well only dragged starts earlier.
+- **`smpl`-style short windows are zero-padded for transform descriptors** (HPSS included), so a 10 ms manual segment cannot blow up MFCC/contrast. Amplitude descriptors still use the true buffer.
+- **Per-segment descriptors ship in Phase 3, embeddings do not.** `segment_analysis` is a Phase 3 table (spec §12 "segments+segment_* tables") and filling it needs only Phase 2 machinery; `segment_embedding` and `segment_classification` stay empty for Phase 4, which owns CLAP and Facet A.
+- **Editing any segment makes it manual and protected** (§6.3 covers "create or adjust"), and drops its cached render since the bounds it was rendered from no longer hold.
+- **The 5-segment cap default is left as spec'd.** It binds on 285 of 362 loops, but that is the material, not the detector: loops average 24 candidate transients and reach 128 (16th notes across 32 beats). §6.6 is explicit that this is findability, not slicing — the 5 strongest hits per loop is the intent, and the parent is flagged so the UI can say so.
+
+**Verified**
+
+- `uv run pytest tests -q` → **85 passed** (60 Phase 2 + 25 new), ~8 s.
+- Real run: `crate-segment` over all **472** candidates → **1913 segments**, 0 failures, 191.5 s (0.39 s/sample). Every segment has descriptors; `tempo_bpm` NULL on all 1913 (a segment is a one-shot by construction).
+- Integrity: 0 segments out of parent bounds, 0 inverted, 0 strengths outside 0..1, 0 violations of the 50 ms / 2000 ms length rules (min 69 ms, median 348 ms, max exactly 2000).
+- Musical sanity: for the 354 loops with a derived tempo, mean 16th-note grid fit **0.86**, and **78%** score ≥ 0.8. (The metric is unreliable below ~4 cuts, which is what the handful of 0.00 scores are.)
+- Node `S` verified to skip one-shots, staleness verified to re-detect after a content change, and a second `crate-segment` run over the same index does nothing (0 samples, 0.0 s).
+
+**Next**
+
+1. Phase 4 — Embeddings & Classification: CLAP for samples and segments (`ml` extra: torch, transformers, laion-clap), node `E` for Facet A, filling `segment_embedding`/`segment_classification`. This is the first phase with a real model download and the ~25–40 h full-library cost §3 warns about, so time a subset before committing to a library-wide run.
+2. Revisit `--max-segments` and `--sensitivity` once segments are auditionable (Phase 4.5) — that is the first point where the tuning pass §13 risk #1 calls for can be judged by ear rather than by number.

@@ -80,6 +80,8 @@ _ENV_FRAME = 512             # amplitude envelope: RMS over 23 ms windows ...
 _ENV_HOP = 64                # ... every 2.9 ms, so attack times resolve to ~3 ms
 _SILENCE_FLOOR_DB = -120.0   # reported instead of -inf for digital silence
 ENVELOPE_THRESHOLD = 0.1     # -20 dB relative to the peak (attack start / decay end)
+_MIN_SPECTRAL_SAMPLES = 2048  # librosa's default n_fft; short segment windows are
+                              # zero-padded up to it for the transform descriptors
 
 # Pitch gate (§5.1): below this harmonic-energy share, pitch is meaningless on
 # percussive/noise content, so yin is skipped entirely.
@@ -365,39 +367,70 @@ def _pitch(y: np.ndarray, sr: int) -> tuple[float | None, float | None]:
 # --- node B + C ---------------------------------------------------------------------
 
 
-def analyze_file(path: Path | str) -> Descriptors | None:
-    """Nodes `B` + `C` for one file. Returns None if it cannot be decoded."""
+@dataclass
+class CoreDescriptors:
+    """Everything derivable from a bare audio buffer, with no file context.
+
+    `analysis` and `segment_analysis` are both filled from this — spec §8 makes
+    the segment table a mirror of the sample one minus the file-level columns
+    (`is_loop`, `key`, `embedded_metadata_json`), so computing both from one
+    function is what stops the two from drifting apart.
+
+    `onsets`/`bpm_candidates` are working values for the caller's loop
+    decision, not stored columns.
+    """
+
+    onsets: list[float] = field(default_factory=list)
+    bpm_candidates: list[float] = field(default_factory=list)
+    onset_count: int = 0
+    tempo_confidence: float | None = None
+    harmonic_ratio: float | None = None
+    peak_db: float | None = None
+    rms_db: float | None = None
+    crest_factor: float | None = None
+    attack_ms: float | None = None
+    decay_ms: float | None = None
+    f0_hz: float | None = None
+    pitch_confidence: float | None = None
+    mfcc_mean: str | None = None
+    mfcc_var: str | None = None
+    spectral_contrast: str | None = None
+    spectral_centroid: float | None = None
+    spectral_bandwidth: float | None = None
+    spectral_rolloff: float | None = None
+    spectral_flatness: float | None = None
+
+
+def describe_buffer(y: np.ndarray, sr: int = ANALYSIS_SR) -> CoreDescriptors:
+    """Node `C`'s descriptor work on one buffer — a whole file, or a segment
+    window (node `C2`, spec §7). Never touches the filesystem."""
     import librosa
 
-    path = Path(path)
-    try:
-        y, sr = librosa.load(str(path), sr=ANALYSIS_SR, mono=True)
-    except Exception as exc:  # decode failures are logged, not fatal (§7 node B)
-        log.debug("decode failed: %s (%s: %s)", path, type(exc).__name__, exc)
-        return None
-
-    d = Descriptors()
-
-    embedded = read_embedded_metadata(path) or {}
-    if embedded:
-        d.embedded_metadata_json = json.dumps(embedded, separators=(",", ":"))
-    d.key = _embedded_key(embedded)
-
+    c = CoreDescriptors()
     if y.size == 0:
-        d.peak_db = d.rms_db = _SILENCE_FLOOR_DB
-        return d
-    duration_s = y.size / sr
+        c.peak_db = c.rms_db = _SILENCE_FLOOR_DB
+        return c
+
+    # A segment window can be shorter than one FFT frame. Zero-pad a working
+    # copy for every transform-based descriptor (HPSS included) so they are
+    # well defined; the amplitude descriptors below still use the true buffer.
+    # Padding at the tail leaves onset times unchanged.
+    y_spec = (
+        y
+        if y.size >= _MIN_SPECTRAL_SAMPLES
+        else np.pad(y, (0, _MIN_SPECTRAL_SAMPLES - y.size))
+    )
 
     # --- Harmonic / percussive split (§5.1 pitch gate; also the onset source) ---
     try:
-        harmonic, percussive = librosa.effects.hpss(y)
+        harmonic, percussive = librosa.effects.hpss(y_spec)
         h_energy = float(np.sum(np.square(harmonic, dtype=np.float64)))
         p_energy = float(np.sum(np.square(percussive, dtype=np.float64)))
         total = h_energy + p_energy
-        d.harmonic_ratio = float(h_energy / total) if total > 0 else None
+        c.harmonic_ratio = float(h_energy / total) if total > 0 else None
     except Exception:  # pragma: no cover - librosa edge cases
-        d.harmonic_ratio = None
-        percussive = y
+        c.harmonic_ratio = None
+        percussive = y_spec
 
     # --- Amplitude envelope, onsets, periodicity, tempo candidates ---
     rms_env = _rms_envelope(y)
@@ -405,14 +438,13 @@ def analyze_file(path: Path | str) -> Descriptors | None:
     padded_env = librosa.onset.onset_strength(
         y=np.concatenate([lead_in, percussive]), sr=sr, hop_length=_HOP, **_SUPERFLUX
     )
-    onsets = _dominant_onsets(padded_env, sr, rms_env, _ONSET_LEAD_IN_FRAMES)
-    d.onset_count = len(onsets)
+    c.onsets = _dominant_onsets(padded_env, sr, rms_env, _ONSET_LEAD_IN_FRAMES)
+    c.onset_count = len(c.onsets)
     onset_env = padded_env[_ONSET_LEAD_IN_FRAMES:]
     confidence, ac_bpm = _periodicity(onset_env, sr)
-    d.tempo_confidence = confidence
-    bpm_candidates: list[float] = []
+    c.tempo_confidence = confidence
     if ac_bpm:
-        bpm_candidates.append(ac_bpm)
+        c.bpm_candidates.append(ac_bpm)
     if confidence:
         try:
             tempo, _beats = librosa.beat.beat_track(
@@ -420,45 +452,92 @@ def analyze_file(path: Path | str) -> Descriptors | None:
             )
             bt_bpm = float(np.atleast_1d(tempo)[0])
             if bt_bpm > 0:
-                bpm_candidates.append(bt_bpm)
+                c.bpm_candidates.append(bt_bpm)
         except Exception:  # pragma: no cover - librosa edge cases
             pass
 
     # --- Amplitude (§5.1) ---
     peak = float(np.max(np.abs(y)))
     rms = float(np.sqrt(np.mean(np.square(y, dtype=np.float64))))
-    d.peak_db, d.rms_db = _db_scale(peak), _db_scale(rms)
-    d.crest_factor = float(peak / rms) if rms > 0 else None
-    d.attack_ms, d.decay_ms = _envelope_times(
-        y, sr, onsets[0] if onsets else None, env=rms_env
+    c.peak_db, c.rms_db = _db_scale(peak), _db_scale(rms)
+    c.crest_factor = float(peak / rms) if rms > 0 else None
+    c.attack_ms, c.decay_ms = _envelope_times(
+        y, sr, c.onsets[0] if c.onsets else None, env=rms_env
     )
 
     # --- Timbre / spectrum (§5.1) ---
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=N_MFCC, hop_length=_HOP)
-    d.mfcc_mean = _json_vector(mfcc.mean(axis=1))
-    d.mfcc_var = _json_vector(mfcc.var(axis=1))
-    contrast = librosa.feature.spectral_contrast(y=y, sr=sr, hop_length=_HOP)
-    d.spectral_contrast = _json_vector(contrast.mean(axis=1))
-    d.spectral_centroid = float(
-        librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=_HOP).mean()
+    mfcc = librosa.feature.mfcc(y=y_spec, sr=sr, n_mfcc=N_MFCC, hop_length=_HOP)
+    c.mfcc_mean = _json_vector(mfcc.mean(axis=1))
+    c.mfcc_var = _json_vector(mfcc.var(axis=1))
+    contrast = librosa.feature.spectral_contrast(y=y_spec, sr=sr, hop_length=_HOP)
+    c.spectral_contrast = _json_vector(contrast.mean(axis=1))
+    c.spectral_centroid = float(
+        librosa.feature.spectral_centroid(y=y_spec, sr=sr, hop_length=_HOP).mean()
     )
-    d.spectral_bandwidth = float(
-        librosa.feature.spectral_bandwidth(y=y, sr=sr, hop_length=_HOP).mean()
+    c.spectral_bandwidth = float(
+        librosa.feature.spectral_bandwidth(y=y_spec, sr=sr, hop_length=_HOP).mean()
     )
-    d.spectral_rolloff = float(
-        librosa.feature.spectral_rolloff(y=y, sr=sr, hop_length=_HOP).mean()
+    c.spectral_rolloff = float(
+        librosa.feature.spectral_rolloff(y=y_spec, sr=sr, hop_length=_HOP).mean()
     )
-    d.spectral_flatness = float(
-        librosa.feature.spectral_flatness(y=y, hop_length=_HOP).mean()
+    c.spectral_flatness = float(
+        librosa.feature.spectral_flatness(y=y_spec, hop_length=_HOP).mean()
     )
 
     # --- Pitch, gated on the HPSS harmonic share (§5.1) ---
-    if d.harmonic_ratio is not None and d.harmonic_ratio >= PITCH_GATE_HARMONIC_RATIO:
-        d.f0_hz, d.pitch_confidence = _pitch(y, sr)
+    if c.harmonic_ratio is not None and c.harmonic_ratio >= PITCH_GATE_HARMONIC_RATIO:
+        c.f0_hz, c.pitch_confidence = _pitch(y, sr)
+    return c
+
+
+_SHARED_DESCRIPTOR_FIELDS = (
+    "onset_count", "tempo_confidence", "harmonic_ratio",
+    "peak_db", "rms_db", "crest_factor", "attack_ms", "decay_ms",
+    "f0_hz", "pitch_confidence", "mfcc_mean", "mfcc_var", "spectral_contrast",
+    "spectral_centroid", "spectral_bandwidth", "spectral_rolloff", "spectral_flatness",
+)
+
+
+def load_audio(path: Path | str) -> tuple[np.ndarray, int] | None:
+    """Node `B`: decode to ANALYSIS_SR mono. None if it cannot be decoded
+    (logged, not fatal — spec §7 node B)."""
+    import librosa
+
+    try:
+        return librosa.load(str(path), sr=ANALYSIS_SR, mono=True)
+    except Exception as exc:
+        log.debug("decode failed: %s (%s: %s)", path, type(exc).__name__, exc)
+        return None
+
+
+def analyze_file(path: Path | str) -> Descriptors | None:
+    """Nodes `B` + `C` for one file. Returns None if it cannot be decoded."""
+    path = Path(path)
+    loaded = load_audio(path)
+    if loaded is None:
+        return None
+    y, sr = loaded
+
+    d = Descriptors()
+    embedded = read_embedded_metadata(path) or {}
+    if embedded:
+        d.embedded_metadata_json = json.dumps(embedded, separators=(",", ":"))
+    d.key = _embedded_key(embedded)
+
+    core = describe_buffer(y, sr)
+    for name in _SHARED_DESCRIPTOR_FIELDS:
+        setattr(d, name, getattr(core, name))
+    if y.size == 0:
+        return d
 
     # --- Loop-ness and tempo (metadata outranks the estimate, §7 node C) ---
     is_loop, tempo_bpm = _loop_decision(
-        d, duration_s, embedded, bpm_candidates, onsets=onsets, filename=path.name
+        d,
+        y.size / sr,
+        embedded,
+        core.bpm_candidates,
+        onsets=core.onsets,
+        filename=path.name,
     )
     d.is_loop = int(is_loop)
     d.tempo_bpm = tempo_bpm

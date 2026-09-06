@@ -1,6 +1,6 @@
 # Sample Library Search & Mapping Tool — Specification
 
-**Status: living spec.** *Last updated: 2026-09-06 (Phase 2 review: staleness flag + Rescan action in §8/§9.6, explicit `classification` columns, tempo-for-loops-only).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
+**Status: living spec.** *Last updated: 2026-09-06 (Phase 3: segment tables + `samples.segments_detected_at` in §8; detection notes in §6.2).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
 
 ---
 
@@ -151,6 +151,7 @@ Runs for anything not already a clean single-hit one-shot, fully configurable (�
 - **Transient sensitivity**: configurable threshold for how strong a transient must be to count as a candidate at all.
 - **Boundary mode** — *how a segment ends*, orthogonal to the profile above: **transient-to-transient** (stop at the next onset, breakbeat-chop style) or **transient-to-fixed-length** (extend a fixed duration regardless of internal sub-transients, for gestures that should stay whole). Default: transient-to-transient. In fixed-length mode, the fixed duration reuses the **max segment length** setting.
 - **Length constraints** (auto-detection only): configurable min/max length (seconds or % of parent duration). Too-short → **dropped** (noise). Too-long → **truncated at the max**, not dropped — an obvious transient still yields a segment.
+- *Implementation notes (Phase 3):* the tight profile is superflux spectral flux on the HPSS percussive component, the loose profile is half-wave-rectified energy flux on the full mix plus onset merging. Tight cut points are **backtracked** to the preceding energy minimum so a segment does not clip its own attack, bounded to ~46 ms of look-back — an unbounded backtrack was measured reaching 128 ms, far enough to swallow the previous hit's tail. The loose envelope already rises before the attack, so it is not backtracked.
 - **Per-sample cap** (auto-detection only): **5 segments per sample** (adjustable). When candidates exceed the cap, the **strongest transients win**; if the cap actually binds, the sample is flagged with a visible "capped" warning (effective sensitivity was raised to fit) rather than a silent drop.
 
 ### 6.3 Manual segments — exempt from every automatic constraint
@@ -248,7 +249,11 @@ samples                                             -- real files only
                                 -- (never on a hash-identical retouch). Any derived row whose own
                                 -- timestamp is older than this is STALE — flagged, never
                                 -- auto-recomputed (§9.6 "Rescan library")
-  segment_candidates_found, segments_capped, effective_sensitivity
+  segment_candidates_found,     -- segments proposed after the length rules, BEFORE the cap;
+                                -- NULL = never segmented, which is what makes "segmented and
+                                -- found nothing" distinguishable from "not yet segmented"
+  segments_capped, effective_sensitivity,
+  segments_detected_at          -- stale when older than content_changed_at (same rule as analysis)
 
 analysis                                            -- samples only
   sample_id (FK), analyzed_at,  -- stale when older than samples.content_changed_at
@@ -300,7 +305,11 @@ segments                                            -- the index records
   id, sample_id (FK, NOT NULL), start_ms, end_ms,
   detection_method ('auto' | 'manual'),
   is_user_confirmed (bool),                         -- true once manually saved; protects from auto-overwrite
+  strength,                                         -- onset strength as a fraction of the parent's
+                                                    -- strongest; the cap's strongest-first tie-break
+  detected_at,                                      -- stale when older than the parent's content_changed_at
   cache_path, cache_rendered_at
+  -- UNIQUE (sample_id, start_ms, end_ms, detection_method); ON DELETE CASCADE from samples
 
 segment_analysis          -- mirrors `analysis`, segment-scoped (no is_loop/key/embedded_metadata_json)
   segment_id (FK), tempo_bpm, onset_count, harmonic_ratio,

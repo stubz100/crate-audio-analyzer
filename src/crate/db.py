@@ -19,12 +19,14 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # v1 = Phase 1: `samples`
 # v2 = Phase 2: `analysis` + `classification`
 # v3 = Phase 2 review: staleness timestamps (`samples.content_changed_at`,
 #      `analysis.analyzed_at`); `classification` columns aligned with spec §8's
 #      mirror table (`content_class`, `structural_type`, `confidence`)
+# v4 = Phase 3: `segments` + `segment_analysis` / `segment_embedding` /
+#      `segment_classification` (spec §6, §8)
 
 
 def now_iso() -> str:
@@ -65,9 +67,18 @@ CREATE TABLE IF NOT EXISTS samples (              -- audio files only (spec §8)
                                                    -- this content (insert or genuine change,
                                                    -- never a hash-identical retouch). Derived
                                                    -- rows older than this are STALE (v3)
-    segment_candidates_found INTEGER,              -- Phase 3
-    segments_capped          INTEGER,              -- Phase 3
-    effective_sensitivity    REAL                  -- Phase 3
+    segment_candidates_found INTEGER,              -- Phase 3: segments the detector proposed
+                                                   -- after the length rules, before the cap;
+                                                   -- NULL = never segmented
+    segments_capped          INTEGER,              -- Phase 3: 1 when the cap actually bound,
+                                                   -- so the UI can show the §6.2 warning
+    effective_sensitivity    REAL,                 -- Phase 3: strength of the weakest KEPT
+                                                   -- transient when capped (§6.2 "sensitivity
+                                                   -- was raised to fit")
+    segments_detected_at     TEXT                  -- Phase 3: ISO-8601 UTC; stale when older
+                                                   -- than content_changed_at. Separate from the
+                                                   -- counters because a sample can legitimately
+                                                   -- be segmented and yield zero segments
 );
 
 CREATE TABLE IF NOT EXISTS analysis (              -- samples only (spec §8), Phase 2
@@ -118,6 +129,71 @@ CREATE TABLE IF NOT EXISTS classification (        -- samples only (spec §8), P
     source_model      TEXT,
     is_user_confirmed INTEGER NOT NULL DEFAULT 0   -- protection flag (spec §11)
 );
+
+-- Phase 3 (spec §6): a segment is an INDEX INTO a sample — a start/end marker
+-- pair — never a row in `samples`. Every sample-facing query (map, list,
+-- filters) can ignore these tables entirely (§6.4).
+CREATE TABLE IF NOT EXISTS segments (
+    id                INTEGER PRIMARY KEY,
+    sample_id         INTEGER NOT NULL
+                      REFERENCES samples(id) ON DELETE CASCADE,
+    start_ms          INTEGER NOT NULL,
+    end_ms            INTEGER NOT NULL,
+    detection_method  TEXT NOT NULL DEFAULT 'auto',   -- 'auto' | 'manual' (§6.2/§6.3)
+    is_user_confirmed INTEGER NOT NULL DEFAULT 0,     -- manual save; blocks auto overwrite (§6.3)
+    strength          REAL,                           -- onset strength, 0..1 of the strongest in
+                                                      -- the parent; the cap's tie-break (§6.2)
+    detected_at       TEXT,                           -- ISO-8601 UTC; stale when older than
+                                                      -- samples.content_changed_at
+    cache_path        TEXT,                           -- lazy render target (§6.5) — Phase 4.5/9
+    cache_rendered_at TEXT,
+    UNIQUE (sample_id, start_ms, end_ms, detection_method),
+    CHECK (end_ms > start_ms),
+    CHECK (detection_method IN ('auto', 'manual'))
+);
+CREATE INDEX IF NOT EXISTS idx_segments_sample ON segments(sample_id);
+
+-- Mirrors `analysis`, segment-scoped: no is_loop/key/embedded_metadata_json
+-- (a segment has no metadata chunk and is a one-shot by construction, §6.4).
+CREATE TABLE IF NOT EXISTS segment_analysis (
+    segment_id         INTEGER NOT NULL UNIQUE
+                       REFERENCES segments(id) ON DELETE CASCADE,
+    analyzed_at        TEXT,
+    tempo_bpm          REAL,
+    onset_count        INTEGER,
+    harmonic_ratio     REAL,
+    peak_db            REAL,
+    rms_db             REAL,
+    crest_factor       REAL,
+    attack_ms          REAL,
+    decay_ms           REAL,
+    f0_hz              REAL,
+    pitch_confidence   REAL,
+    mfcc_mean          TEXT,                          -- JSON array[13]
+    mfcc_var           TEXT,                          -- JSON array[13]
+    spectral_contrast  TEXT,                          -- JSON array[7]
+    spectral_centroid  REAL,
+    spectral_bandwidth REAL,
+    spectral_rolloff   REAL,
+    spectral_flatness  REAL
+);
+
+CREATE TABLE IF NOT EXISTS segment_embedding (       -- Phase 4 (CLAP, windowed)
+    segment_id INTEGER NOT NULL
+               REFERENCES segments(id) ON DELETE CASCADE,
+    model_name TEXT NOT NULL,
+    vector     BLOB NOT NULL,
+    UNIQUE (segment_id, model_name)
+);
+
+CREATE TABLE IF NOT EXISTS segment_classification (  -- Phase 4; structural_type is fixed
+    segment_id        INTEGER NOT NULL UNIQUE
+                      REFERENCES segments(id) ON DELETE CASCADE,
+    content_class     TEXT,                          -- copied from the parent (§6.4)
+    structural_type   TEXT NOT NULL DEFAULT 'one-shot',
+    confidence        REAL,
+    is_user_confirmed INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -155,9 +231,16 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
     _add_column(conn, "classification", "confidence", "REAL")
 
 
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    # The segment tables themselves are new, so SCHEMA's CREATE IF NOT EXISTS
+    # covers them; only the parent-side timestamp needs an ALTER.
+    _add_column(conn, "samples", "segments_detected_at", "TEXT")
+
+
 _MIGRATIONS: dict[int, list] = {
     2: [],              # v1 -> v2: new tables only; SCHEMA's CREATE IF NOT EXISTS covers it
     3: [_migrate_v3],   # v2 -> v3: staleness timestamps + spec §8 classification columns
+    4: [_migrate_v4],   # v3 -> v4: segment tables + samples.segments_detected_at
 }
 
 
