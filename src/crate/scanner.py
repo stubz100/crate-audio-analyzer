@@ -65,14 +65,19 @@ class ScanSummary:
     skipped_rx2: int = 0
     skipped_other: dict[str, int] = field(default_factory=dict)
     error_samples: list[str] = field(default_factory=list)
+    stopped: bool = False  # stopped by request mid-walk: nothing was written
     elapsed_s: float = 0.0
 
     def format(self) -> str:
-        lines = [
-            f"root: {self.root}",
+        lines = [f"root: {self.root}"]
+        if self.stopped:
+            lines.append("stopped by request before the walk finished: nothing was written")
+            lines.append(f"elapsed: {self.elapsed_s:.1f}s")
+            return "\n".join(lines)
+        lines.append(
             f"added {self.added} | changed {self.changed} | "
-            f"unchanged {self.unchanged} | moved {self.moved} | removed {self.removed}",
-        ]
+            f"unchanged {self.unchanged} | moved {self.moved} | removed {self.removed}"
+        )
         if self.unreadable:
             lines.append(
                 f"unreadable headers: {self.unreadable} (rows kept with NULL metadata)"
@@ -278,8 +283,16 @@ def _walk_files(
                 on_error(entry.path, exc, True)
 
 
-def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
+def scan_library(
+    conn: sqlite3.Connection,
+    root: Path | str,
+    should_stop: Callable[[], bool] | None = None,
+) -> ScanSummary:
     """Run node `A` over `root` against the DB on `conn`. Returns a summary.
+
+    `should_stop` is polled once per file (the GUI's Stop button, §9.6). A
+    stopped scan writes **nothing**: removals need the whole walk to be
+    trustworthy, so a partial one must not touch the index.
 
     Inserts skeleton rows for new files, refreshes `last_scanned_at`/`folder`
     for unchanged ones, demotes hash-identical ones (content unchanged even
@@ -322,6 +335,11 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
             failed_dirs.append(os.path.join(path_str, ""))
 
     for entry, rel_folder in _walk_files(root, _on_walk_error):
+        if should_stop is not None and should_stop():
+            summary.stopped = True
+            summary.elapsed_s = time.perf_counter() - started
+            log.info("scan stopped by request: nothing written")
+            return summary
         name = entry.name
         ext = os.path.splitext(name)[1].lower()
         if ext not in SUPPORTED_EXTS:

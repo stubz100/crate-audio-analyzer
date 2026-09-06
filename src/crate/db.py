@@ -32,6 +32,31 @@ SCHEMA_VERSION = 6
 # v6 = Phase 4: `embedding` + `text_tags` (spec §8; nodes D, X, E)
 
 
+def scope_clause(
+    scope: Iterable[str] | None, column: str = "s.filepath"
+) -> tuple[str, list[str]]:
+    """SQL restricting `column` (an absolute file path) to files under any
+    folder in `scope` — the §9.6 folder-scope list that gates the expensive
+    stages. No scope means no restriction (the CLI's behaviour), so this
+    returns `("", [])`; otherwise an ` AND (...)` fragment plus its
+    parameters, to append to a WHERE clause.
+
+    Folders are resolved the way the scanner resolves its root, so a folder
+    picked in a dialog matches what the scanner stored. `!` is the LIKE
+    escape character because a backslash is every Windows path separator.
+    """
+    folders = [f for f in (scope or ()) if f]
+    if not folders:
+        return "", []
+    params: list[str] = []
+    for folder in folders:
+        prefix = os.path.join(str(Path(folder).resolve()), "")
+        escaped = prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        params.append(escaped + "%")
+    clause = " OR ".join(f"{column} LIKE ? ESCAPE '!'" for _ in params)
+    return f" AND ({clause})", params
+
+
 def now_iso() -> str:
     """Current UTC time as ISO-8601 with microseconds — the shared timestamp
     format for every table, so string comparison orders correctly."""

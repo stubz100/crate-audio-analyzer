@@ -10,7 +10,7 @@ Not a sampler, drum machine, or plugin — a standalone search engine over `D:\_
 
 ## Status
 
-Phases 1–3 (ingestion & metadata, heuristic analysis, transient segmentation) — complete, validated against the real library. Phase 4 (CLAP embeddings & classification) and Phase 4.5 ("listen and grab": sortable list, preview, drag into Bitwig) — complete. Next: Phase 7 (list, search, filter) for the first daily-drivable milestone.
+Phases 1–3 (ingestion & metadata, heuristic analysis, transient segmentation) — complete, validated against the real library. Phase 4 (CLAP embeddings & classification) and Phase 4.5 ("listen and grab": sortable list, preview, drag into Bitwig) — complete. Phase 8's Recompute tab (rescan, folder scope, recompute attributes with its settings, stop, log) is in the window, so an index can be built without the CLI. Next: Phase 7 (list, search, filter) for the first daily-drivable milestone.
 
 ```bash
 uv sync --extra ml   # Phase 4 onwards: torch + transformers (CLAP downloads on first use, ~600 MB)
@@ -18,8 +18,11 @@ crate-scan      # index a library root (incremental; moves keep their rows)
 crate-analyze   # descriptors, tempo/loop-ness, structural type
 crate-segment   # find one-shot hits buried inside longer samples
 crate-embed     # CLAP vectors, zero-shot tag chips, content class
-crate           # the window: filter, sort, preview, drag a sample or a buried hit into Bitwig
+crate           # the window: filter, sort, preview, drag a sample or a buried hit into Bitwig;
+                # Recompute tab = Rescan library, folder scope, Recompute attributes (§9.6)
 ```
+
+First run, in the window: Browse to the library root → **Rescan library** → add a folder to the **Library scope** (or *Add root*) → **Recompute attributes**. Nothing runs until you press a button; **Stop** ends the current stage after its current file and keeps everything committed so far.
 
 ## Development
 

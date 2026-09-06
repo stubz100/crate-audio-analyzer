@@ -1,6 +1,6 @@
 # Sample Library Search & Mapping Tool — Specification
 
-**Status: living spec.** *Last updated: 2026-09-06 (Phase 4.5: lazy render cache location in §6.5; drag-out mechanism note in §11).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
+**Status: living spec.** *Last updated: 2026-09-06 (Phase 8 pulled forward: §9.6 implementation note, §12 Phase 8 line).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
 
 ---
 
@@ -67,6 +67,8 @@ Two mitigations follow directly from this, both in §9.6's settings:
 This is the concrete justification for §9.6's whole design: nothing expensive ever targets "everything" by accident.
 
 *Measured, Phase 4 (2026-09-06):* CLAP on this CPU runs at **0.05 s per 10-second clip** batched, and a full index pass came to **0.21 s per sample including its segments** (943 samples + 1,429 segment windows in 196 s, with a second model run competing for the CPU). Extrapolated: **~6.5 h for the 110k-file library with segments**, not 25–40 h — the estimate above was an order of magnitude pessimistic for CLAP. Heuristic analysis (0.26 s/file) and segmentation (0.39 s/candidate) are now the comparable costs.
+
+*Measured again on a foley/ambience mix (2026-09-06, the 3,956-file Krotos starter library, median 1.25 s but with drones up to 16 min):* scan 45 s; analysis 815 s (0.21 s/file — the long ambiences dominate); segmentation 187 s; CLAP 506 s for 3,956 samples + 5,512 segment windows. **0.38 s/file all-in, ≈ 12 h extrapolated to the full library** for content like this, roughly double the drum-pack figure above. Both numbers bracket the real cost; the folder-scope list (§9.6) is what keeps either from being paid by accident.
 
 ---
 
@@ -396,6 +398,8 @@ Policy: **no map layout, ranking, or attribute recomputation ever runs automatic
 
 **Folder-scope list** (new, directly motivated by §3's real scale): a persistent, editable list of folders under `D:\_soundPacks` that defines what "library scope" actually covers for the actions above — **add folders to build up the scope**; there's no implicit "everything" default. To run against the true full library, add the root folder itself. The file scanner (`A`) still walks the entire root regardless, populating cheap skeleton `samples` rows (filepath/hash/duration) for all ~110,000 files — only the *expensive* steps (`C` onward) are gated by this list. This is what makes "all testing on a much smaller subset" (§3) practical: build the scope up folder-by-folder as confidence in the settings grows, rather than an all-or-nothing switch against a 340GB library.
 
+*(Implemented 2026-09-06 — Phase 8 pulled forward to right after 4.5, because a window that only reads an index the CLI built is not usable on its own: **Rescan library**, the **folder-scope list** (persisted; empty scope refused, the root itself = whole library), **Recompute attributes** under library scope with both sub-modes and every setting in the table below except Qwen (Phase 5), a **Stop** that ends the current stage after its current file and keeps what was committed, and a log fed by the pipeline's own progress lines. The job runs on a worker thread with its own SQLite connection in the one process (§10); WAL keeps the list readable meanwhile and it reloads when the job ends. Waiting for their phases: Recompute ranking (7), Recompute map layout (6), the anchored-only scope (9).)*
+
 **Recompute attributes — its own settings** (apply under either scope; none constrain manual segments, §6.3):
 
 | Setting | Controls | Default |
@@ -456,7 +460,7 @@ Bitwig exposes no public API for injecting tags into its own browser database, s
 **Phase 5 — Qwen2-Audio Integration + Latent-Similarity Spike.** Small-subset benchmark (per §3's real-scale arithmetic) of captioning cost/quality; latent-axis evaluation per §5.3. Deliverable: measured per-file cost, a go/no-go on the latent axis.
 **Phase 6 — Map View.** 2D projection (anchored-transform + full-refit paths), segment-match badges.
 **Phase 7 — List, Search, Filter.** List view with nested sub-hit rows, Attributes tab (weights + filters + anchor-relative ranges), free-text search, auto-tag chips.
-**Phase 8 — Recompute Tab.** Both scope types, the folder-scope list, Recompute-attributes settings panel.
+**Phase 8 — Recompute Tab.** Both scope types, the folder-scope list, Recompute-attributes settings panel. *(Library scope, the folder-scope list, Recompute attributes + settings, Rescan, Stop: built 2026-09-06, right after 4.5 — see the §9.6 note. Anchored-only scope, ranking and map-layout actions follow their own phases.)*
 **Phase 9 — Header Interactions.** Preview, anchor, drag-out, manual marker create/edit/delete/save.
 **Phase 10 — Bitwig Integration.** Native drag-out (samples and lazily-rendered segments), reveal-in-Explorer, crate export.
 **Phase 11 — Correction Workflow.** Manual classification/tag overrides, protection from automatic overwrite.

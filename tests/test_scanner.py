@@ -407,3 +407,18 @@ def test_junction_cycle_terminates(tmp_path):
     finally:
         conn.close()
         os.rmdir(root / "loop")              # unlink the junction, never its target
+
+
+def test_a_stopped_scan_writes_nothing(tmp_path):
+    """The GUI's Stop (§9.6) mid-walk: removals need the whole walk, so a
+    partial scan must not touch the index at all."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    sf.write(lib / "a.wav", np.zeros(2205, dtype="float32"), 22050)
+    conn = open_db(tmp_path / "index.db")
+
+    summary = scan_library(conn, lib, should_stop=lambda: True)
+
+    assert summary.stopped and "nothing was written" in summary.format()
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 0
+    conn.close()

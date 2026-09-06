@@ -45,6 +45,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -57,7 +58,7 @@ from .analysis import (
     describe_buffer,
     load_audio,
 )
-from .db import now_iso
+from .db import now_iso, scope_clause
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +122,8 @@ class SegmentationSettings:
             raise ValueError("max_segments must be at least 1")
         if self.min_length <= 0 or self.max_length <= 0:
             raise ValueError("length rules must be positive")
+        if self.min_length_unit == self.max_length_unit and self.min_length >= self.max_length:
+            raise ValueError("min_length must be below max_length (every segment would be dropped)")
 
     @staticmethod
     def _resolve(value: float, unit: str, duration_s: float) -> float:
@@ -172,6 +175,7 @@ class SegmentationSummary:
     manual_kept: int = 0         # manual segments under the samples this run touched
     manual_flagged: int = 0      # ... of which now end past their changed parent
     failed: int = 0
+    stopped: bool = False        # stopped by request; what was done is kept
     elapsed_s: float = 0.0
     error_samples: list[str] = field(default_factory=list)
 
@@ -190,6 +194,8 @@ class SegmentationSummary:
                 f"(parent content changed; they now end past the file)"
             )
         lines.extend(f"  ! {s}" for s in self.error_samples)
+        if self.stopped:
+            lines.append("stopped by request; everything segmented so far is kept")
         lines.append(f"elapsed: {self.elapsed_s:.1f}s")
         return "\n".join(lines)
 
@@ -561,6 +567,8 @@ def segment_pending(
     resegment: bool = False,
     analyze_segments: bool = True,
     progress_every: int = 100,
+    scope: Sequence[str] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> SegmentationSummary:
     """Run nodes `S` + `T` over samples that need it.
 
@@ -569,6 +577,9 @@ def segment_pending(
     default only samples never segmented, or whose content changed since they
     were (the scanner's staleness flag), are visited; one-shots among them are
     cleared and stamped rather than detected.
+
+    `scope` (folders, §9.6) limits the visit to files under them; None is
+    everything. `should_stop` is polled before each sample.
     """
     settings = settings or SegmentationSettings()
     summary = SegmentationSummary()
@@ -587,13 +598,22 @@ def segment_pending(
             " AND (s.segments_detected_at IS NULL "
             "      OR s.segments_detected_at < s.content_changed_at)"
         )
-    sql += " ORDER BY s.id"
+    scope_sql, params = scope_clause(scope)
+    sql += scope_sql + " ORDER BY s.id"
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
-    worklist = conn.execute(sql).fetchall()
+    worklist = conn.execute(sql, params).fetchall()
     total = len(worklist)
+    log.info("segmentation: %d samples to visit", total)
 
     for sample_id, filepath, structural_type_value, content_class, is_stale in worklist:
+        if should_stop is not None and should_stop():
+            summary.stopped = True
+            log.info(
+                "segmentation stopped by request after %d of %d",
+                summary.samples_segmented + summary.one_shots_skipped, total,
+            )
+            break
         # Per-sample isolation (2026-09-06 review): one exotic file must not
         # take the run down. Decode failures return None; anything else is
         # rolled back, counted, and skipped.

@@ -38,12 +38,13 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
 
-from .db import now_iso
+from .db import now_iso, scope_clause
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ class EmbedSummary:
     flagged: int = 0               # Facet A below threshold: flagged, not assigned
     protected: int = 0             # manually-confirmed classification left alone
     failed: int = 0
+    stopped: bool = False          # stopped by request; what was done is kept
     elapsed_s: float = 0.0
     error_samples: list[str] = field(default_factory=list)
 
@@ -153,6 +155,8 @@ class EmbedSummary:
             f"protected {self.protected} | failed {self.failed}"
         ]
         lines.extend(f"  ! {s}" for s in self.error_samples)
+        if self.stopped:
+            lines.append("stopped by request; everything embedded so far is kept")
         lines.append(f"elapsed: {self.elapsed_s:.1f}s")
         return "\n".join(lines)
 
@@ -513,6 +517,8 @@ def embed_pending(
     limit: int | None = None,
     reembed: bool = False,
     progress_every: int = 50,
+    scope: Sequence[str] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> EmbedSummary:
     """Nodes D, C2, X, E over samples that need them.
 
@@ -522,6 +528,9 @@ def embed_pending(
     has a long-enough segment without a vector. The second case is what a
     later `crate-segment` run (or `--resegment`, which makes new rows) leaves
     behind; it embeds only the segments and leaves the parent alone.
+
+    `scope` (folders, §9.6) limits the visit to files under them; None is
+    everything. `should_stop` is polled before each sample.
     """
     settings = settings or EmbedSettings()
     encoder = encoder or ClapEncoder(settings.checkpoint, settings.batch_size)
@@ -548,11 +557,14 @@ def embed_pending(
             params += [settings.min_segment_length_ms, MODEL_NAME]
         else:
             sql += f" AND {stale_parent}"
-    sql += " ORDER BY s.id"
+    scope_sql, scope_params = scope_clause(scope)
+    sql += scope_sql + " ORDER BY s.id"
+    params += scope_params
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     worklist = conn.execute(sql, params).fetchall()
     total = len(worklist)
+    log.info("embedding: %d samples to visit", total)
     if not worklist:
         summary.elapsed_s = time.perf_counter() - started
         return summary
@@ -560,6 +572,10 @@ def embed_pending(
     prompts = Prompts.build(encoder)
     visited = 0
     for sample_id, filepath, harmonic_ratio, needs_parent in worklist:
+        if should_stop is not None and should_stop():
+            summary.stopped = True
+            log.info("embedding stopped by request after %d of %d", visited, total)
+            break
         try:
             ok = _embed_one_sample(
                 conn, sample_id, filepath, harmonic_ratio, encoder, prompts,

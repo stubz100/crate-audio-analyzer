@@ -1,21 +1,26 @@
-"""Offscreen tests for the "listen and grab" window and its models (Phase 4.5).
+"""Offscreen tests for the window: the "listen and grab" list and its models
+(Phase 4.5) and the Recompute tab (Phase 8).
 
 Playback itself is not asserted (no audio device in CI); everything else —
-rows, sorting, filtering, the segments drill-down, and the file URLs that
-drag-out hands the OS — is.
+rows, sorting, filtering, the segments drill-down, the file URLs that
+drag-out hands the OS, and the Recompute tab building an index from nothing
+on its worker thread — is. Settings go to an INI file under `tmp_path`, never
+to the user's registry.
 """
 
 from __future__ import annotations
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
 import soundfile as sf
-from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtCore import QSettings, QSortFilterProxyModel, Qt
 from PySide6.QtWidgets import QApplication
+from test_embedding import FakeEncoder
 
 from crate.analysis import analyze_pending
 from crate.catalog import load_samples, load_segments
@@ -42,12 +47,31 @@ def _clicks(times_s, duration_s):
     return np.clip(y, -1, 1).astype("float32")
 
 
+def _write_library(root):
+    (root / "Drums").mkdir(parents=True)
+    sf.write(root / "Drums" / "loop.wav", _clicks([i * 0.5 for i in range(8)], 4.0), SR)
+    sf.write(root / "hit.wav", _clicks([0.0], 0.4), SR)
+    return root
+
+
+def _ini(tmp_path) -> QSettings:
+    return QSettings(str(tmp_path / "crate.ini"), QSettings.Format.IniFormat)
+
+
+def _wait_until(app, condition, timeout_s: float = 120.0) -> None:
+    """Pump the event loop until `condition()` — worker-thread signals only
+    arrive while the loop runs."""
+    deadline = time.monotonic() + timeout_s
+    while not condition():
+        app.processEvents()
+        time.sleep(0.02)
+        if time.monotonic() > deadline:
+            raise TimeoutError("the job did not finish in time")
+
+
 @pytest.fixture()
 def index(tmp_path):
-    lib = tmp_path / "lib"
-    (lib / "Drums").mkdir(parents=True)
-    sf.write(lib / "Drums" / "loop.wav", _clicks([i * 0.5 for i in range(8)], 4.0), SR)
-    sf.write(lib / "hit.wav", _clicks([0.0], 0.4), SR)
+    lib = _write_library(tmp_path / "lib")
     db = tmp_path / "index.db"
     conn = open_db(db)
     scan_library(conn, lib)
@@ -112,11 +136,11 @@ def test_segment_model_drag_renders_the_segment_first(app, index):
     assert os.path.exists(urls[0])
 
 
-def test_main_window_loads_the_index_and_drills_into_segments(app, index):
+def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_path):
     from crate.main import MainWindow
 
     db, conn, cache = index
-    window = MainWindow(db_path=db, cache_dir=cache)
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path))
     try:
         assert window._proxy.rowCount() == 2
         assert "2 samples" in window.statusBar().currentMessage()
@@ -139,3 +163,81 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index):
         assert window._proxy.rowCount() == 1
     finally:
         window.close()
+
+
+# --- the Recompute tab (Phase 8, spec §9.6) ---
+
+
+def test_recompute_tab_builds_the_index_from_the_window(app, tmp_path):
+    """Empty index → Rescan → Recompute attributes over a scope, all from the
+    window, on the worker thread; the list reloads itself after each job."""
+    from crate.main import MainWindow
+
+    lib = _write_library(tmp_path / "lib")
+    settings = _ini(tmp_path)
+    window = MainWindow(
+        db_path=tmp_path / "index.db", cache_dir=tmp_path / "cache",
+        settings=settings, encoder_factory=lambda _embed_settings: FakeEncoder(),
+    )
+    try:
+        panel = window._recompute
+        assert window._proxy.rowCount() == 0 and not panel.running
+
+        panel.set_library_root(lib)
+        panel.run_rescan()
+        assert panel.running
+        _wait_until(app, lambda: not panel.running)
+        assert window._proxy.rowCount() == 2                     # reloaded itself
+        assert "added 2" in panel.log_text()
+
+        panel.run_recompute()                                    # empty scope: refused
+        assert not panel.running and "scope is empty" in panel.log_text()
+
+        panel.add_scope_folder(lib / "Drums")
+        panel.run_recompute()
+        _wait_until(app, lambda: not panel.running)
+        status = window.statusBar().currentMessage()
+        assert "· 1 analysed" in status and "· 1 embedded" in status   # the loop only
+        assert "[embedding]" in panel.log_text()
+
+        panel.add_scope_folder(lib)
+        panel.run_recompute()
+        _wait_until(app, lambda: not panel.running)
+        assert "· 2 analysed" in window.statusBar().currentMessage()
+
+        settings.sync()
+        stored = (tmp_path / "crate.ini").read_text(encoding="utf-8")
+        assert "Drums" in stored and "root_path" in stored          # scope + root persisted
+    finally:
+        window.close()
+
+
+def test_recompute_settings_round_trip_and_validation(app, tmp_path):
+    from crate.recompute import RecomputePanel
+
+    settings = _ini(tmp_path)
+    panel = RecomputePanel(tmp_path / "index.db", settings)
+    panel._force_full.setChecked(True)
+    panel._sensitivity.setValue(0.4)
+    panel._max_segments.setValue(8)
+    panel._one_shot_cap.setChecked(False)
+    panel._embed_segments.setChecked(False)
+    panel.add_scope_folder(tmp_path / "a_b")
+
+    collected = panel.collect_settings()
+    assert collected.force_full and collected.scope == (str(tmp_path / "a_b"),)
+    assert collected.segmentation.sensitivity == 0.4 and collected.segmentation.max_segments == 8
+    assert collected.one_shot_max_duration_s is None and not collected.embedding.embed_segments
+
+    panel.save_settings()
+    settings.sync()
+    again = RecomputePanel(tmp_path / "index.db", _ini(tmp_path))
+    assert again.collect_settings() == collected
+
+    again._min_length.setValue(5.0)                               # min ≥ max: refused,
+    again._max_length.setValue(1.0)                               # nothing starts
+    again.run_recompute()
+    assert not again.running and "settings:" in again.log_text()
+
+    again.stop()                                                  # no job: a no-op
+    assert not again.running

@@ -23,7 +23,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
 | 6 | Map View | ⬜ not started |
 | 7 | List, Search, Filter | ⬜ not started |
-| 8 | Recompute Tab | ⬜ not started |
+| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log (hash in the 2026-09-06 Phase 8 entry); ranking / map layout / anchored-only wait for Phases 7 / 6 / 9 |
 | 9 | Header Interactions | ⬜ not started |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
@@ -560,3 +560,34 @@ Directions from the review discussion: (1) frame envelope, then check the number
 **Next**
 
 - Use it: `uv run crate`, drag a hit into Bitwig. Then Phase 7 (list/search/filter proper, nested sub-hit rows, Attributes tab) completes the first daily-drivable milestone (spec §12); Phase 5's Qwen2-Audio spike can wait behind that.
+
+## 2026-09-06 — Phase 8 pulled forward: the Recompute tab
+
+**Phase:** 8, library-scope half · commit hash cited in the follow-up entry
+
+**Done**
+
+- **Why now.** The window shipped in 4.5 only read an index the CLI had built, so the first real try ("the recompute tab is missing, I couldn't create a list") stalled at step one. The on-demand half of §9.6 — the part that does not need an anchor, a ranking or a map — came forward to right after 4.5.
+- `jobs.py` (no Qt) — `RecomputeSettings` (scope, mode, one-shot cap, segmentation + embedding settings) and `recompute_attributes`: analysis → segmentation → embedding over the folder-scope list. An empty scope is refused (nothing is implicit, §9.6); a stop ends the current stage after its file and the later stages do not start; a missing `ml` extra skips embedding with a note instead of failing the run.
+- Pipeline plumbing: `scope` and `should_stop` on `analyze_pending` / `segment_pending` / `embed_pending`; `db.scope_clause` builds the `LIKE` filter with `!` as the escape so an `_` in a path is not a wildcard; `scan_library` takes `should_stop` and a stopped scan writes nothing (removals need the whole walk); every summary has `stopped`; each stage logs its worklist size first. `SegmentationSettings` refuses min ≥ max in the same unit.
+- `recompute.py` — the tab: library root + Browse (moved out of the header), **Rescan library**, the **folder-scope list** (persisted; Add folder / Add root / Remove), **New/changed only** vs **Force full re-index**, the §9.6 settings table (Qwen shown disabled, Phase 5), **Recompute attributes** + **Stop**, and a log fed by the `crate` logger through a queued signal. `JobThread` runs the job on a connection of its own; the list reloads when the job ends. Waiting for their phases: ranking (7), map layout (6), anchored-only scope (9).
+- `main.py` — a right-hand tab widget (Attributes joins in Phase 7); `settings` and `encoder_factory` are injectable, so tests run against an INI file and a fake model.
+
+**Decided**
+
+- One code path: the tab calls `recompute_attributes`, and the Krotos verification below ran that same function headless — not a re-implementation of the buttons.
+- Stop means stop: the stage keeps what it committed and nothing later starts; "skip to the next stage" would need its own button and nobody has asked for it.
+- The earlier GUI test had written `preview/autoplay = false` into the user's registry (`QSettings("Crate", "Crate")`). That value was removed and tests now get INI-backed settings; the default (auto-play on) is back.
+- Layout, from offscreen screenshots: the action row sits above its settings so Recompute/Stop are visible at 800 px height; the scope list is capped at 110 px; long form rows wrap.
+
+**Verified**
+
+- `uv run pytest tests -q` → **139 passed, 1 skipped**. New: the scope gate (incl. the `_` escaping), changed-only vs full, stop, empty scope, missing model stack, stopped scan; GUI: an empty index built to analysed + embedded from the window on the worker thread, settings round trip and validation.
+- **Krotos Starter Library / Audio Files** (3,956 WAV: foley, drones, ambiences; median 1.25 s, longest 16.6 min; `.reapeaks` ×4 skip-and-logged): scan 45 s; analysis 815 s (0.21 s/file, the long ambiences dominate); segmentation 187 s; embedding 506 s; **25.1 min all-in, 0 failed**. Result: 2,802 multi-hit / 1,139 one-shot / 15 loops (68–239 BPM); Facet A rhythmic 2,058 / other 858 / vocal 209 / melodic 82 / flagged 749; 8,962 segments (760 samples at the cap of 5), 5,512 embedded, 3,450 skipped short. The 16-minute "…Loop" ambiences typed multi-hit — right: seamless, not rhythmic.
+- Window on that index: up in **0.37 s**, reload 0.33 s.
+- The user's default index (`%LOCALAPPDATA%\Crate\crate.db`) held the same 3,956 files as skeleton rows only (scanned 19:11 UTC, nothing derived); backed up to the session scratchpad and replaced with the computed index, so `uv run crate` lists Krotos straight away.
+- Spec §3: the foley-mix cost added (0.38 s/file all-in, ≈ 12 h extrapolated to the full library — double the drum-pack figure).
+
+**Next**
+
+- Press the buttons for real: Rescan (the registry root is the Krotos parent folder, so the 3,956 rows come back *unchanged* with their `folder` refreshed), then add a second pack to the scope and Recompute — "new/changed only" against a real re-scan is the one path the synthetic tests cover but real files have not. Then Phase 7.

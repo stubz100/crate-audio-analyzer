@@ -63,12 +63,13 @@ import math
 import re
 import sqlite3
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from .db import now_iso
+from .db import now_iso, scope_clause
 from .wavmeta import read_embedded_metadata
 
 log = logging.getLogger(__name__)
@@ -141,6 +142,7 @@ class AnalysisSummary:
     refreshed_stale: int = 0     # of `analyzed`: rows re-done because content changed
     failed: int = 0
     skipped_confirmed: int = 0   # classification protected by a manual correction
+    stopped: bool = False        # stopped by request; what was done is kept
     elapsed_s: float = 0.0
     error_samples: list[str] = field(default_factory=list)
 
@@ -150,6 +152,8 @@ class AnalysisSummary:
             f"failed {self.failed} | protected classifications kept {self.skipped_confirmed}"
         ]
         lines.extend(f"  ! {s}" for s in self.error_samples)
+        if self.stopped:
+            lines.append("stopped by request; everything analyzed so far is kept")
         lines.append(f"elapsed: {self.elapsed_s:.1f}s")
         return "\n".join(lines)
 
@@ -743,11 +747,16 @@ def analyze_pending(
     reanalyze: bool = False,
     progress_every: int = 100,
     one_shot_max_duration_s: float | None = ONE_SHOT_MAX_DURATION_S,
+    scope: Sequence[str] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> AnalysisSummary:
     """Analyze samples that are new (no `analysis` row) or stale (content
     changed since `analyzed_at`) — or every sample, if `reanalyze`.
 
     `one_shot_max_duration_s`: the Facet B duration cap (see structural_type).
+    `scope`: folders (the §9.6 folder-scope list); only files under one of
+    them are visited. None = everything, the CLI's behaviour.
+    `should_stop`: polled before each file (the GUI's Stop button).
 
     Commits per file: analysis is the expensive stage (§3), so an interrupted
     run must keep everything it already computed.
@@ -763,13 +772,19 @@ def analyze_pending(
     )
     if not reanalyze:
         sql += " AND (a.sample_id IS NULL OR s.content_changed_at > a.analyzed_at)"
-    sql += " ORDER BY s.id"
+    scope_sql, params = scope_clause(scope)
+    sql += scope_sql + " ORDER BY s.id"
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
-    worklist = conn.execute(sql).fetchall()
+    worklist = conn.execute(sql, params).fetchall()
     total = len(worklist)
+    log.info("analysis: %d samples to do", total)
 
     for sample_id, filepath, duration_s, is_refresh in worklist:
+        if should_stop is not None and should_stop():
+            summary.stopped = True
+            log.info("analysis stopped by request after %d of %d", summary.analyzed, total)
+            break
         # One file must never take a multi-hour run down with it (spec §7
         # "logged, not fatal"; 2026-09-06 review): decode failures return
         # None, anything else — a librosa edge case, a MemoryError on a very
