@@ -789,16 +789,31 @@ def analyze_pending(
     total = len(worklist)
 
     for sample_id, filepath, duration_s, is_refresh in worklist:
-        descriptors = analyze_file(filepath)
-        if descriptors is None:
+        # One file must never take a multi-hour run down with it (spec §7
+        # "logged, not fatal"; 2026-09-06 review): decode failures return
+        # None, anything else — a librosa edge case, a MemoryError on a very
+        # long recording — is caught here, rolled back, counted, and skipped.
+        try:
+            descriptors = analyze_file(filepath)
+            if descriptors is None:
+                summary.failed += 1
+                if len(summary.error_samples) < 5:
+                    summary.error_samples.append(f"decode failed: {filepath}")
+                continue
+            facet_b = structural_type(
+                descriptors, duration_s or 0.0, one_shot_max_duration_s
+            )
+            protected = _store(conn, sample_id, descriptors, facet_b)
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 - per-file isolation is the point
+            conn.rollback()
             summary.failed += 1
+            log.warning("analysis failed: %s (%s: %s)", filepath, type(exc).__name__, exc)
             if len(summary.error_samples) < 5:
-                summary.error_samples.append(f"decode failed: {filepath}")
+                summary.error_samples.append(f"{type(exc).__name__}: {filepath}")
             continue
-        facet_b = structural_type(descriptors, duration_s or 0.0, one_shot_max_duration_s)
-        if _store(conn, sample_id, descriptors, facet_b):
+        if protected:
             summary.skipped_confirmed += 1
-        conn.commit()
         summary.analyzed += 1
         if is_refresh and not reanalyze:
             summary.refreshed_stale += 1

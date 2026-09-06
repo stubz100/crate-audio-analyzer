@@ -161,15 +161,20 @@ class DetectionResult:
     capped: bool = False
     effective_sensitivity: float | None = None
     profile: str = PROFILE_TIGHT
+    rows_inserted: int = 0             # set by segment_sample: rows actually written
+    manual_flagged: int = 0            # set by segment_sample: manual segments now
+                                       # ending past the (changed) file
 
 
 @dataclass
 class SegmentationSummary:
     samples_segmented: int = 0
-    segments_created: int = 0
+    one_shots_skipped: int = 0   # node S: nothing inside to find; stale auto rows cleared
+    segments_created: int = 0    # rows written, not candidates proposed
     samples_capped: int = 0
     samples_without_segments: int = 0
-    manual_kept: int = 0
+    manual_kept: int = 0         # manual segments under the samples this run touched
+    manual_flagged: int = 0      # ... of which now end past their changed parent
     failed: int = 0
     elapsed_s: float = 0.0
     error_samples: list[str] = field(default_factory=list)
@@ -180,8 +185,14 @@ class SegmentationSummary:
             f"{self.segments_created} segments | "
             f"capped {self.samples_capped} | "
             f"no segments found {self.samples_without_segments} | "
+            f"one-shots skipped {self.one_shots_skipped} | "
             f"manual kept {self.manual_kept} | failed {self.failed}"
         ]
+        if self.manual_flagged:
+            lines.append(
+                f"manual segments needing review: {self.manual_flagged} "
+                f"(parent content changed; they now end past the file)"
+            )
         lines.extend(f"  ! {s}" for s in self.error_samples)
         lines.append(f"elapsed: {self.elapsed_s:.1f}s")
         return "\n".join(lines)
@@ -414,6 +425,60 @@ def _parent_row(conn: sqlite3.Connection, segment_id: int) -> sqlite3.Row | None
     ).fetchone()
 
 
+def _clear_auto_segments(conn: sqlite3.Connection, sample_id: int) -> None:
+    """Drop a sample's automatic segments; manual/confirmed ones are untouched (§6.3)."""
+    conn.execute(
+        "DELETE FROM segments WHERE sample_id = ? AND detection_method = 'auto' "
+        "AND is_user_confirmed = 0",
+        (sample_id,),
+    )
+
+
+def _stamp_parent(
+    conn: sqlite3.Connection, sample_id: int, result: DetectionResult, now: str
+) -> None:
+    conn.execute(
+        "UPDATE samples SET segment_candidates_found = ?, segments_capped = ?, "
+        "effective_sensitivity = ?, segments_detected_at = ? WHERE id = ?",
+        (result.candidates_found, int(result.capped), result.effective_sensitivity,
+         now, sample_id),
+    )
+
+
+def _refresh_manual_segments(
+    conn: sqlite3.Connection,
+    sample_id: int,
+    y: np.ndarray,
+    sr: int,
+    analyze_segments: bool,
+) -> int:
+    """Manual segments after their parent's content changed (2026-09-06 review).
+
+    Their bounds are never touched (§6.3) — but their descriptors were computed
+    on the old audio and any cached render is of the old audio, so both are
+    redone; a segment that now ends past the file is flagged `needs_review`
+    instead of silently indexing air. Returns the number flagged.
+    """
+    duration_ms = int(round(y.size / sr * 1000.0))
+    flagged = 0
+    rows = conn.execute(
+        "SELECT id, start_ms, end_ms FROM segments WHERE sample_id = ? "
+        "AND (detection_method = 'manual' OR is_user_confirmed = 1)",
+        (sample_id,),
+    ).fetchall()
+    for segment_id, start_ms, end_ms in rows:
+        out_of_range = start_ms >= duration_ms or end_ms > duration_ms
+        flagged += int(out_of_range)
+        conn.execute(
+            "UPDATE segments SET needs_review = ?, cache_path = NULL, "
+            "cache_rendered_at = NULL WHERE id = ?",
+            (int(out_of_range), segment_id),
+        )
+        if analyze_segments:
+            _write_segment_analysis(conn, segment_id, y, sr, start_ms, end_ms)
+    return flagged
+
+
 def segment_sample(
     conn: sqlite3.Connection,
     sample_id: int,
@@ -421,12 +486,14 @@ def segment_sample(
     structural_type_value: str,
     settings: SegmentationSettings,
     analyze_segments: bool = True,
+    refresh_manual: bool = False,
 ) -> DetectionResult | None:
     """Node `T` for one sample: detect, replace its automatic segments, and
     record the §6.2 counters on the parent. Returns None if it cannot decode.
 
-    Manual segments are left strictly alone (§6.3) — only automatic, unconfirmed
-    rows are replaced.
+    Manual segments are never replaced (§6.3). With `refresh_manual` — the
+    driver passes it when the parent's content changed — their descriptors and
+    review flag are brought up to date against the new audio.
     """
     loaded = load_audio(filepath)
     if loaded is None:
@@ -434,11 +501,7 @@ def segment_sample(
     y, sr = loaded
 
     result = detect(y, sr, settings, structural_type_value)
-    conn.execute(
-        "DELETE FROM segments WHERE sample_id = ? AND detection_method = 'auto' "
-        "AND is_user_confirmed = 0",
-        (sample_id,),
-    )
+    _clear_auto_segments(conn, sample_id)
     now = now_iso()
     for candidate in result.segments:
         cursor = conn.execute(
@@ -447,22 +510,46 @@ def segment_sample(
             " strength, detected_at) VALUES (?, ?, ?, 'auto', 0, ?, ?)",
             (sample_id, candidate.start_ms, candidate.end_ms, candidate.strength, now),
         )
-        if cursor.rowcount and analyze_segments:
+        if not cursor.rowcount:
+            continue  # duplicate rounded bounds, or a window that rounds to 0 ms
+        result.rows_inserted += 1
+        if analyze_segments:
             _write_segment_analysis(
                 conn, int(cursor.lastrowid), y, sr, candidate.start_ms, candidate.end_ms
             )
-    conn.execute(
-        "UPDATE samples SET segment_candidates_found = ?, segments_capped = ?, "
-        "effective_sensitivity = ?, segments_detected_at = ? WHERE id = ?",
-        (
-            result.candidates_found,
-            int(result.capped),
-            result.effective_sensitivity,
-            now,
-            sample_id,
-        ),
-    )
+    if refresh_manual:
+        result.manual_flagged = _refresh_manual_segments(
+            conn, sample_id, y, sr, analyze_segments
+        )
+    _stamp_parent(conn, sample_id, result, now)
     return result
+
+
+def _skip_one_shot(
+    conn: sqlite3.Connection,
+    sample_id: int,
+    filepath: str,
+    stale: bool,
+    analyze_segments: bool,
+) -> int:
+    """Node `S` says no: a clean one-shot has nothing inside to find.
+
+    Automatic segments it may still carry from a previous life as a loop are
+    cleared (2026-09-06 review: they used to linger forever), manual ones are
+    refreshed if the content changed, and the sample is stamped so it is not
+    revisited until its content changes again. Returns manual segments flagged.
+    """
+    _clear_auto_segments(conn, sample_id)
+    flagged = 0
+    has_manual = conn.execute(
+        "SELECT 1 FROM segments WHERE sample_id = ? LIMIT 1", (sample_id,)
+    ).fetchone()
+    if stale and has_manual:
+        loaded = load_audio(filepath)
+        if loaded is not None:
+            flagged = _refresh_manual_segments(conn, sample_id, *loaded, analyze_segments)
+    _stamp_parent(conn, sample_id, DetectionResult(), now_iso())
+    return flagged
 
 
 def segment_pending(
@@ -475,19 +562,23 @@ def segment_pending(
 ) -> SegmentationSummary:
     """Run nodes `S` + `T` over samples that need it.
 
-    Node `S` is applied as SQL: anything Facet B typed as a one-shot is skipped
-    outright. By default only samples never segmented, or whose content changed
-    since they were (the scanner's staleness flag), are processed.
+    Node `S` reads `classification.structural_type` — the DB's, not a
+    recomputation, so a manual correction to one-shot (§11) is honored. By
+    default only samples never segmented, or whose content changed since they
+    were (the scanner's staleness flag), are visited; one-shots among them are
+    cleared and stamped rather than detected.
     """
     settings = settings or SegmentationSettings()
     summary = SegmentationSummary()
     started = time.perf_counter()
+    run_started_at = now_iso()
 
     sql = (
-        "SELECT s.id, s.filepath, s.duration_s, k.structural_type "
+        "SELECT s.id, s.filepath, k.structural_type, "
+        "       (s.segments_detected_at IS NOT NULL "
+        "        AND s.segments_detected_at < s.content_changed_at) AS is_stale "
         "FROM samples s JOIN classification k ON k.sample_id = s.id "
-        "WHERE s.duration_s IS NOT NULL "
-        "  AND k.structural_type IS NOT NULL AND k.structural_type != 'one-shot'"
+        "WHERE s.duration_s IS NOT NULL AND k.structural_type IS NOT NULL"
     )
     if not resegment:
         sql += (
@@ -500,24 +591,41 @@ def segment_pending(
     worklist = conn.execute(sql).fetchall()
     total = len(worklist)
 
-    for sample_id, filepath, _duration_s, structural_type_value in worklist:
-        kept_manual = conn.execute(
-            "SELECT COUNT(*) FROM segments WHERE sample_id = ? "
-            "AND (detection_method = 'manual' OR is_user_confirmed = 1)",
-            (sample_id,),
-        ).fetchone()[0]
-        result = segment_sample(
-            conn, sample_id, filepath, structural_type_value, settings, analyze_segments
-        )
-        if result is None:
+    for sample_id, filepath, structural_type_value, is_stale in worklist:
+        # Per-sample isolation (2026-09-06 review): one exotic file must not
+        # take the run down. Decode failures return None; anything else is
+        # rolled back, counted, and skipped.
+        try:
+            if structural_type_value == "one-shot":
+                summary.manual_flagged += _skip_one_shot(
+                    conn, sample_id, filepath, bool(is_stale), analyze_segments
+                )
+                conn.commit()
+                summary.one_shots_skipped += 1
+                continue
+            result = segment_sample(
+                conn, sample_id, filepath, structural_type_value, settings,
+                analyze_segments, refresh_manual=bool(is_stale),
+            )
+            if result is None:
+                conn.rollback()
+                summary.failed += 1
+                if len(summary.error_samples) < 5:
+                    summary.error_samples.append(f"decode failed: {filepath}")
+                continue
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 - per-file isolation is the point
+            conn.rollback()
             summary.failed += 1
+            log.warning(
+                "segmentation failed: %s (%s: %s)", filepath, type(exc).__name__, exc
+            )
             if len(summary.error_samples) < 5:
-                summary.error_samples.append(f"decode failed: {filepath}")
+                summary.error_samples.append(f"{type(exc).__name__}: {filepath}")
             continue
-        conn.commit()
         summary.samples_segmented += 1
-        summary.segments_created += len(result.segments)
-        summary.manual_kept += kept_manual
+        summary.segments_created += result.rows_inserted
+        summary.manual_flagged += result.manual_flagged
         if result.capped:
             summary.samples_capped += 1
         if not result.segments:
@@ -530,6 +638,14 @@ def segment_pending(
                 elapsed / summary.samples_segmented, summary.segments_created,
             )
 
+    # One query, not one per sample: manual segments under everything this
+    # run stamped (all stamps are >= run_started_at).
+    summary.manual_kept = conn.execute(
+        "SELECT COUNT(*) FROM segments g JOIN samples s ON s.id = g.sample_id "
+        "WHERE (g.detection_method = 'manual' OR g.is_user_confirmed = 1) "
+        "  AND s.segments_detected_at >= ?",
+        (run_started_at,),
+    ).fetchone()[0]
     summary.elapsed_s = time.perf_counter() - started
     return summary
 

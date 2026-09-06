@@ -160,6 +160,8 @@ You can create or adjust a segment by hand: drag start/end markers on the header
 
 **None of §6.2's constraints apply to a manual segment** — no min/max length check, no cap, no truncation, no eviction. A hand-placed marker is never touched by the automatic pipeline. You can still delete one yourself via an explicit **Delete segment** action — that protection is against silent automatic overwrite, not against your own deliberate edits.
 
+If the parent file's *content* changes underneath a manual segment, its markers still stay where you put them, but its derived data is redone against the new audio (descriptors, cached render) and, if it now ends past the end of the file, it is flagged `needs_review` for you to fix or delete.
+
 ### 6.4 Segments are indexes on a sample, not separate items
 
 A segment is not a peer entity to a real file — it's a lightweight index record (start/end marker pair) attached to its parent, stored in its own tables (§8), not shown as its own map point or list row by default.
@@ -216,7 +218,7 @@ Key execution guarantees:
 
 | Node | Task | Inputs | Outputs |
 |---|---|---|---|
-| **A — File Scanner** | Recursively walk `D:\_soundPacks`, filter/log unsupported formats, diff against last run | Root path; prior scan state | Worklist of new/changed files; skeleton `samples` row per new file |
+| **A — File Scanner** | Recursively walk `D:\_soundPacks`, filter/log unsupported formats, diff against last run. A file that vanished and one that appeared with the same content is a **move/rename**: the row is updated in place so everything hanging off it (corrections, manual segments, embeddings) survives a folder reorganisation | Root path; prior scan state | Worklist of new/changed files; skeleton `samples` row per new file |
 | **B — Audio Decode** | Load audio into a normalized in-memory form | `filepath` | Decoded waveform buffer; `duration_s`/`sample_rate`/`channels`; decode failures logged, not fatal |
 | **C — Heuristic Analysis** | Amplitude/pitch/timbre/spectrum descriptors (§5.1) + tempo/onset/loop-ness, incl. embedded `acid`/`smpl` metadata | Decoded buffer | `analysis` row; supplies the signal `S` reads |
 | **D — CLAP embedding (full sample, always)** | The "conceptual" similarity vector; basis for `X`'s zero-shot labels | Decoded buffer, full sample | `embedding` row (`model_name='clap'`) |
@@ -308,6 +310,9 @@ segments                                            -- the index records
   strength,                                         -- onset strength as a fraction of the parent's
                                                     -- strongest; the cap's strongest-first tie-break
   detected_at,                                      -- stale when older than the parent's content_changed_at
+  needs_review (bool),                              -- manual segment whose parent's content changed and which
+                                                    -- now ends past the file: bounds are never auto-edited (§6.3),
+                                                    -- so it is flagged for the user instead
   cache_path, cache_rendered_at
   -- UNIQUE (sample_id, start_ms, end_ms, detection_method); ON DELETE CASCADE from samples
 

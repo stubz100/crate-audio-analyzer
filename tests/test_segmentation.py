@@ -356,15 +356,17 @@ def test_segment_pending_skips_one_shots_and_repeats_no_work(tmp_path):
 
     summary = segment_pending(conn)
 
-    assert summary.samples_segmented == 1          # node S skipped the one-shot
+    assert summary.samples_segmented == 1          # node S skipped the one-shot ...
+    assert summary.one_shots_skipped == 1          # ... which is stamped, not detected
     assert summary.segments_created > 0
     assert summary.failed == 0
-    segmented = conn.execute(
-        "SELECT s.filename FROM samples s WHERE s.segments_detected_at IS NOT NULL"
+    with_segments = conn.execute(
+        "SELECT DISTINCT s.filename FROM samples s JOIN segments g ON g.sample_id = s.id"
     ).fetchall()
-    assert [r[0] for r in segmented] == ["many.wav"]
+    assert [r[0] for r in with_segments] == ["many.wav"]
 
-    assert segment_pending(conn).samples_segmented == 0   # nothing new or stale
+    again = segment_pending(conn)                  # nothing new or stale
+    assert (again.samples_segmented, again.one_shots_skipped) == (0, 0)
     conn.close()
 
 
@@ -404,3 +406,111 @@ def test_segment_pending_can_skip_the_descriptor_pass(indexed):
 
     assert summary.segments_created > 0
     assert conn.execute("SELECT COUNT(*) FROM segment_analysis").fetchone()[0] == 0
+
+
+# --- 2026-09-06 application review ------------------------------------------------
+
+
+def _loop_then_scan(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    f = lib / "x.wav"
+    _write(f, _clicks([i * 0.5 for i in range(8)], duration_s=4.0))
+    conn = open_db(tmp_path / "index.db")
+    scan_library(conn, lib)
+    analyze_pending(conn)
+    segment_pending(conn)
+    return lib, f, conn
+
+
+def _replace_and_rescan(lib, f, conn, y):
+    _write(f, y)
+    scan_library(conn, lib)
+    analyze_pending(conn)
+    return segment_pending(conn)
+
+
+def test_type_flip_clears_stale_auto_segments(tmp_path):
+    """A loop replaced by a one-shot used to keep its old auto segments forever."""
+    lib, f, conn = _loop_then_scan(tmp_path)
+    assert conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0] > 0
+
+    summary = _replace_and_rescan(lib, f, conn, _clicks([0.0], duration_s=0.4))
+
+    assert conn.execute("SELECT structural_type FROM classification").fetchone()[0] == "one-shot"
+    assert summary.one_shots_skipped == 1
+    assert conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM samples WHERE segments_detected_at < content_changed_at"
+    ).fetchone()[0] == 0                                  # no longer flagged stale
+    assert segment_pending(conn).one_shots_skipped == 0   # and not revisited
+    conn.close()
+
+
+def test_manual_segment_is_redescribed_and_flagged_after_content_change(tmp_path):
+    lib, f, conn = _loop_then_scan(tmp_path)
+    sid = conn.execute("SELECT id FROM samples").fetchone()[0]
+    mid = create_manual_segment(conn, sid, 3000, 3900)
+    conn.execute("UPDATE segments SET cache_path = 'old.wav', cache_rendered_at = 'x' WHERE id = ?", (mid,))
+    conn.commit()
+    before = conn.execute("SELECT analyzed_at FROM segment_analysis WHERE segment_id = ?", (mid,)).fetchone()[0]
+
+    # Shorter replacement: the manual segment now overruns the file.
+    summary = _replace_and_rescan(lib, f, conn, _clicks([0.0, 1.0, 2.0], duration_s=3.2))
+
+    row = conn.execute("SELECT * FROM segments WHERE id = ?", (mid,)).fetchone()
+    assert (row["start_ms"], row["end_ms"]) == (3000, 3900)     # bounds never touched (§6.3)
+    assert row["needs_review"] == 1                            # ... but flagged
+    assert row["cache_path"] is None                           # render of the old audio dropped
+    after = conn.execute("SELECT analyzed_at FROM segment_analysis WHERE segment_id = ?", (mid,)).fetchone()[0]
+    assert after > before                                      # descriptors redone on the new audio
+    assert summary.manual_flagged == 1 and summary.manual_kept == 1
+    assert "needing review" in summary.format()
+    conn.close()
+
+
+def test_manual_segment_inside_the_new_file_is_unflagged(tmp_path):
+    lib, f, conn = _loop_then_scan(tmp_path)
+    sid = conn.execute("SELECT id FROM samples").fetchone()[0]
+    mid = create_manual_segment(conn, sid, 100, 900)
+
+    _replace_and_rescan(lib, f, conn, _clicks([0.0, 1.0, 2.0], duration_s=3.2))
+
+    assert conn.execute("SELECT needs_review FROM segments WHERE id = ?", (mid,)).fetchone()[0] == 0
+    conn.close()
+
+
+def test_segments_created_counts_rows_not_candidates(indexed):
+    lib, conn = indexed
+    summary = segment_pending(conn)
+
+    assert summary.segments_created == conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0]
+
+
+def test_one_exploding_file_does_not_abort_the_run(tmp_path, monkeypatch):
+    import crate.segmentation as mod
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    for name in ("a.wav", "b_boom.wav", "c.wav"):
+        _write(lib / name, _clicks([i * 0.5 for i in range(8)], duration_s=4.0))
+    conn = open_db(tmp_path / "index.db")
+    scan_library(conn, lib)
+    analyze_pending(conn)
+    real_load = mod.load_audio
+
+    def boom_on_b(path):
+        if "boom" in str(path):
+            raise RuntimeError("simulated librosa edge case past decode")
+        return real_load(path)
+
+    monkeypatch.setattr(mod, "load_audio", boom_on_b)
+
+    summary = segment_pending(conn)
+
+    assert summary.samples_segmented == 2
+    assert summary.failed == 1
+    assert any("RuntimeError" in e for e in summary.error_samples)
+    stamped = conn.execute("SELECT COUNT(*) FROM samples WHERE segments_detected_at IS NOT NULL").fetchone()[0]
+    assert stamped == 2                                       # the failed one is rolled back, not stamped
+    conn.close()

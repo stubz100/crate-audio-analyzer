@@ -414,3 +414,71 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 1. Phase 4 — Embeddings & Classification: CLAP for samples and segments (`ml` extra: torch, transformers, laion-clap), node `E` for Facet A, filling `segment_embedding`/`segment_classification`. This is the first phase with a real model download and the ~25–40 h full-library cost §3 warns about, so time a subset before committing to a library-wide run.
 2. Revisit `--max-segments` and `--sensitivity` once segments are auditionable (Phase 4.5) — that is the first point where the tuning pass §13 risk #1 calls for can be judged by ear rather than by number.
+
+## 2026-09-06 — Code review of the application (Phases 0–3)
+
+**Phase:** review only · **no code changed, nothing committed** (fixes and this entry go in together, as with the Phase 1 review)
+
+**Done**
+
+- Whole-application review at high effort over `src/crate` and `tests` at `f9c095e`. A multi-agent review run was cut off by a session limit with one angle (simplification) reporting; the rest was done by hand, every finding re-checked against the code, and the important ones reproduced with probes rather than argued.
+
+**Fix before user-owned data accumulates (Phase 4.5 / 11) — all reproduced**
+
+| Where | Finding |
+|---|---|
+| `scanner.py:336` | **A rename or folder move inside the library destroys user-owned data.** The scanner keys on `filepath`, so a moved file is a vanished row plus an added row; the DELETE cascades `classification` (including `is_user_confirmed = 1`), manual `segments`, `analysis`, and from Phase 4 every embedding — 25–40 h of compute per full pass, thrown away by dragging a folder. Probe: scan, confirm a classification, add a manual segment, move the file into a subfolder, rescan → `added=1 removed=1`, confirmed classifications 1→0, manual segments 1→0. Fix: before deleting `vanished`, pair them with `inserts` by `file_size`, hash only those pairs, and on a match UPDATE the existing row's path/folder/name so the id (and every FK) survives. Cheap now; unfixable in retrospect. |
+| `segmentation.py:486` | **Stale auto segments survive a type flip.** The worklist's node-S SQL excludes one-shots, so a sample re-typed to one-shot after a content change keeps its old auto segments and stays flagged stale forever. Probe: 8-hit loop → 5 segments; file replaced by a one-shot → typed one-shot, `segment_pending` processes 0 samples, 5 auto segments remain. Fix: worklist = new-or-stale of any type; a one-shot clears its auto segments and stamps `segments_detected_at`. |
+| `segmentation.py:437` | **Manual segments are never re-described after the parent's content changes, and their bounds are not re-validated.** Probe: manual 3.0–3.9 s segment, file replaced by a 3.2 s one → descriptors untouched, segment now indexes 700 ms past the end. §6.3 protects bounds from automatic overwrite; descriptors are derived data and should refresh, and an out-of-range manual segment should be flagged, not silently kept. |
+
+**Robustness — cheap now**
+
+| Where | Finding |
+|---|---|
+| `analysis.py:791`, `segmentation.py:503` | Only decode failures are non-fatal; any other exception in a per-sample call (librosa on an exotic file, or `MemoryError` — HPSS holds several float32 STFT copies, a 10-minute field recording is ~1.3 GB peak) aborts the whole multi-hour run. Not reproduced: five pathological inputs (NaN/inf float WAVs, 1-sample, all-zero, DC) were all caught at decode, and the indexed packs top out at 37.5 s. The full library will not. A `try/except Exception` per sample (count, log, continue) is four lines and belongs before the first full-library run. |
+| `db.py:257` | No `journal_mode=WAL` / `busy_timeout`. From Phase 4.5 a GUI reads while a CLI run writes for hours; with the default rollback journal readers see "database is locked" during every commit. Two PRAGMAs in `open_db`, before any UI code assumes concurrency. |
+| `scanner.py:177` | Directory junctions are followed (verified with `mklink /J`: `is_dir(follow_symlinks=False)` is True, `is_symlink()` False) with no cycle guard — a junction pointing at an ancestor recurses forever. Rare, but a silent hang on a 110k-file walk. `DirEntry.is_junction()` (3.12) or a visited-inode set. |
+| `segmentation.py:519` | `segments_created` counts candidates, not inserted rows; `INSERT OR IGNORE` can drop one (duplicate rounded bounds, or a window that rounds to 0 ms fails the CHECK) and the summary still counts it. Use `cursor.rowcount`. The per-sample `manual_kept` COUNT query (line 504) is ~110k queries on a full run reporting something the run never touches — drop or compute once. |
+
+**Simplification / reuse (the surviving review angle, verified)**
+
+- `analysis.py:79/493` + `segmentation.py:375`: three hand-maintained copies of the descriptor field list plus two CREATE TABLEs. A field added to `CoreDescriptors` but not to `_SHARED_DESCRIPTOR_FIELDS` is computed and silently stored NULL, and `test_descriptors_cover_every_analysis_column` cannot catch it (it checks `Descriptors` against the table, not the copy). Make `Descriptors` extend `CoreDescriptors` and build it with `Descriptors(**asdict(core))`.
+- `cli.py:34–248`: three entry points re-declare `--db`, `-v`, logging, open/close, print, and have already drifted (scan defaults to WARNING, the others INFO; three `-v` help strings; line 189 is an f-string with no placeholder). Shared parent parser + one `_run()` helper.
+- `segmentation.py:193`: `is_segmentation_candidate` (the Python node S) has no production caller — `segment_pending` gates in SQL. The SQL gate *is* covered by `test_segment_pending_skips_one_shots…`, so this is duplication rather than a coverage hole; keep one.
+- `segmentation.py:540–604`: `create_manual_segment`/`update_segment` share an identical load→describe→commit tail; `_parent_row` selects three columns nobody reads.
+- `wavmeta.py:129`: unreachable `except struct.error` (every unpack is length-guarded) and split padding logic. Also line 77 rejects a chunk with `tempo == 0.0` outright, discarding valid `beats`/`root_note` — tempo is derived from beats anyway.
+- Lint: `segmentation.py` imports `Path` and `ANALYSIS_SR` unused; `test_segmentation.py` carries a leftover `(0.01, 0.5100000000000001) not in bounds` assertion.
+
+**Observations (not defects)**
+
+- The filename-BPM tier types 15 of the drum pack's 362 loops with a single dominant onset (sustained "Loop Elements" — correct). The same rule would type a pack-tempo-labelled one-shot (`…_128bpm_C#_1.wav` in the vocal packs) as a loop whenever its length is a whole number of beats ±0.1, roughly a 20% chance per such file. Watch when the vocal packs are indexed.
+- Analyze and segment each decode and HPSS-split every candidate file (0.26 + 0.39 s/file). Spec §7 runs C→S→T on one buffer; a single-pass option would save about a third of the full-library cost.
+- Path casing is not an issue: `Path.resolve()` normalises drive letter and folder case on this machine (probed).
+- CLAUDE.md constraints all hold: nothing runs automatically, segments never appear in `samples`, RX2 is skip-and-log, dependencies arrive by phase, staleness is a flag.
+
+**Verified** — 85 tests pass at `f9c095e`; every "reproduced" line above is a probe run this session against synthetic fixtures in a temp dir, not against the real index.
+
+**Next**
+
+1. Fix the three data-integrity items (rename reconciliation, type-flip clearing, manual-segment refresh/flag) with regression tests, then the per-sample exception guard and the two PRAGMAs — one commit, this entry with it.
+2. The simplification items in a second commit.
+3. Then Phase 4.
+
+## 2026-09-06 — Review fixes 1/2: data integrity + robustness
+
+**Phase:** post-review fixes (Phases 1–3) · commit cited in the next entry
+
+**Done**
+
+- **Moves/renames survive** (`scanner._reconcile_moves`): vanished rows are paired with added files by content before anything is deleted — tier 1 by stored hash, tier 2 (never-hashed rows, the common case) by identical filename + size + duration + rate + channels with exactly one candidate on each side, i.e. a folder move. The row is UPDATEd in place, so its id and every FK'd row (confirmed classification, manual segments, analysis, later embeddings) survive and nothing is re-analysed. Ambiguous twins fall back to delete + add. Summary now reports `moved`.
+- **Type flip clears stale auto segments**: `segment_pending` visits every new-or-stale sample regardless of type; a one-shot has its auto segments cleared and is stamped (`one_shots_skipped`). Node `S` now reads `classification.structural_type` — the DB's value, so a manual correction to one-shot (§11) is honoured.
+- **Manual segments refreshed after a content change**: descriptors redone, cached render dropped, and `needs_review` (schema **v5**) set when the segment now ends past the file. Bounds never touched (§6.3). Reported as `manual segments needing review`.
+- **Per-sample exception isolation** in `analyze_pending` and `segment_pending`: anything past decode is rolled back, logged at WARNING, counted, skipped.
+- `open_db`: `journal_mode=WAL` + `busy_timeout=5000`; `.gitignore` covers the WAL sidecars.
+- Junction cycle guard in `_walk_files` (visited real paths); junctions are still followed.
+- `segments_created` counts rows written; `manual_kept` is one query per run.
+
+**Verified**
+
+- `uv run pytest tests -q` → **97 passed** (85 + 12 regression: folder move keeps id/dependents, rename by hash, ambiguous twins not guessed, junction cycle terminates, WAL + timeout, v2→v5 migration, type flip, manual refresh/flag, in-range manual unflagged, row-count summary, exploding file in each driver).
+- Real index: `crate-scan` on the ModeAudio root → `unchanged 322 | moved 0`, schema v4→v5 in place, `journal_mode` = wal.

@@ -19,7 +19,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 # v1 = Phase 1: `samples`
 # v2 = Phase 2: `analysis` + `classification`
 # v3 = Phase 2 review: staleness timestamps (`samples.content_changed_at`,
@@ -27,6 +27,8 @@ SCHEMA_VERSION = 4
 #      mirror table (`content_class`, `structural_type`, `confidence`)
 # v4 = Phase 3: `segments` + `segment_analysis` / `segment_embedding` /
 #      `segment_classification` (spec §6, §8)
+# v5 = Phase 3 review: `segments.needs_review` (a manual segment whose parent's
+#      content changed underneath it)
 
 
 def now_iso() -> str:
@@ -145,6 +147,10 @@ CREATE TABLE IF NOT EXISTS segments (
                                                       -- the parent; the cap's tie-break (§6.2)
     detected_at       TEXT,                           -- ISO-8601 UTC; stale when older than
                                                       -- samples.content_changed_at
+    needs_review      INTEGER NOT NULL DEFAULT 0,     -- manual segment whose parent's content
+                                                      -- changed and now ends past the file (§6.3:
+                                                      -- bounds are never touched automatically,
+                                                      -- so they are flagged instead)
     cache_path        TEXT,                           -- lazy render target (§6.5) — Phase 4.5/9
     cache_rendered_at TEXT,
     UNIQUE (sample_id, start_ms, end_ms, detection_method),
@@ -237,10 +243,15 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
     _add_column(conn, "samples", "segments_detected_at", "TEXT")
 
 
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    _add_column(conn, "segments", "needs_review", "INTEGER NOT NULL DEFAULT 0")
+
+
 _MIGRATIONS: dict[int, list] = {
     2: [],              # v1 -> v2: new tables only; SCHEMA's CREATE IF NOT EXISTS covers it
     3: [_migrate_v3],   # v2 -> v3: staleness timestamps + spec §8 classification columns
     4: [_migrate_v4],   # v3 -> v4: segment tables + samples.segments_detected_at
+    5: [_migrate_v5],   # v4 -> v5: segments.needs_review
 }
 
 
@@ -257,6 +268,13 @@ def open_db(db_path: Path | str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # A GUI will read this index while a CLI run writes to it for hours (spec
+    # §9.6 recompute actions). WAL lets readers proceed during a writer's
+    # commit, and the busy timeout turns the few remaining lock collisions
+    # into short waits instead of "database is locked" errors (2026-09-06
+    # review). In-memory databases report 'memory' here, which is fine.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version > SCHEMA_VERSION:
         conn.close()

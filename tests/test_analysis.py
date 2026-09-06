@@ -423,3 +423,33 @@ def test_analyze_pending_honours_the_one_shot_cap(tmp_path):
     analyze_pending(conn, reanalyze=True, one_shot_max_duration_s=None)
     assert conn.execute("SELECT structural_type FROM classification").fetchone()[0] == "one-shot"
     conn.close()
+
+
+def test_one_exploding_file_does_not_abort_the_run(tmp_path, monkeypatch):
+    """2026-09-06 review: only decode failures were non-fatal; anything else
+    took the whole multi-hour run down."""
+    import crate.analysis as mod
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _write(lib / "a.wav", _tone(220.0, 0.3))
+    _write(lib / "b_boom.wav", _tone(330.0, 0.3))
+    _write(lib / "c.wav", _tone(440.0, 0.3))
+    conn = open_db(tmp_path / "index.db")
+    scan_library(conn, lib)
+    real_analyze = mod.analyze_file
+
+    def boom_on_b(path):
+        if "boom" in str(path):
+            raise MemoryError("simulated: 10-minute field recording")
+        return real_analyze(path)
+
+    monkeypatch.setattr(mod, "analyze_file", boom_on_b)
+
+    summary = analyze_pending(conn)
+
+    assert summary.analyzed == 2
+    assert summary.failed == 1
+    assert any("MemoryError" in e for e in summary.error_samples)
+    assert conn.execute("SELECT COUNT(*) FROM analysis").fetchone()[0] == 2
+    conn.close()

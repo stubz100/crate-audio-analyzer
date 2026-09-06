@@ -178,3 +178,26 @@ def test_unversioned_phase1_index_is_migrated(tmp_path):
         assert "structural_type" in _columns(conn, "classification")
     finally:
         conn.close()
+
+
+def test_file_database_uses_wal_with_a_busy_timeout(tmp_path):
+    # 2026-09-06 review: a GUI will read while a CLI run writes for hours.
+    conn = open_db(tmp_path / "crate.db")
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        conn.close()
+
+
+def test_old_index_gains_needs_review(tmp_path):
+    db_path = tmp_path / "old.db"
+    raw = sqlite3.connect(db_path)
+    raw.executescript(_V2_SHAPE + "PRAGMA user_version = 2;")
+    raw.close()
+    conn = open_db(db_path)  # v2 -> current in one open
+    try:
+        assert "needs_review" in _columns(conn, "segments")
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        conn.close()

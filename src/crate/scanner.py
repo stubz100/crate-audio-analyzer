@@ -57,6 +57,7 @@ class ScanSummary:
     added: int = 0
     changed: int = 0
     unchanged: int = 0  # includes hash-demoted files (content identical)
+    moved: int = 0      # renamed/moved: row updated in place, dependents kept
     removed: int = 0
     unreadable: int = 0  # supported ext, header unreadable (row kept, NULL metadata)
     walk_errors: int = 0  # listing/stat failures; affected rows kept, never removed
@@ -70,7 +71,7 @@ class ScanSummary:
         lines = [
             f"root: {self.root}",
             f"added {self.added} | changed {self.changed} | "
-            f"unchanged {self.unchanged} | removed {self.removed}",
+            f"unchanged {self.unchanged} | moved {self.moved} | removed {self.removed}",
         ]
         if self.unreadable:
             lines.append(
@@ -141,6 +142,94 @@ def _metadata_or_null(path: Path, summary: ScanSummary) -> tuple:
     return meta
 
 
+def _reconcile_moves(
+    conn: sqlite3.Connection,
+    vanished: list[str],
+    inserts: list[tuple],
+    now: str,
+) -> tuple[set[int], set[str], list[tuple]]:
+    """Pair vanished rows with added files that are the same content, so a
+    move or rename updates the row in place instead of delete + insert.
+
+    Why (2026-09-06 review): deleting a row cascades everything hanging off it
+    — confirmed classifications, manual segments, analysis, and from Phase 4
+    every embedding. Reorganising a folder would silently throw all of that
+    away and re-run hours of compute.
+
+    Two tiers, in order of certainty:
+      1. The old row has a stored hash and the new file hashes the same.
+      2. No stored hash (the common case — spec §8 defers hashing until a
+         change): same filename, size, duration, rate and channels, with
+         exactly one candidate on each side. That is a folder move; a pure
+         rename of a never-hashed file is not guessed at.
+    Files hashed here keep their hash, so their next move is a tier-1 match.
+
+    Returns (insert indexes consumed, vanished paths consumed, UPDATE rows).
+    """
+    if not vanished or not inserts:
+        return set(), set(), []
+    old_rows: list[sqlite3.Row] = []
+    chunk = 500
+    for start in range(0, len(vanished), chunk):
+        batch = vanished[start : start + chunk]
+        marks = ",".join("?" for _ in batch)
+        old_rows.extend(
+            conn.execute(
+                "SELECT id, filepath, filename, file_size, file_hash, duration_s, "
+                f"sample_rate, channels FROM samples WHERE filepath IN ({marks})",
+                batch,
+            )
+        )
+    by_size: dict[int, list[sqlite3.Row]] = {}
+    for row in old_rows:
+        by_size.setdefault(row["file_size"], []).append(row)
+    if not by_size:
+        return set(), set(), []
+    insert_keys: dict[tuple, int] = {}  # (size, filename) -> how many added files
+    for ins in inserts:
+        key = (ins[9], ins[1])
+        insert_keys[key] = insert_keys.get(key, 0) + 1
+
+    consumed_inserts: set[int] = set()
+    consumed_vanished: set[str] = set()
+    moves: list[tuple] = []
+    for index, ins in enumerate(inserts):
+        path_str, name, rel_folder, dur, sr, ch, _a, _l, _c, size, mtime = ins
+        candidates = [
+            r for r in by_size.get(size, []) if r["filepath"] not in consumed_vanished
+        ]
+        if not candidates:
+            continue
+        match = None
+        new_hash = None
+        hashed = [r for r in candidates if r["file_hash"] is not None]
+        if hashed:
+            try:
+                new_hash = _hash_file(Path(path_str))
+            except OSError as exc:
+                log.debug("move check could not hash %s (%s)", path_str, exc)
+                continue
+            match = next((r for r in hashed if r["file_hash"] == new_hash), None)
+        if match is None:
+            same = [
+                r for r in candidates
+                if r["file_hash"] is None and r["filename"] == name
+                and r["duration_s"] == dur and r["sample_rate"] == sr
+                and r["channels"] == ch
+            ]
+            if len(same) == 1 and insert_keys[(size, name)] == 1:
+                match = same[0]
+        if match is None:
+            continue
+        consumed_inserts.add(index)
+        consumed_vanished.add(match["filepath"])
+        moves.append(
+            (path_str, name, rel_folder, now, mtime,
+             new_hash or match["file_hash"], match["id"])
+        )
+    return consumed_inserts, consumed_vanished, moves
+
+
 def _under_root_prefix(root: Path) -> str:
     """Prefix matching every path strictly under `root` — drive-root safe.
 
@@ -165,8 +254,14 @@ def _walk_files(
     the cost of being wrong is one stale row versus deleted rows.
     """
     stack: list[tuple[Path, str]] = [(root, "")]
-    while stack:
-        dirpath, rel_folder = stack.pop()
+    visited: set[str] = set()  # real paths: junctions are followed (a library
+    while stack:               # relocated via junction should index), but a
+        dirpath, rel_folder = stack.pop()  # junction back to an ancestor must
+        real = os.path.realpath(dirpath)   # not walk forever (2026-09-06 review)
+        if real in visited:
+            log.debug("directory already walked (junction cycle?): %s", dirpath)
+            continue
+        visited.add(real)
         try:
             entries = list(os.scandir(dirpath))
         except OSError as exc:
@@ -296,6 +391,27 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
             conn.executemany(sql, rows[start : start + _COMMIT_BATCH])
             conn.commit()
 
+    # Removal candidates: only rows under this root whose file truly vanished.
+    # One DB may hold several roots, so other roots' rows are never touched.
+    # Rows under a failed listing, or whose stat/hash failed, are PROTECTED —
+    # an unreadable entry is unknown state, not a deletion (2026-09-06 review).
+    vanished = [
+        filepath
+        for filepath in known
+        if filepath not in seen
+        and filepath.startswith(root_prefix)
+        and filepath not in failed_files
+        and not any(filepath.startswith(d) for d in failed_dirs)
+    ]
+    # ... but a vanished row plus an added file with the same content is a
+    # move, and the row must survive with its id (and everything FK'd to it).
+    used_inserts, used_vanished, moves = _reconcile_moves(conn, vanished, inserts, now)
+    if used_inserts:
+        inserts = [ins for i, ins in enumerate(inserts) if i not in used_inserts]
+        vanished = [fp for fp in vanished if fp not in used_vanished]
+        summary.added -= len(used_inserts)
+        summary.moved = len(used_inserts)
+
     _executemany(
         """
         INSERT INTO samples
@@ -328,19 +444,16 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
         """,
         updates,
     )
+    _executemany(
+        """
+        UPDATE samples
+        SET filepath = ?, filename = ?, folder = ?, last_scanned_at = ?,
+            file_mtime = ?, file_hash = ?
+        WHERE id = ?
+        """,
+        moves,
+    )
 
-    # Removal: only rows under this root whose file truly vanished. One DB
-    # may hold several roots, so other roots' rows are never touched. Rows
-    # under a failed listing, or whose stat/hash failed, are PROTECTED — an
-    # unreadable entry is unknown state, not a deletion (2026-09-06 review).
-    vanished = [
-        filepath
-        for filepath in known
-        if filepath not in seen
-        and filepath.startswith(root_prefix)
-        and filepath not in failed_files
-        and not any(filepath.startswith(d) for d in failed_dirs)
-    ]
     if vanished:
         _executemany(
             "DELETE FROM samples WHERE filepath = ?", [(fp,) for fp in vanished]

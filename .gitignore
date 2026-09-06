@@ -22,6 +22,8 @@ desktop.ini
 
 # App data — local index/cache, not source (future phases)
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 .crate_cache/

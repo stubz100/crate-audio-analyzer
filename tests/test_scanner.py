@@ -317,3 +317,92 @@ def test_scan_flags_stale_analysis_but_never_recomputes(scanned_tree):
     assert "stale analysis: 1" in summary.format()
     # Flagged, not recomputed (spec §9.6: nothing expensive runs by itself).
     assert conn.execute("SELECT COUNT(*) FROM analysis").fetchone()[0] == 1
+
+
+# --- Moves and renames keep the row (2026-09-06 application review) ----------
+
+
+def _dependents(conn, sample_id):
+    return (
+        conn.execute("SELECT is_user_confirmed FROM classification WHERE sample_id = ?", (sample_id,)).fetchone()[0],
+        conn.execute("SELECT COUNT(*) FROM segments WHERE sample_id = ?", (sample_id,)).fetchone()[0],
+    )
+
+
+def test_folder_move_keeps_the_row_and_everything_hanging_off_it(scanned_tree):
+    root, conn = scanned_tree
+    scan_library(conn, root)
+    old = _rows(conn)[str(root / "a.wav")]
+    conn.execute(
+        "INSERT INTO classification (sample_id, structural_type, provenance, is_user_confirmed) "
+        "VALUES (?, 'loop', 'manual', 1)", (old["id"],))
+    conn.execute(
+        "INSERT INTO segments (sample_id, start_ms, end_ms, detection_method, is_user_confirmed) "
+        "VALUES (?, 10, 40, 'manual', 1)", (old["id"],))
+    conn.commit()
+
+    (root / "Drums").mkdir()
+    os.rename(root / "a.wav", root / "Drums" / "a.wav")
+    summary = scan_library(conn, root)
+
+    assert (summary.moved, summary.added, summary.removed) == (1, 0, 0)
+    rows = _rows(conn)
+    assert str(root / "a.wav") not in rows
+    moved = rows[str(root / "Drums" / "a.wav")]
+    assert moved["id"] == old["id"]
+    assert moved["folder"] == "Drums"
+    assert moved["content_changed_at"] == old["content_changed_at"]  # content is the same
+    assert _dependents(conn, old["id"]) == (1, 1)  # confirmed classification + manual segment survive
+
+
+def test_rename_matches_by_hash_once_the_hash_is_known(scanned_tree):
+    root, conn = scanned_tree
+    scan_library(conn, root)
+    target = root / "a.wav"
+    _write_audio(target, seconds=0.2)       # a change: the hash gets stored
+    scan_library(conn, root)
+    old_id = _rows(conn)[str(target)]["id"]
+    assert _rows(conn)[str(target)]["file_hash"] is not None
+
+    os.rename(target, root / "kick_final.wav")   # pure rename, new name
+    summary = scan_library(conn, root)
+
+    assert summary.moved == 1 and summary.removed == 0
+    assert _rows(conn)[str(root / "kick_final.wav")]["id"] == old_id
+
+
+def test_ambiguous_twins_are_not_guessed(tmp_path):
+    # Two identical never-hashed files with the same name, both moved: which is
+    # which cannot be known, so neither is matched (delete + add is the safe call).
+    root = tmp_path / "lib"
+    _write_audio(root / "x" / "hit.wav")
+    _write_audio(root / "y" / "hit.wav")
+    conn = open_db(tmp_path / "crate.db")
+    try:
+        scan_library(conn, root)
+        for sub in ("x", "y"):
+            (root / f"{sub}2").mkdir()
+            os.rename(root / sub / "hit.wav", root / f"{sub}2" / "hit.wav")
+        summary = scan_library(conn, root)
+        assert summary.moved == 0
+        assert (summary.added, summary.removed) == (2, 2)
+    finally:
+        conn.close()
+
+
+def test_junction_cycle_terminates(tmp_path):
+    # A directory junction back to an ancestor must not walk forever.
+    try:
+        import _winapi
+    except ImportError:  # pragma: no cover - Windows-only project
+        pytest.skip("directory junctions are a Windows feature")
+    root = tmp_path / "lib"
+    _write_audio(root / "a.wav")
+    _winapi.CreateJunction(str(root), str(root / "loop"))
+    conn = open_db(tmp_path / "crate.db")
+    try:
+        summary = scan_library(conn, root)
+        assert summary.added == 1            # a.wav once, not once per lap
+        assert summary.walk_errors == 0
+    finally:
+        conn.close()
