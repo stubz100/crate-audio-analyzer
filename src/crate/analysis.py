@@ -136,34 +136,6 @@ _FILENAME_BPM = re.compile(r"(?<!\d)(\d{2,3})\s*[-_ ]?\s*bpm", re.IGNORECASE)
 
 
 @dataclass
-class Descriptors:
-    """One `analysis` row's worth of signals (spec §8)."""
-
-    analyzed_at: str | None = None         # set by _store
-    tempo_bpm: float | None = None         # loops only (see module docstring)
-    tempo_confidence: float | None = None  # periodicity: detrended autocorrelation peak
-    onset_count: int = 0                   # dominant onsets on the percussive component
-    is_loop: int = 0
-    key: str | None = None                 # pitch class from ACID root note, if set
-    harmonic_ratio: float | None = None
-    embedded_metadata_json: str | None = None
-    peak_db: float | None = None
-    rms_db: float | None = None
-    crest_factor: float | None = None
-    attack_ms: float | None = None
-    decay_ms: float | None = None
-    f0_hz: float | None = None
-    pitch_confidence: float | None = None
-    mfcc_mean: str | None = None           # JSON array[13]
-    mfcc_var: str | None = None            # JSON array[13]
-    spectral_contrast: str | None = None   # JSON array[7]
-    spectral_centroid: float | None = None
-    spectral_bandwidth: float | None = None
-    spectral_rolloff: float | None = None
-    spectral_flatness: float | None = None
-
-
-@dataclass
 class AnalysisSummary:
     analyzed: int = 0
     refreshed_stale: int = 0     # of `analyzed`: rows re-done because content changed
@@ -373,17 +345,14 @@ class CoreDescriptors:
 
     `analysis` and `segment_analysis` are both filled from this — spec §8 makes
     the segment table a mirror of the sample one minus the file-level columns
-    (`is_loop`, `key`, `embedded_metadata_json`), so computing both from one
-    function is what stops the two from drifting apart.
-
-    `onsets`/`bpm_candidates` are working values for the caller's loop
-    decision, not stored columns.
+    (`is_loop`, `key`, `embedded_metadata_json`) — so one function fills both
+    and `Descriptors` *extends* this class rather than re-declaring its
+    fields: a column added here reaches both tables with no name list to
+    keep in step (2026-09-06 review).
     """
 
-    onsets: list[float] = field(default_factory=list)
-    bpm_candidates: list[float] = field(default_factory=list)
-    onset_count: int = 0
-    tempo_confidence: float | None = None
+    onset_count: int = 0                   # dominant onsets on the percussive component
+    tempo_confidence: float | None = None  # periodicity: detrended autocorrelation peak
     harmonic_ratio: float | None = None
     peak_db: float | None = None
     rms_db: float | None = None
@@ -392,24 +361,47 @@ class CoreDescriptors:
     decay_ms: float | None = None
     f0_hz: float | None = None
     pitch_confidence: float | None = None
-    mfcc_mean: str | None = None
-    mfcc_var: str | None = None
-    spectral_contrast: str | None = None
+    mfcc_mean: str | None = None           # JSON array[13]
+    mfcc_var: str | None = None            # JSON array[13]
+    spectral_contrast: str | None = None   # JSON array[7]
     spectral_centroid: float | None = None
     spectral_bandwidth: float | None = None
     spectral_rolloff: float | None = None
     spectral_flatness: float | None = None
 
 
-def describe_buffer(y: np.ndarray, sr: int = ANALYSIS_SR) -> CoreDescriptors:
+@dataclass
+class Descriptors(CoreDescriptors):
+    """One `analysis` row's worth of signals (spec §8): the buffer descriptors
+    plus the file-level columns only a whole sample has."""
+
+    analyzed_at: str | None = None         # set by _store
+    tempo_bpm: float | None = None         # loops only (see module docstring)
+    is_loop: int = 0
+    key: str | None = None                 # pitch class from ACID root note, if set
+    embedded_metadata_json: str | None = None
+
+
+@dataclass
+class LoopEvidence:
+    """Working values the loop decision needs — never stored."""
+
+    onsets: list[float] = field(default_factory=list)
+    bpm_candidates: list[float] = field(default_factory=list)
+
+
+def describe_buffer(
+    y: np.ndarray, sr: int = ANALYSIS_SR
+) -> tuple[CoreDescriptors, LoopEvidence]:
     """Node `C`'s descriptor work on one buffer — a whole file, or a segment
     window (node `C2`, spec §7). Never touches the filesystem."""
     import librosa
 
     c = CoreDescriptors()
+    ev = LoopEvidence()
     if y.size == 0:
         c.peak_db = c.rms_db = _SILENCE_FLOOR_DB
-        return c
+        return c, ev
 
     # A segment window can be shorter than one FFT frame. Zero-pad a working
     # copy for every transform-based descriptor (HPSS included) so they are
@@ -438,13 +430,13 @@ def describe_buffer(y: np.ndarray, sr: int = ANALYSIS_SR) -> CoreDescriptors:
     padded_env = librosa.onset.onset_strength(
         y=np.concatenate([lead_in, percussive]), sr=sr, hop_length=_HOP, **_SUPERFLUX
     )
-    c.onsets = _dominant_onsets(padded_env, sr, rms_env, _ONSET_LEAD_IN_FRAMES)
-    c.onset_count = len(c.onsets)
+    ev.onsets = _dominant_onsets(padded_env, sr, rms_env, _ONSET_LEAD_IN_FRAMES)
+    c.onset_count = len(ev.onsets)
     onset_env = padded_env[_ONSET_LEAD_IN_FRAMES:]
     confidence, ac_bpm = _periodicity(onset_env, sr)
     c.tempo_confidence = confidence
     if ac_bpm:
-        c.bpm_candidates.append(ac_bpm)
+        ev.bpm_candidates.append(ac_bpm)
     if confidence:
         try:
             tempo, _beats = librosa.beat.beat_track(
@@ -452,7 +444,7 @@ def describe_buffer(y: np.ndarray, sr: int = ANALYSIS_SR) -> CoreDescriptors:
             )
             bt_bpm = float(np.atleast_1d(tempo)[0])
             if bt_bpm > 0:
-                c.bpm_candidates.append(bt_bpm)
+                ev.bpm_candidates.append(bt_bpm)
         except Exception:  # pragma: no cover - librosa edge cases
             pass
 
@@ -462,7 +454,7 @@ def describe_buffer(y: np.ndarray, sr: int = ANALYSIS_SR) -> CoreDescriptors:
     c.peak_db, c.rms_db = _db_scale(peak), _db_scale(rms)
     c.crest_factor = float(peak / rms) if rms > 0 else None
     c.attack_ms, c.decay_ms = _envelope_times(
-        y, sr, c.onsets[0] if c.onsets else None, env=rms_env
+        y, sr, ev.onsets[0] if ev.onsets else None, env=rms_env
     )
 
     # --- Timbre / spectrum (§5.1) ---
@@ -487,15 +479,7 @@ def describe_buffer(y: np.ndarray, sr: int = ANALYSIS_SR) -> CoreDescriptors:
     # --- Pitch, gated on the HPSS harmonic share (§5.1) ---
     if c.harmonic_ratio is not None and c.harmonic_ratio >= PITCH_GATE_HARMONIC_RATIO:
         c.f0_hz, c.pitch_confidence = _pitch(y, sr)
-    return c
-
-
-_SHARED_DESCRIPTOR_FIELDS = (
-    "onset_count", "tempo_confidence", "harmonic_ratio",
-    "peak_db", "rms_db", "crest_factor", "attack_ms", "decay_ms",
-    "f0_hz", "pitch_confidence", "mfcc_mean", "mfcc_var", "spectral_contrast",
-    "spectral_centroid", "spectral_bandwidth", "spectral_rolloff", "spectral_flatness",
-)
+    return c, ev
 
 
 def load_audio(path: Path | str) -> tuple[np.ndarray, int] | None:
@@ -518,15 +502,12 @@ def analyze_file(path: Path | str) -> Descriptors | None:
         return None
     y, sr = loaded
 
-    d = Descriptors()
+    core, evidence = describe_buffer(y, sr)
+    d = Descriptors(**asdict(core))
     embedded = read_embedded_metadata(path) or {}
     if embedded:
         d.embedded_metadata_json = json.dumps(embedded, separators=(",", ":"))
     d.key = _embedded_key(embedded)
-
-    core = describe_buffer(y, sr)
-    for name in _SHARED_DESCRIPTOR_FIELDS:
-        setattr(d, name, getattr(core, name))
     if y.size == 0:
         return d
 
@@ -535,8 +516,8 @@ def analyze_file(path: Path | str) -> Descriptors | None:
         d,
         y.size / sr,
         embedded,
-        core.bpm_candidates,
-        onsets=core.onsets,
+        evidence.bpm_candidates,
+        onsets=evidence.onsets,
         filename=path.name,
     )
     d.is_loop = int(is_loop)

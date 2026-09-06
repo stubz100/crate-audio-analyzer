@@ -46,20 +46,16 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 
 from .analysis import (
-    ANALYSIS_SR,
-    ONE_SHOT_MAX_DURATION_S,
     _HOP,
     _ONSET_LEAD_IN_FRAMES,
     _SUPERFLUX,
-    Descriptors,
+    CoreDescriptors,
     describe_buffer,
     load_audio,
-    structural_type,
 )
 from .db import now_iso
 
@@ -199,21 +195,13 @@ class SegmentationSummary:
 
 
 # --- node S: the gate -----------------------------------------------------------
-
-
-def is_segmentation_candidate(
-    duration_s: float,
-    onset_count: int,
-    one_shot_max_duration_s: float | None = ONE_SHOT_MAX_DURATION_S,
-) -> bool:
-    """Node `S` (spec §7): is there anything inside this file worth finding?
-
-    Delegates to Facet B's own one-shot test so the gate can never drift from
-    the taxonomy: a clean single-hit one-shot is skipped, everything else is a
-    candidate.
-    """
-    stub = Descriptors(onset_count=onset_count, is_loop=0)
-    return structural_type(stub, duration_s, one_shot_max_duration_s) != "one-shot"
+#
+# Node `S` (spec §7) is the question "is there anything inside this file worth
+# finding?", and its answer is `classification.structural_type != 'one-shot'`,
+# read from the index in `segment_pending`. There is deliberately no second,
+# recomputed version of that test here: the stored type already reflects the
+# duration cap that was in force at analysis time AND any manual correction
+# (§11), and a recomputation would honour neither (2026-09-06 review).
 
 
 def choose_profile(settings: SegmentationSettings, structural_type_value: str) -> str:
@@ -383,11 +371,11 @@ def detect(
 
 # --- persistence -------------------------------------------------------------------
 
-_SEGMENT_DESCRIPTOR_FIELDS = (
-    "onset_count", "harmonic_ratio", "peak_db", "rms_db", "crest_factor",
-    "attack_ms", "decay_ms", "f0_hz", "pitch_confidence",
-    "mfcc_mean", "mfcc_var", "spectral_contrast",
-    "spectral_centroid", "spectral_bandwidth", "spectral_rolloff", "spectral_flatness",
+# The segment table mirrors `analysis` minus the file-level columns (spec §8)
+# and minus `tempo_confidence`; derived from CoreDescriptors so a new
+# descriptor reaches segments without a name list to remember.
+_SEGMENT_DESCRIPTOR_FIELDS = tuple(
+    name for name in CoreDescriptors.__dataclass_fields__ if name != "tempo_confidence"
 )
 
 
@@ -406,8 +394,7 @@ def _write_segment_analysis(
     """
     start = max(0, int(start_ms * sr / 1000))
     end = min(y.size, int(end_ms * sr / 1000))
-    window = y[start:end]
-    core = describe_buffer(window, sr)
+    core, _evidence = describe_buffer(y[start:end], sr)
     columns = ("analyzed_at",) + _SEGMENT_DESCRIPTOR_FIELDS
     values = [now_iso()] + [getattr(core, name) for name in _SEGMENT_DESCRIPTOR_FIELDS]
     conn.execute(
@@ -417,12 +404,15 @@ def _write_segment_analysis(
     )
 
 
-def _parent_row(conn: sqlite3.Connection, segment_id: int) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT sg.id, sg.sample_id, sg.start_ms, sg.end_ms, s.filepath, s.duration_s "
-        "FROM segments sg JOIN samples s ON s.id = sg.sample_id WHERE sg.id = ?",
-        (segment_id,),
-    ).fetchone()
+def _describe_segment(
+    conn: sqlite3.Connection, segment_id: int, filepath: str, start_ms: int, end_ms: int
+) -> None:
+    """Decode the parent and describe one window; a decode failure leaves the
+    segment without descriptors (logged at DEBUG by load_audio), never raises."""
+    loaded = load_audio(filepath)
+    if loaded is not None:
+        y, sr = loaded
+        _write_segment_analysis(conn, segment_id, y, sr, start_ms, end_ms)
 
 
 def _clear_auto_segments(conn: sqlite3.Connection, sample_id: int) -> None:
@@ -677,10 +667,7 @@ def create_manual_segment(
     )
     segment_id = int(cursor.lastrowid)
     if analyze_segment:
-        loaded = load_audio(row[0])
-        if loaded is not None:
-            y, sr = loaded
-            _write_segment_analysis(conn, segment_id, y, sr, int(start_ms), int(end_ms))
+        _describe_segment(conn, segment_id, row[0], int(start_ms), int(end_ms))
     conn.commit()
     return segment_id
 
@@ -699,24 +686,25 @@ def update_segment(
     detection run. Any cached render is dropped: the bounds it was rendered
     from no longer hold (§6.5).
     """
-    row = _parent_row(conn, segment_id)
+    row = conn.execute(
+        "SELECT sg.start_ms, sg.end_ms, s.filepath FROM segments sg "
+        "JOIN samples s ON s.id = sg.sample_id WHERE sg.id = ?",
+        (segment_id,),
+    ).fetchone()
     if row is None:
         raise LookupError(f"no segment with id {segment_id}")
-    new_start = int(start_ms if start_ms is not None else row["start_ms"])
-    new_end = int(end_ms if end_ms is not None else row["end_ms"])
+    new_start = int(start_ms if start_ms is not None else row[0])
+    new_end = int(end_ms if end_ms is not None else row[1])
     if new_end <= new_start:
         raise ValueError(f"end_ms must be after start_ms ({new_start} -> {new_end})")
     conn.execute(
         "UPDATE segments SET start_ms = ?, end_ms = ?, detection_method = 'manual', "
-        "is_user_confirmed = 1, cache_path = NULL, cache_rendered_at = NULL, "
-        "detected_at = ? WHERE id = ?",
+        "is_user_confirmed = 1, needs_review = 0, cache_path = NULL, "
+        "cache_rendered_at = NULL, detected_at = ? WHERE id = ?",
         (new_start, new_end, now_iso(), segment_id),
     )
     if analyze_segment:
-        loaded = load_audio(row["filepath"])
-        if loaded is not None:
-            y, sr = loaded
-            _write_segment_analysis(conn, segment_id, y, sr, new_start, new_end)
+        _describe_segment(conn, segment_id, row[2], new_start, new_end)
     conn.commit()
 
 

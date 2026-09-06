@@ -1,16 +1,26 @@
-r"""Command-line runners: `crate-scan` (Phase 1) and `crate-analyze` (Phase 2).
+r"""Command-line runners: `crate-scan` (Phase 1), `crate-analyze` (Phase 2),
+`crate-segment` (Phase 3).
 
 Examples:
     crate-scan                                # full library, default DB
     crate-scan --root "D:\_soundPacks\Some Pack" --db subset.db
     crate-analyze --db subset.db --limit 60   # time a subset first (spec §3)
+    crate-segment --db subset.db --max-segments 8
+
+Every command takes `--db` and `-v`, logs progress at INFO — these are the
+multi-hour stages of spec §3, so a silent run is not acceptable — and per-file
+detail at DEBUG under `-v`, and prints one summary at the end. The shared
+parts live in `_parser` / `_run` so the three cannot drift (2026-09-06
+review: they had — three log levels and three `-v` help texts).
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from .analysis import ONE_SHOT_MAX_DURATION_S, analyze_pending
 from .config import DEFAULT_LIBRARY_PATH
@@ -18,8 +28,8 @@ from .db import default_db_path, open_db
 from .scanner import scan_library
 from .segmentation import (
     BOUNDARY_MODES,
-    DEFAULT_MAX_SEGMENTS,
     DEFAULT_MAX_LENGTH_S,
+    DEFAULT_MAX_SEGMENTS,
     DEFAULT_MIN_LENGTH_S,
     DEFAULT_SENSITIVITY,
     PROFILES,
@@ -31,19 +41,10 @@ from .segmentation import (
 _LOG_FORMAT = "%(levelname)s %(message)s"
 
 
-def scan_main(argv: list[str] | None = None) -> int:
+def _parser(prog: str, description: str) -> argparse.ArgumentParser:
+    """The arguments every command shares."""
     default_db = default_db_path()
-    parser = argparse.ArgumentParser(
-        prog="crate-scan",
-        description="Scan a sample library into the Crate SQLite index "
-        "(spec §7 node A; incremental via size+mtime diff).",
-    )
-    parser.add_argument(
-        "--root",
-        type=Path,
-        default=Path(DEFAULT_LIBRARY_PATH),
-        help=f"library root to scan (default: {DEFAULT_LIBRARY_PATH})",
-    )
+    parser = argparse.ArgumentParser(prog=prog, description=description)
     parser.add_argument(
         "--db",
         type=Path,
@@ -54,42 +55,50 @@ def scan_main(argv: list[str] | None = None) -> int:
         "-v",
         "--verbose",
         action="store_true",
-        help="stream per-file detail (unreadable headers, walk errors) "
-        "as it happens; the summary always shows counts regardless",
+        help="stream per-file detail (unreadable headers, walk errors, decode "
+        "failures) as it happens; the summary always shows counts regardless",
     )
-    args = parser.parse_args(argv)
+    return parser
 
-    # Default: quiet run, issues summarized at the end. -v: stream each
-    # unreadable header / walk error as DEBUG (2026-09-06 review — the old
-    # flag was a no-op with misleading help text).
+
+def _run(args: argparse.Namespace, job: Callable[[Any], Any]) -> int:
+    """Configure logging, open the index, run `job(conn)`, print its summary."""
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.WARNING, format=_LOG_FORMAT
+        level=logging.DEBUG if args.verbose else logging.INFO, format=_LOG_FORMAT
     )
-
     conn = open_db(args.db)
     try:
-        summary = scan_library(conn, args.root)
+        summary = job(conn)
     finally:
         conn.close()
-
     print(summary.format())
     return 0
 
 
-def analyze_main(argv: list[str] | None = None) -> int:
-    """`crate-analyze` — run nodes B/C over indexed samples (spec §7, Phase 2)."""
-    default_db = default_db_path()
-    parser = argparse.ArgumentParser(
-        prog="crate-analyze",
-        description="Derive the §5.1 descriptor set and Facet B structural type "
-        "for samples that are new or whose content changed since they were last "
-        "analyzed (spec §7 nodes B/C).",
+def scan_main(argv: list[str] | None = None) -> int:
+    """`crate-scan` — index a library root (spec §7 node A, Phase 1)."""
+    parser = _parser(
+        "crate-scan",
+        "Scan a sample library into the Crate SQLite index "
+        "(spec §7 node A; incremental via size+mtime diff, moves kept in place).",
     )
     parser.add_argument(
-        "--db",
+        "--root",
         type=Path,
-        default=default_db,
-        help=f"index database path (default: {default_db})",
+        default=Path(DEFAULT_LIBRARY_PATH),
+        help=f"library root to scan (default: {DEFAULT_LIBRARY_PATH})",
+    )
+    args = parser.parse_args(argv)
+    return _run(args, lambda conn: scan_library(conn, args.root))
+
+
+def analyze_main(argv: list[str] | None = None) -> int:
+    """`crate-analyze` — run nodes B/C over indexed samples (spec §7, Phase 2)."""
+    parser = _parser(
+        "crate-analyze",
+        "Derive the §5.1 descriptor set and Facet B structural type for samples "
+        "that are new or whose content changed since they were last analyzed "
+        "(spec §7 nodes B/C).",
     )
     parser.add_argument(
         "--limit",
@@ -118,48 +127,26 @@ def analyze_main(argv: list[str] | None = None) -> int:
         help="turn the length cap off: any sample with at most one dominant "
         "onset is a one-shot, however long (ringing hits, cinematic impacts)",
     )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="stream per-file detail (decode failures) as it happens",
-    )
     args = parser.parse_args(argv)
     one_shot_cap = None if args.one_shot_any_duration else args.one_shot_max_duration
-
-    # Progress is INFO and visible by default — this is the multi-hour stage
-    # (§3), so a silent run is not acceptable. -v adds per-file DEBUG detail.
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO, format=_LOG_FORMAT
-    )
-
-    conn = open_db(args.db)
-    try:
-        summary = analyze_pending(
+    return _run(
+        args,
+        lambda conn: analyze_pending(
             conn,
             limit=args.limit,
             reanalyze=args.reanalyze,
             one_shot_max_duration_s=one_shot_cap,
-        )
-    finally:
-        conn.close()
-
-    print(summary.format())
-    return 0
+        ),
+    )
 
 
 def segment_main(argv: list[str] | None = None) -> int:
     """`crate-segment` — transient segmentation, nodes S/T (spec §6, Phase 3)."""
-    default_db = default_db_path()
-    parser = argparse.ArgumentParser(
-        prog="crate-segment",
-        description="Find one-shot hits buried inside longer samples and index "
-        "them as segments (spec §6). Samples Facet B typed as one-shots are "
-        "skipped; manual segments are never touched.",
-    )
-    parser.add_argument(
-        "--db", type=Path, default=default_db,
-        help=f"index database path (default: {default_db})",
+    parser = _parser(
+        "crate-segment",
+        "Find one-shot hits buried inside longer samples and index them as "
+        "segments (spec §6). Samples Facet B typed as one-shots are skipped; "
+        "manual segments are never touched.",
     )
     parser.add_argument(
         "--limit", type=int, default=None,
@@ -186,7 +173,7 @@ def segment_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--min-length", type=float, default=DEFAULT_MIN_LENGTH_S, metavar="LEN",
-        help=f"shorter segments are dropped as noise (default: %(default)s)",
+        help="shorter segments are dropped as noise (default: %(default)s)",
     )
     parser.add_argument(
         "--min-length-unit", choices=UNITS, default="s",
@@ -209,15 +196,7 @@ def segment_main(argv: list[str] | None = None) -> int:
         help="index segment boundaries only, skipping the per-segment "
         "descriptor pass",
     )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true",
-        help="stream per-file detail (decode failures) as it happens",
-    )
     args = parser.parse_args(argv)
-
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO, format=_LOG_FORMAT
-    )
     try:
         settings = SegmentationSettings(
             profile=args.profile,
@@ -231,21 +210,16 @@ def segment_main(argv: list[str] | None = None) -> int:
         )
     except ValueError as exc:
         parser.error(str(exc))
-
-    conn = open_db(args.db)
-    try:
-        summary = segment_pending(
+    return _run(
+        args,
+        lambda conn: segment_pending(
             conn,
             settings=settings,
             limit=args.limit,
             resegment=args.resegment,
             analyze_segments=not args.no_segment_analysis,
-        )
-    finally:
-        conn.close()
-
-    print(summary.format())
-    return 0
+        ),
+    )
 
 
 if __name__ == "__main__":

@@ -142,3 +142,16 @@ def test_garbage_tempo_is_rejected(tmp_path):
     _write_wav_with_chunks(wav, _acid_chunk(tempo=99999.0))
 
     assert read_embedded_metadata(wav) is None
+
+
+def test_zero_tempo_placeholder_keeps_beats_and_root(tmp_path):
+    """The tempo field is a placeholder in practice; a 0.0 there must not
+    throw away a valid beat count and root note (2026-09-06 review)."""
+    wav = tmp_path / "zero_tempo.wav"
+    _write_wav_with_chunks(wav, _acid_chunk(flags=ACID_ROOT_SET, root_note=55, beats=16, tempo=0.0))
+
+    acid = read_embedded_metadata(wav)["acid"]
+
+    assert acid["beats"] == 16
+    assert acid["root_note"] == 55 and acid["root_set"] is True
+    assert acid["tempo_bpm"] == 0.0

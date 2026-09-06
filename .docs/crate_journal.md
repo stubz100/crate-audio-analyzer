@@ -466,7 +466,7 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 ## 2026-09-06 — Review fixes 1/2: data integrity + robustness
 
-**Phase:** post-review fixes (Phases 1–3) · commit cited in the next entry
+**Phase:** post-review fixes (Phases 1–3) · `8558a7a`
 
 **Done**
 
@@ -482,3 +482,18 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 - `uv run pytest tests -q` → **97 passed** (85 + 12 regression: folder move keeps id/dependents, rename by hash, ambiguous twins not guessed, junction cycle terminates, WAL + timeout, v2→v5 migration, type flip, manual refresh/flag, in-range manual unflagged, row-count summary, exploding file in each driver).
 - Real index: `crate-scan` on the ModeAudio root → `unchanged 322 | moved 0`, schema v4→v5 in place, `journal_mode` = wal.
+
+## 2026-09-06 — Review fixes 2/2: simplification
+
+**Phase:** post-review fixes (Phases 1–3) · commit cited in the next entry
+
+**Done**
+
+- `Descriptors` now *extends* `CoreDescriptors` (built with `Descriptors(**asdict(core))`); the loop-decision working values moved to a `LoopEvidence` return; the two hand-written field lists are gone and the segment list is derived from the class. A new lockstep test covers `segment_analysis` the way the Phase 2 one covers `analysis`.
+- `cli.py`: shared `_parser` (`--db`, `-v`) and `_run` (logging, open/close, summary); all three commands log at INFO, one `-v` help text, the placeholder-less f-string is gone. New `tests/test_cli.py` runs scan → analyze → segment end to end through the entry points and checks that a bad setting is an argparse error, not a traceback.
+- `is_segmentation_candidate` deleted: node `S` is `classification.structural_type`, read from the index, so manual corrections are honoured — a recomputation could not be. Documented in place.
+- Manual-segment create/update share `_describe_segment`; the unused-column `_parent_row` is gone; `update_segment` also clears `needs_review`.
+- `wavmeta`: unreachable `struct.error` handler removed, one word-alignment seek, and a `tempo == 0.0` ACID chunk no longer discards its valid beat count and root note (test added).
+- Unused imports and the leftover assertion removed.
+
+**Verified** — `uv run pytest tests -q` → **100 passed**; `crate-analyze --limit 5 --reanalyze` on the real index writes complete rows (0 NULL descriptor vectors across `analysis` and `segment_analysis`).

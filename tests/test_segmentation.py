@@ -21,7 +21,6 @@ from crate.segmentation import (
     delete_segment,
     detect,
     detect_transients,
-    is_segmentation_candidate,
     segment_pending,
     segment_sample,
     segments_for,
@@ -92,14 +91,16 @@ def test_length_rules_accept_seconds_or_percent_of_parent():
 # --- node S: the gate ----------------------------------------------------------
 
 
-def test_node_s_skips_clean_one_shots_only():
-    assert is_segmentation_candidate(duration_s=0.3, onset_count=1) is False
-    assert is_segmentation_candidate(duration_s=4.0, onset_count=8) is True
-    # Long but single-onset: a one-shot only while the duration cap is on.
-    assert is_segmentation_candidate(duration_s=6.0, onset_count=1) is True
-    assert is_segmentation_candidate(
-        duration_s=6.0, onset_count=1, one_shot_max_duration_s=None
-    ) is False
+def test_segment_descriptor_fields_cover_every_segment_analysis_column():
+    """The segment table is filled from CoreDescriptors by construction; keep
+    the two in lockstep the same way test_analysis does for `analysis`."""
+    from crate.segmentation import _SEGMENT_DESCRIPTOR_FIELDS
+
+    conn = open_db(":memory:")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(segment_analysis)")}
+    conn.close()
+
+    assert set(_SEGMENT_DESCRIPTOR_FIELDS) | {"segment_id", "analyzed_at", "tempo_bpm"} == cols
 
 
 def test_auto_profile_follows_structural_type():
@@ -164,8 +165,7 @@ def test_too_short_is_dropped_and_too_long_is_truncated():
 
     bounds = [(s.start_s, s.end_s) for s in result.segments]
     assert (0.0, 0.01) not in bounds                 # 10 ms gap dropped
-    assert (0.01, 0.5100000000000001) not in bounds  # truncated, not left at 1.99 s
-    assert bounds == [(0.01, 0.51), (2.0, 2.5)]
+    assert bounds == [(0.01, 0.51), (2.0, 2.5)]     # 0.01 s hit truncated at 0.5 s, not left at 1.99 s
     assert all(s.end_s - s.start_s <= 0.5 + 1e-9 for s in result.segments)
 
 

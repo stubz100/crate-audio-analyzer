@@ -73,8 +73,11 @@ def _parse_acid(body: bytes) -> dict | None:
     flags, root_note, _unknown1, _unknown2, beats, meter_den, meter_num, tempo = (
         _ACID_STRUCT.unpack_from(body, 0)
     )
-    # Guard against garbage: an ACIDized file has a sane tempo and beat count.
-    if not (0 <= beats <= 100_000) or not (0.0 < tempo <= 1000.0):
+    # Guard against garbage: an ACIDized file has a sane beat count and a tempo
+    # field that is at least not nonsense. Tempo 0.0 is allowed — the field is
+    # a placeholder in practice (see below) and the beat count is what matters;
+    # NaN fails both comparisons and is rejected.
+    if not (0 <= beats <= 100_000) or not (0.0 <= tempo <= 1000.0):
         return None
     # NOTE: `tempo` is frequently a nominal 120.0 placeholder rather than the
     # real tempo — measured across 52 ACIDized files in D:\_soundPacks, every
@@ -111,22 +114,17 @@ def read_embedded_metadata(path: Path | str) -> dict | None:
                     break
                 chunk_id = chunk_header[:4]
                 (chunk_size,) = struct.unpack_from("<I", chunk_header, 4)
-                pad = chunk_size & 1  # RIFF chunks are word-aligned
                 wanted = chunk_id in (b"smpl", b"acid") and chunk_id.decode() not in found
                 if wanted and chunk_size <= _MAX_CHUNK_BYTES:
-                    body = f.read(chunk_size)
                     parser = _parse_smpl if chunk_id == b"smpl" else _parse_acid
-                    parsed = parser(body)
+                    parsed = parser(f.read(chunk_size))  # short read → parser's length guard
                     if parsed:
                         found[chunk_id.decode()] = parsed
-                    if pad:
-                        f.seek(pad, os.SEEK_CUR)
                 else:
-                    f.seek(chunk_size + pad, os.SEEK_CUR)
+                    f.seek(chunk_size, os.SEEK_CUR)
+                f.seek(chunk_size & 1, os.SEEK_CUR)  # RIFF chunks are word-aligned
     except OSError as exc:
         log.debug("embedded metadata: unreadable file %s (%s)", path, exc)
         return None
-    except struct.error as exc:
-        log.debug("embedded metadata: malformed RIFF in %s (%s)", path, exc)
-        return found or None
+    # No struct.error path: every unpack is preceded by a length guard.
     return found or None
