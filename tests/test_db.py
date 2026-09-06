@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from crate.db import SCHEMA, open_db
+from crate.db import SCHEMA, SCHEMA_VERSION, open_db
 
 
 def test_open_db_creates_samples_table(tmp_path):
@@ -85,7 +85,7 @@ def test_schema_version_is_stamped(tmp_path):
         version = conn.execute("PRAGMA user_version").fetchone()[0]
     finally:
         conn.close()
-    assert version == 1
+    assert version == SCHEMA_VERSION
 
 
 def test_newer_schema_is_refused(tmp_path):
@@ -101,3 +101,80 @@ def test_newer_schema_is_refused(tmp_path):
     raw.close()
     with pytest.raises(RuntimeError):
         open_db(db_path)
+
+
+# --- Migrations (schema v3, 2026-09-06 Phase 2 review) ---
+
+_V2_SHAPE = """
+CREATE TABLE samples (
+    id INTEGER PRIMARY KEY, filepath TEXT NOT NULL UNIQUE, filename TEXT NOT NULL,
+    folder TEXT NOT NULL DEFAULT '', duration_s REAL, sample_rate INTEGER,
+    channels INTEGER, added_at TEXT NOT NULL, last_scanned_at TEXT NOT NULL,
+    file_size INTEGER NOT NULL, file_mtime REAL NOT NULL, file_hash TEXT,
+    segment_candidates_found INTEGER, segments_capped INTEGER,
+    effective_sensitivity REAL
+);
+CREATE TABLE analysis (
+    sample_id INTEGER NOT NULL UNIQUE REFERENCES samples(id) ON DELETE CASCADE,
+    tempo_bpm REAL, onset_count INTEGER
+);
+CREATE TABLE classification (
+    sample_id INTEGER NOT NULL UNIQUE REFERENCES samples(id) ON DELETE CASCADE,
+    facet_a TEXT, facet_b TEXT, provenance TEXT NOT NULL DEFAULT 'automatic',
+    source_model TEXT, is_user_confirmed INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+
+def _columns(conn, table):
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def test_v2_index_is_migrated_in_place(tmp_path):
+    db_path = tmp_path / "old.db"
+    raw = sqlite3.connect(db_path)
+    raw.executescript(_V2_SHAPE + "PRAGMA user_version = 2;")
+    raw.execute(
+        "INSERT INTO samples (filepath, filename, added_at, last_scanned_at, "
+        "file_size, file_mtime) VALUES ('C:/x.wav', 'x.wav', "
+        "'2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00', 1, 1.0)"
+    )
+    raw.execute("INSERT INTO classification (sample_id, facet_b) VALUES (1, 'loop')")
+    raw.commit()
+    raw.close()
+
+    conn = open_db(db_path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert "content_changed_at" in _columns(conn, "samples")
+        assert "analyzed_at" in _columns(conn, "analysis")
+        cls = _columns(conn, "classification")
+        assert {"content_class", "structural_type", "confidence"} <= cls
+        assert not {"facet_a", "facet_b"} & cls
+        # Data survives the rename; backfill = content as of first sight.
+        assert conn.execute("SELECT structural_type FROM classification").fetchone()[0] == "loop"
+        assert (
+            conn.execute("SELECT content_changed_at FROM samples").fetchone()[0]
+            == "2026-09-01T00:00:00+00:00"
+        )
+    finally:
+        conn.close()
+    open_db(db_path).close()  # re-opening an already-migrated DB is a no-op
+
+
+def test_unversioned_phase1_index_is_migrated(tmp_path):
+    # Build 58da501 left user_version at 0 with only `samples`: the Phase 2
+    # tables must be created in their final shape and the ALTERs skip them.
+    db_path = tmp_path / "phase1.db"
+    raw = sqlite3.connect(db_path)
+    raw.executescript(_V2_SHAPE.split("CREATE TABLE analysis")[0])
+    raw.close()
+
+    conn = open_db(db_path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert "content_changed_at" in _columns(conn, "samples")
+        assert "analyzed_at" in _columns(conn, "analysis")
+        assert "structural_type" in _columns(conn, "classification")
+    finally:
+        conn.close()

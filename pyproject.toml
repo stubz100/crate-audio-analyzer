@@ -10,21 +10,20 @@ dependencies = [
     # (2026-09-06 review — a fresh `uv sync` must be enough to run Phase 1).
     "numpy>=1.26",
     "soundfile>=0.12",
+    # Phase 2 runtime: analysis (nodes B/C) needs librosa. Its phase has
+    # arrived, so it moves to base — same rule that moved soundfile here.
+    "librosa>=0.10",
+    "scipy>=1.11",
 ]
 
 # Added incrementally as later phases need them — see .docs/samples_final.md §12.
-# Not installed by default; use `uv sync --extra analysis` etc. when a phase calls for it.
-[project.optional-dependencies]
-# Phase 2/3: heuristic analysis + transient segmentation.
+# Not installed by default; use `uv sync --extra ml` etc. when a phase calls for it.
+# A phase's deps move to the base set when that phase arrives (soundfile in
+# Phase 1, librosa in Phase 2), so there is no `analysis` extra any more.
 # aubio was evaluated and dropped — source-only distribution (no wheels since 2019)
 # means a hidden MSVC toolchain dependency, GPLv3, and it optimizes descriptor
 # extraction, which isn't the bottleneck. See .docs/samples_final.md §10.
-analysis = [
-    "librosa>=0.10",
-    "soundfile>=0.12",
-    "numpy>=1.26",
-    "scipy>=1.11",
-]
+[project.optional-dependencies]
 # Phase 4/5: CLAP embeddings, Qwen2-Audio captioning/latent spike.
 ml = [
     "torch>=2.2",
@@ -38,7 +37,8 @@ map = [
 
 [project.scripts]
 crate = "crate.main:main"
-crate-scan = "crate.cli:main"
+crate-scan = "crate.cli:scan_main"
+crate-analyze = "crate.cli:analyze_main"
 
 [dependency-groups]
 dev = [

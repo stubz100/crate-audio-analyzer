@@ -18,6 +18,11 @@ momentarily unreadable drive must never be mistaken for a deletion.
 
 One database may hold several roots: removal on re-scan only touches rows
 under the scanned root, so subset scans never delete other roots' rows.
+
+Changed content is FLAGGED, never recomputed here (2026-09-06 decision): a
+genuine change stamps `samples.content_changed_at`, which makes any older
+`analysis` row stale; the scan summary reports the stale count and the
+expensive recompute stays an explicit `crate-analyze` run (spec §9.6).
 """
 
 from __future__ import annotations
@@ -29,10 +34,11 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 
 import soundfile as sf
+
+from .db import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +60,7 @@ class ScanSummary:
     removed: int = 0
     unreadable: int = 0  # supported ext, header unreadable (row kept, NULL metadata)
     walk_errors: int = 0  # listing/stat failures; affected rows kept, never removed
+    stale_analysis: int = 0  # analysis rows older than their file's content (whole DB)
     skipped_rx2: int = 0
     skipped_other: dict[str, int] = field(default_factory=dict)
     error_samples: list[str] = field(default_factory=list)
@@ -74,6 +81,11 @@ class ScanSummary:
                 f"walk errors: {self.walk_errors} (affected rows kept; "
                 f"re-scan once readable)"
             )
+        if self.stale_analysis:
+            lines.append(
+                f"stale analysis: {self.stale_analysis} (content changed since "
+                f"analysis; run crate-analyze to refresh)"
+            )
         lines.extend(f"  ! {sample}" for sample in self.error_samples)
         lines.append(f"skipped .rx2: {self.skipped_rx2} (skip-and-log per spec §3)")
         if self.skipped_other:
@@ -85,10 +97,6 @@ class ScanSummary:
             lines.append(f"skipped other: {total} ({top})")
         lines.append(f"elapsed: {self.elapsed_s:.1f}s")
         return "\n".join(lines)
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _sample_error(summary: ScanSummary, message: str) -> None:
@@ -152,7 +160,9 @@ def _walk_files(
     `DirEntry.stat()` reuses the listing's metadata on Windows (no second
     syscall), `rel_folder` is computed once per directory, and a listing
     failure surfaces via `on_error(path, exc, subtree=True)` instead of
-    being silently swallowed. Entry-level failures pass `subtree=False`.
+    being silently swallowed. An entry whose type cannot even be determined
+    is reported with `subtree=True` as well — it might be a directory, and
+    the cost of being wrong is one stale row versus deleted rows.
     """
     stack: list[tuple[Path, str]] = [(root, "")]
     while stack:
@@ -170,7 +180,7 @@ def _walk_files(
                 elif entry.is_file(follow_symlinks=False):
                     yield entry, rel_folder
             except OSError as exc:
-                on_error(entry.path, exc, False)
+                on_error(entry.path, exc, True)
 
 
 def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
@@ -188,7 +198,7 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
 
     summary = ScanSummary(root=str(root))
     started = time.perf_counter()
-    now = _now_iso()
+    now = now_iso()
     root_prefix = _under_root_prefix(root)
 
     known: dict[str, sqlite3.Row] = {
@@ -212,10 +222,9 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
             summary, f"walk error: {path_str} ({type(exc).__name__}: {exc})"
         )
         log.debug("walk error: %s (%s: %s)", path_str, type(exc).__name__, exc)
+        failed_files.add(path_str)  # the path itself is always protected
         if subtree:
             failed_dirs.append(os.path.join(path_str, ""))
-        else:
-            failed_files.add(path_str)
 
     for entry, rel_folder in _walk_files(root, _on_walk_error):
         name = entry.name
@@ -243,7 +252,7 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
                 (
                     path_str, name, rel_folder,
                     meta[0], meta[1], meta[2],
-                    now, now, st.st_size, st.st_mtime,
+                    now, now, now, st.st_size, st.st_mtime,
                 )
             )
             summary.added += 1
@@ -275,7 +284,7 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
                     (
                         name, rel_folder,
                         meta[0], meta[1], meta[2],
-                        now, st.st_size, st.st_mtime, new_hash, path_str,
+                        now, now, st.st_size, st.st_mtime, new_hash, path_str,
                     )
                 )
                 summary.changed += 1
@@ -291,8 +300,8 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
         """
         INSERT INTO samples
             (filepath, filename, folder, duration_s, sample_rate, channels,
-             added_at, last_scanned_at, file_size, file_mtime)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             added_at, last_scanned_at, content_changed_at, file_size, file_mtime)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         inserts,
     )
@@ -313,7 +322,8 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
         UPDATE samples
         SET filename = ?, folder = ?,
             duration_s = ?, sample_rate = ?, channels = ?,
-            last_scanned_at = ?, file_size = ?, file_mtime = ?, file_hash = ?
+            last_scanned_at = ?, content_changed_at = ?,
+            file_size = ?, file_mtime = ?, file_hash = ?
         WHERE filepath = ?
         """,
         updates,
@@ -336,6 +346,13 @@ def scan_library(conn: sqlite3.Connection, root: Path | str) -> ScanSummary:
             "DELETE FROM samples WHERE filepath = ?", [(fp,) for fp in vanished]
         )
         summary.removed = len(vanished)
+
+    # Staleness is a flag, not a trigger: report it, leave the recompute to
+    # an explicit crate-analyze run (2026-09-06 decision, spec §9.6).
+    summary.stale_analysis = conn.execute(
+        "SELECT COUNT(*) FROM analysis a JOIN samples s ON s.id = a.sample_id "
+        "WHERE s.content_changed_at > a.analyzed_at"
+    ).fetchone()[0]
 
     summary.elapsed_s = time.perf_counter() - started
     return summary

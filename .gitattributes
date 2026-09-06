@@ -1,0 +1,9 @@
+# Normalize line endings: LF in the repo and in the working tree.
+# core.autocrlf=true on this machine otherwise warns on every diff of a
+# tool-written (LF) file. Windows-only project; every tool here handles LF.
+* text=auto eol=lf
+
+*.wav binary
+*.flac binary
+*.db binary
+*.png binary

@@ -1,6 +1,6 @@
 # Sample Library Search & Mapping Tool — Specification
 
-**Status: living spec.** *Last updated: 2026-09-06 (post-Phase-1 review: §12 deliverable split).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
+**Status: living spec.** *Last updated: 2026-09-06 (Phase 2 review: staleness flag + Rescan action in §8/§9.6, explicit `classification` columns, tempo-for-loops-only).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
 
 ---
 
@@ -88,6 +88,8 @@ Two independent facets, not one rigid tree — this keeps the classifier simpler
 | **One-shot** | Short, single transient | Short duration + one dominant onset |
 | **Multi-hit** | Longer, several transients, still reads as "a hit" | Few onsets, no steady periodicity, no loop metadata |
 | **Loop** | Long, many transients, tempo-syncable | Many periodic onsets, detectable tempo, and/or embedded loop metadata |
+
+*Detection notes (Phase 2, tuned on 500 labeled library files — journal 2026-09-06):* the one-shot duration cap is the §9.6 setting "One-shot max duration" (on by default at 2 s; off = any length). Onsets are counted on the HPSS **percussive component** with superflux, and only **dominant** ones count (≥30% of the strongest onset's strength and ≥20% of the file's loudest moment) — ringing partials of a glass/metal hit otherwise read as a burst of onsets. "Tempo-syncable" is tested literally: a loop is a **whole number of beats long** (≥ 1 bar) at its tempo. Tempo sources, in order of trust: ACID beat count (exact), a `<n> BPM` token in the filename confirmed by the whole-beat duration, then acoustics (a genuine autocorrelation peak, onsets spanning the file and sitting on the 16th-note grid). `smpl` loop points are a sampler's sustain region, not a loop signal.
 
 Every sample gets one content class + one structural type, plus free-text tags. **The map's spatial layout is driven by acoustic similarity, not by taxonomy** — taxonomy is color-coding and filters *on top of* the similarity layout (§9.3).
 
@@ -242,10 +244,17 @@ samples                                             -- real files only
   file_size, file_mtime,        -- cheap change key: the re-scan diff compares these first
   file_hash (nullable),         -- full content hash, computed ONLY when size/mtime changed
                                 -- (hashing all 340GB on every re-scan is a disk-bound non-starter)
+  content_changed_at,           -- stamped by the scanner on insert and on a genuine content change
+                                -- (never on a hash-identical retouch). Any derived row whose own
+                                -- timestamp is older than this is STALE — flagged, never
+                                -- auto-recomputed (§9.6 "Rescan library")
   segment_candidates_found, segments_capped, effective_sensitivity
 
 analysis                                            -- samples only
-  sample_id (FK), tempo_bpm, tempo_confidence, onset_count,
+  sample_id (FK), analyzed_at,  -- stale when older than samples.content_changed_at
+  tempo_bpm,                    -- loops only: NULL unless explicitly recognisable (ACID beat
+                                -- count, or acoustic periodicity that passed the loop rule)
+  tempo_confidence, onset_count,
   is_loop, key, harmonic_ratio, embedded_metadata_json,
   peak_db, rms_db, crest_factor, attack_ms, decay_ms,
   f0_hz, pitch_confidence, mfcc_mean, mfcc_var, spectral_contrast,
@@ -265,7 +274,14 @@ text_tags                                           -- MACHINE output only; samp
   --       (user-owned, never overwritten by a recompute).
 
 tags, sample_tags                                   -- CURATED user-owned tags, samples only
-classification, crates, crate_samples               -- samples only, standard shape
+
+classification                                      -- samples only
+  sample_id (FK), content_class, structural_type,   -- Facet A / Facet B (§4)
+  confidence,                                       -- node E's flag-threshold input
+  provenance ('automatic' | 'manual'), source_model, is_user_confirmed (bool)
+  -- segment_classification below mirrors these column names
+
+crates, crate_samples                               -- samples only, standard shape
 
 map_layout                                          -- one row per computed layout
   id, computed_at, scope_description,               -- e.g. 'whole library' / a folder-scope label
@@ -357,6 +373,7 @@ Policy: **no map layout, ranking, or attribute recomputation ever runs automatic
 | **Recompute ranking** | Re-sorts List's Similarity column by distance to the anchor | Library scope, or visible/filtered set only — no "anchored only" option, since ranking is *already* anchor-relative by construction; there's nothing to rank against just the anchor itself | Yes |
 | **Recompute map layout** | Re-projects to 2D | Anchored-only = cheap UMAP transform of just the anchor into the existing layout; library scope = full re-fit, expensive | No |
 | **Recompute attributes** | Re-runs analysis/embedding/classification/segmentation | Anchored-only, or library scope (sub-toggle: new/changed only, or force full re-index) | No |
+| **Rescan library** | Runs the file scanner (`A`) only: finds new/changed/removed files and flags derived rows that are now stale (`content_changed_at`, §8). Cheap — no decode, no model. "New/changed only" above consumes exactly this flag; nothing is recomputed until you press it | Always the whole root (the scanner never scopes, see below) | No |
 
 **Folder-scope list** (new, directly motivated by §3's real scale): a persistent, editable list of folders under `D:\_soundPacks` that defines what "library scope" actually covers for the actions above — **add folders to build up the scope**; there's no implicit "everything" default. To run against the true full library, add the root folder itself. The file scanner (`A`) still walks the entire root regardless, populating cheap skeleton `samples` rows (filepath/hash/duration) for all ~110,000 files — only the *expensive* steps (`C` onward) are gated by this list. This is what makes "all testing on a much smaller subset" (§3) practical: build the scope up folder-by-folder as confidence in the settings grows, rather than an all-or-nothing switch against a 340GB library.
 
@@ -371,6 +388,7 @@ Policy: **no map layout, ranking, or attribute recomputation ever runs automatic
 | Min/max segment length | Seconds or % of parent duration; drop-short/truncate-long (§6.2) | *(tuning pass expected)* |
 | Segmentation boundary mode | Transient-to-transient / transient-to-fixed-length (§6.2) | Transient-to-transient |
 | Max segments per sample | Cap; strongest-first tie-break + capped warning (§6.2) | 5 |
+| One-shot max duration | **On:** a sample with at most one dominant onset is a one-shot only up to this length (§4 "short"). **Off:** length is ignored — a 2.2 s ringing metal lid *and* a 37 s kettle recording with one dominant onset are both one-shots. Added 2026-09-06 after 34 of a 322-file foley subset fell on the "long single onset" side; CLI: `--one-shot-max-duration` / `--one-shot-any-duration` | On, 2.0 s |
 
 Manually-corrected samples and manually-saved segments stay protected from silent overwrite under either scope.
 

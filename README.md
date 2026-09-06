@@ -10,7 +10,7 @@ Not a sampler, drum machine, or plugin — a standalone search engine over `D:\_
 
 ## Status
 
-Phase 1 (ingestion & metadata) — complete. Next: Phase 2 (heuristic analysis).
+Phase 1 (ingestion & metadata) — complete. Phase 2 (heuristic analysis) — in progress: descriptor set, structural typing (validated against labeled library folders), `smpl`/ACID reader, stale-analysis flagging. Next: close Phase 2, then Phase 3 (transient segmentation).
 
 ## Development
 

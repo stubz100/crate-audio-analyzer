@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from crate.db import open_db
+from crate.db import now_iso, open_db
 from crate.scanner import _under_root_prefix, scan_library
 
 
@@ -272,3 +272,48 @@ def test_file_becomes_unreadable_after_good_scan(scanned_tree):
     row = _rows(conn)[str(target)]
     assert row["duration_s"] is None
     assert row["file_hash"] is not None
+
+
+# --- Staleness flagging (2026-09-06 Phase 2 review, decision 4) ---
+
+
+def test_content_changed_at_tracks_genuine_changes_only(scanned_tree):
+    root, conn = scanned_tree
+    scan_library(conn, root)
+    target = root / "a.wav"
+    first = _rows(conn)[str(target)]["content_changed_at"]
+    assert first is not None
+
+    scan_library(conn, root)  # unchanged re-scan: untouched
+    assert _rows(conn)[str(target)]["content_changed_at"] == first
+
+    _write_audio(target, seconds=0.2)  # genuine change: stamped
+    scan_library(conn, root)
+    second = _rows(conn)[str(target)]["content_changed_at"]
+    assert second > first
+
+    # Hash-identical retouch (mtime only, same bytes): content did not
+    # change, so the stamp must not move — later phases must not re-analyze.
+    st = target.stat()
+    os.utime(target, (st.st_atime, st.st_mtime + 10))
+    assert scan_library(conn, root).changed == 0
+    assert _rows(conn)[str(target)]["content_changed_at"] == second
+
+
+def test_scan_flags_stale_analysis_but_never_recomputes(scanned_tree):
+    root, conn = scanned_tree
+    scan_library(conn, root)
+    sid = conn.execute("SELECT id FROM samples WHERE filename = 'a.wav'").fetchone()[0]
+    conn.execute(
+        "INSERT INTO analysis (sample_id, analyzed_at) VALUES (?, ?)", (sid, now_iso())
+    )
+    conn.commit()
+    assert scan_library(conn, root).stale_analysis == 0
+
+    _write_audio(root / "a.wav", seconds=0.2)
+    summary = scan_library(conn, root)
+
+    assert summary.stale_analysis == 1
+    assert "stale analysis: 1" in summary.format()
+    # Flagged, not recomputed (spec §9.6: nothing expensive runs by itself).
+    assert conn.execute("SELECT COUNT(*) FROM analysis").fetchone()[0] == 1
