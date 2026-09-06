@@ -521,3 +521,15 @@ Directions from the review discussion: (1) frame envelope, then check the number
 - §3 cost model corrected in the spec: ~6.5 h for the full library with segments, not 25–40 h.
 
 **Next** — Phase 4.5 "listen and grab": preview player + native drag-out on a plain sortable list, the first daily-drivable checkpoint. Then tune Facet A by ear against real corrections rather than folder names.
+
+## 2026-09-06 — Quick review after Phase 4
+
+**Phase:** 4 review + fixes · commit cited in the next entry
+
+**Done** — two hypotheses from re-reading `embedding.py`, both probed before fixing:
+
+- **Segments detected after their parent was embedded never got vectors** (confirmed: 5 of 5 left without, and 3 of 3 after `--resegment`, which makes new rows). The worklist only knew about parents. It now also visits any sample that has a long-enough segment without a vector and, in that case, embeds *only* the segments — the parent's vector, tags and Facet A are untouched and it is not sent to the model.
+- **A manual segment lying entirely past the end of its file** (the `needs_review` case) would hand the model an empty clip and fail its whole parent. Windows are now judged on the audio that actually exists and skipped as short.
+- Found by the new tests: the progress log divided by zero in the segments-only path (it counted parents; it now counts visits). The junction test unlinks its junction on the way out.
+
+**Verified** — `uv run pytest tests -q` → **118 passed, 1 skipped**; `crate-embed` on the real index visits 0 samples (nothing orphaned).

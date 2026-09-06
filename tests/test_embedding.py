@@ -309,12 +309,10 @@ def test_editing_a_segment_drops_its_vector(library):
     update_segment(conn, seg_id, start_ms=5)
 
     assert conn.execute("SELECT COUNT(*) FROM segment_embedding WHERE segment_id = ?", (seg_id,)).fetchone()[0] == 0
-    # ... and the next run refills exactly that one.
-    assert embed_pending(conn, encoder=FakeEncoder({4.0: "a drum loop"}), settings=EmbedSettings(min_segment_length_ms=0)).segments_embedded == 0
-    sid = conn.execute("SELECT sample_id FROM segments WHERE id = ?", (seg_id,)).fetchone()[0]
-    conn.execute("UPDATE samples SET content_changed_at = ? WHERE id = ?", ("9999-01-01T00:00:00.000000+00:00", sid))
-    conn.commit()
-    assert embed_pending(conn, encoder=FakeEncoder({4.0: "a drum loop"}), settings=EmbedSettings(min_segment_length_ms=0)).segments_embedded == 1
+    # ... and the next run refills exactly that one, without re-embedding its parent.
+    again = embed_pending(conn, encoder=FakeEncoder({4.0: "a drum loop"}), settings=EmbedSettings(min_segment_length_ms=0))
+    assert (again.segments_embedded, again.samples_embedded) == (1, 0)
+    assert conn.execute("SELECT COUNT(*) FROM segment_embedding WHERE segment_id = ?", (seg_id,)).fetchone()[0] == 1
 
 
 def test_one_exploding_file_does_not_abort_the_run(library, monkeypatch):
@@ -360,3 +358,58 @@ def test_real_clap_places_a_drum_closer_to_a_drum_prompt(tmp_path):
     text = enc.embed_text(["a drum hit", "a person singing"])
     assert audio.size == 512
     assert float(text[0] @ audio) > float(text[1] @ audio)
+
+
+# --- 2026-09-06 quick review after Phase 4 -----------------------------------------
+
+
+def test_segments_detected_after_the_parent_was_embedded_still_get_vectors(tmp_path):
+    """Found by probe: a later crate-segment run (or --resegment) left segments
+    without vectors forever, because only parents were on the worklist."""
+    from crate.segmentation import SegmentationSettings
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _write(lib / "loop.wav", _clicks([i * 0.5 for i in range(8)], 4.0))
+    conn = open_db(tmp_path / "index.db")
+    scan_library(conn, lib)
+    analyze_pending(conn)
+    embed_pending(conn, encoder=FakeEncoder({4.0: "a drum loop"}))     # before any segments exist
+    segment_pending(conn)
+    n = conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0]
+    parent_before = conn.execute("SELECT embedded_at FROM embedding").fetchone()[0]
+
+    enc = FakeEncoder({4.0: "a drum loop"})
+    summary = embed_pending(conn, encoder=enc, settings=EmbedSettings(min_segment_length_ms=0))
+
+    assert summary.segments_embedded == n
+    assert summary.samples_embedded == 0                      # parent untouched ...
+    assert conn.execute("SELECT embedded_at FROM embedding").fetchone()[0] == parent_before
+    assert enc.clips_seen == n                                # ... and not sent to the model
+
+    segment_pending(conn, settings=SegmentationSettings(max_segments=3), resegment=True)
+    summary = embed_pending(conn, encoder=FakeEncoder(), settings=EmbedSettings(min_segment_length_ms=0))
+    assert summary.segments_embedded == 3
+    assert conn.execute(
+        "SELECT COUNT(*) FROM segments g WHERE NOT EXISTS "
+        "(SELECT 1 FROM segment_embedding e WHERE e.segment_id = g.id)"
+    ).fetchone()[0] == 0
+    assert embed_pending(conn, encoder=FakeEncoder(), settings=EmbedSettings(min_segment_length_ms=0)).segments_embedded == 0
+    conn.close()
+
+
+def test_manual_segment_past_the_end_does_not_fail_its_parent(library):
+    lib, conn = library
+    sid = conn.execute("SELECT id FROM samples WHERE filename = 'loop.wav'").fetchone()[0]
+    mid = create_manual_segment(conn, sid, 4100, 4400)              # entirely past a 4.0 s file
+
+    class Strict(FakeEncoder):
+        def embed_audio(self, clips, sr):
+            assert all(len(c) > 0 for c in clips), "an empty clip reached the model"
+            return super().embed_audio(clips, sr)
+
+    summary = embed_pending(conn, encoder=Strict({4.0: "a drum loop"}), settings=EmbedSettings(min_segment_length_ms=0))
+
+    assert summary.failed == 0 and summary.samples_embedded == 2
+    assert conn.execute("SELECT COUNT(*) FROM segment_embedding WHERE segment_id = ?", (mid,)).fetchone()[0] == 0
+    assert summary.segments_skipped_short >= 1

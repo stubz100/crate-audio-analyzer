@@ -406,3 +406,4 @@ def test_junction_cycle_terminates(tmp_path):
         assert summary.walk_errors == 0
     finally:
         conn.close()
+        os.rmdir(root / "loop")              # unlink the junction, never its target

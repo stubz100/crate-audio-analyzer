@@ -429,8 +429,14 @@ def _embed_one_sample(
     settings: EmbedSettings,
     summary: EmbedSummary,
     reembed_segments: bool,
+    embed_parent: bool = True,
 ) -> bool:
-    """Nodes D + C2 (embedding) + X + E for one sample. False if it cannot decode."""
+    """Nodes D + C2 (embedding) + X + E for one sample. False if it cannot decode.
+
+    `embed_parent=False` is the "only its segments need vectors" case (they
+    were detected after the parent was embedded): the parent's vector, tags
+    and Facet A are left alone and only the segment windows go to the model.
+    """
     loaded = load_audio_for_clap(filepath)
     if loaded is None:
         return False
@@ -438,6 +444,7 @@ def _embed_one_sample(
 
     # Segment windows that need a vector, in one batch with the parent.
     segment_rows: list[tuple[int, int, int]] = []
+    windows: list[np.ndarray] = []
     if settings.embed_segments:
         sql = (
             "SELECT g.id, g.start_ms, g.end_ms FROM segments g "
@@ -451,25 +458,34 @@ def _embed_one_sample(
             params: tuple = (sample_id, MODEL_NAME)
         else:
             params = (sample_id,)
+        min_samples = int(settings.min_segment_length_ms * sr / 1000)
         for seg_id, start_ms, end_ms in conn.execute(sql + " ORDER BY g.start_ms", params):
-            if end_ms - start_ms < settings.min_segment_length_ms:
+            # Judge the window that actually exists in the file: a manual
+            # segment past the end (flagged needs_review) would otherwise hand
+            # the model an empty clip and fail its whole parent.
+            start = min(y.size, int(start_ms * sr / 1000))
+            end = min(y.size, int(end_ms * sr / 1000))
+            if end - start < max(1, min_samples):
                 summary.segments_skipped_short += 1
                 continue
             segment_rows.append((seg_id, start_ms, end_ms))
+            windows.append(y[start:end])
 
-    clips = [y] + [
-        y[int(s * sr / 1000) : int(e * sr / 1000)] for _, s, e in segment_rows
-    ]
+    clips = ([y] if embed_parent else []) + windows
+    if not clips:
+        return True
     vectors = encoder.embed_audio(clips, sr)
     now = now_iso()
 
-    conn.execute(
-        "INSERT INTO embedding (sample_id, model_name, vector, embedded_at) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(sample_id, model_name) DO UPDATE "
-        "SET vector = excluded.vector, embedded_at = excluded.embedded_at",
-        (sample_id, MODEL_NAME, vector_to_blob(vectors[0]), now),
-    )
-    for (seg_id, _s, _e), vec in zip(segment_rows, vectors[1:]):
+    if embed_parent:
+        conn.execute(
+            "INSERT INTO embedding (sample_id, model_name, vector, embedded_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(sample_id, model_name) DO UPDATE "
+            "SET vector = excluded.vector, embedded_at = excluded.embedded_at",
+            (sample_id, MODEL_NAME, vector_to_blob(vectors[0]), now),
+        )
+    segment_vectors = vectors[1:] if embed_parent else vectors
+    for (seg_id, _s, _e), vec in zip(segment_rows, segment_vectors):
         conn.execute(
             "INSERT INTO segment_embedding (segment_id, model_name, vector) VALUES (?, ?, ?) "
             "ON CONFLICT(segment_id, model_name) DO UPDATE SET vector = excluded.vector",
@@ -477,14 +493,15 @@ def _embed_one_sample(
         )
     summary.segments_embedded += len(segment_rows)
 
-    result = classify(vectors[0], prompts, encoder.logit_scale, settings, harmonic_ratio)
-    _write_tags(conn, sample_id, result)
-    if _write_facet_a(conn, sample_id, result):
-        summary.protected += 1
-    elif result.content_class is None:
-        summary.flagged += 1
-    else:
-        summary.classified += 1
+    if embed_parent:
+        result = classify(vectors[0], prompts, encoder.logit_scale, settings, harmonic_ratio)
+        _write_tags(conn, sample_id, result)
+        if _write_facet_a(conn, sample_id, result):
+            summary.protected += 1
+        elif result.content_class is None:
+            summary.flagged += 1
+        else:
+            summary.classified += 1
     _write_segment_classification(conn, sample_id)
     return True
 
@@ -499,39 +516,55 @@ def embed_pending(
 ) -> EmbedSummary:
     """Nodes D, C2, X, E over samples that need them.
 
-    A sample needs embedding when it has been analysed (Phase 2 — node E's
-    tie-break reads `harmonic_ratio`) and has no `embedding` row, or its
-    content changed since (the scanner's staleness flag). Segments are picked
-    up per sample: any without a vector, long enough for one.
+    A sample needs a visit when it has been analysed (Phase 2 — node E's
+    tie-break reads `harmonic_ratio`) and either its own vector is missing or
+    stale (the scanner's content flag), or — with segment embedding on — it
+    has a long-enough segment without a vector. The second case is what a
+    later `crate-segment` run (or `--resegment`, which makes new rows) leaves
+    behind; it embeds only the segments and leaves the parent alone.
     """
     settings = settings or EmbedSettings()
     encoder = encoder or ClapEncoder(settings.checkpoint, settings.batch_size)
     summary = EmbedSummary()
     started = time.perf_counter()
 
+    stale_parent = "(e.sample_id IS NULL OR s.content_changed_at > e.embedded_at)"
+    orphan_segments = (
+        "EXISTS (SELECT 1 FROM segments g WHERE g.sample_id = s.id "
+        "        AND g.end_ms - g.start_ms >= ? "
+        "        AND NOT EXISTS (SELECT 1 FROM segment_embedding se "
+        "                        WHERE se.segment_id = g.id AND se.model_name = ?))"
+    )
     sql = (
-        "SELECT s.id, s.filepath, a.harmonic_ratio "
+        f"SELECT s.id, s.filepath, a.harmonic_ratio, {stale_parent} AS needs_parent "
         "FROM samples s JOIN analysis a ON a.sample_id = s.id "
         "LEFT JOIN embedding e ON e.sample_id = s.id AND e.model_name = ? "
         "WHERE s.duration_s IS NOT NULL"
     )
+    params: list = [MODEL_NAME]
     if not reembed:
-        sql += " AND (e.sample_id IS NULL OR s.content_changed_at > e.embedded_at)"
+        if settings.embed_segments:
+            sql += f" AND ({stale_parent} OR {orphan_segments})"
+            params += [settings.min_segment_length_ms, MODEL_NAME]
+        else:
+            sql += f" AND {stale_parent}"
     sql += " ORDER BY s.id"
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
-    worklist = conn.execute(sql, (MODEL_NAME,)).fetchall()
+    worklist = conn.execute(sql, params).fetchall()
     total = len(worklist)
     if not worklist:
         summary.elapsed_s = time.perf_counter() - started
         return summary
 
     prompts = Prompts.build(encoder)
-    for sample_id, filepath, harmonic_ratio in worklist:
+    visited = 0
+    for sample_id, filepath, harmonic_ratio, needs_parent in worklist:
         try:
             ok = _embed_one_sample(
                 conn, sample_id, filepath, harmonic_ratio, encoder, prompts,
                 settings, summary, reembed_segments=reembed,
+                embed_parent=bool(needs_parent) or reembed,
             )
             if not ok:
                 conn.rollback()
@@ -547,12 +580,14 @@ def embed_pending(
             if len(summary.error_samples) < 5:
                 summary.error_samples.append(f"{type(exc).__name__}: {filepath}")
             continue
-        summary.samples_embedded += 1
-        if progress_every and summary.samples_embedded % progress_every == 0:
+        visited += 1
+        if needs_parent or reembed:
+            summary.samples_embedded += 1
+        if progress_every and visited % progress_every == 0:
             elapsed = time.perf_counter() - started
             log.info(
-                "embedded %d/%d (%.2f s/sample, %d segments, %d failed)",
-                summary.samples_embedded, total, elapsed / summary.samples_embedded,
+                "visited %d/%d (%.2f s/sample, %d samples + %d segments embedded, %d failed)",
+                visited, total, elapsed / visited, summary.samples_embedded,
                 summary.segments_embedded, summary.failed,
             )
     summary.elapsed_s = time.perf_counter() - started
