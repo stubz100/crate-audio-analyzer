@@ -16,8 +16,8 @@ Session-by-session record of what was actually built, decided, and verified — 
 |---|---|---|
 | 0 | Foundations | ✅ done — `5bef7d8` |
 | 1 | Ingestion & Metadata | ✅ done — `58da501` (build) + `46f131e`, `9d5acea` (review fixes) |
-| 2 | Heuristic Analysis | ✅ done — `f650889` (build + review fixes); closed out against 943 real samples, `PENDING_H` |
-| 3 | Transient Segmentation | ✅ done — `PENDING_H` (nodes S/T, both profiles, settings, segment tables, manual path; validated on 472 real samples). UI for manual markers is Phase 9; lazy render is Phase 4.5/9 |
+| 2 | Heuristic Analysis | ✅ done — `f650889` (build + review fixes); closed out against 943 real samples, `5e055b2` |
+| 3 | Transient Segmentation | ✅ done — `5e055b2` (nodes S/T, both profiles, settings, segment tables, manual path; validated on 472 real samples). UI for manual markers is Phase 9; lazy render is Phase 4.5/9 |
 | 4 | Embeddings & Classification | ⬜ not started |
 | 4.5 | "Listen and grab" (pull-forward) | ⬜ not started |
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
@@ -368,7 +368,7 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 ## 2026-09-06 — Phase 2 closed out; Phase 3 built (transient segmentation)
 
-**Phase:** 2 ✅ + 3 ✅ · `PENDING_H`
+**Phase:** 2 ✅ + 3 ✅ · `5e055b2`
 
 **Done — Phase 2 close-out** (the run the previous entry listed as remaining)
 
