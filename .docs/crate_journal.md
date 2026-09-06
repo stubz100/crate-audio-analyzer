@@ -16,7 +16,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 |---|---|---|
 | 0 | Foundations | ✅ done — `5bef7d8` |
 | 1 | Ingestion & Metadata | ✅ done — `58da501` (build) + `46f131e`, `9d5acea` (review fixes) |
-| 2 | Heuristic Analysis | 🚧 in progress — nodes B/C, descriptors, Facet B (tuned on 500 labeled library files), smpl/ACID reader, stale-analysis flagging, one-shot cap setting — `f650889` (+ `672599e` line endings). Remaining before ✅: real-DB run + loop-pack review |
+| 2 | Heuristic Analysis | 🚧 in progress — nodes B/C, descriptors, Facet B (tuned on 500 labeled library files), smpl/ACID reader, stale-analysis flagging, one-shot cap setting — `f650889`. Remaining before ✅: real-DB run + loop-pack review |
 | 3 | Transient Segmentation | ⬜ not started |
 | 4 | Embeddings & Classification | ⬜ not started |
 | 4.5 | "Listen and grab" (pull-forward) | ⬜ not started |
@@ -343,4 +343,4 @@ Directions from the review discussion: (1) frame envelope, then check the number
 - **One-shot duration cap is now a setting** (user decision): `structural_type(..., one_shot_max_duration_s)` — a value keeps the cap on (default 2.0 s, spec §4 "short"), `None` makes one-shots duration-independent. `crate-analyze --one-shot-max-duration SECONDS` / `--one-shot-any-duration`; recorded in spec §9.6 ("One-shot max duration", on / 2.0 s) and in §4's detection notes. Two tests.
 - The 34 single-dominant-onset ModeAudio files longer than 2 s, from the verification DB. Shortest: `Metal_Lid02` 2.03 s, `GasHob_ClickBurn02` 2.08 s, `Metal_Lid01` 2.16 s, `Coffee_Beans03` 2.22 s. Longest: `Microwave_Hum01` 20.9 s, `Food_Fry03` 30.8 s, `Kettle_Boil01` 36.4 s, `Kettle_Boil02` 37.6 s. By folder: Kitchen Appliances 8, Food 7, Metal 7, Water 5, Kitchen Utensils 4, Plastic 3. The short end are plainly one-shots, the long end are sustained textures — the population straddles any fixed cap, which is why it is a setting and not a rule.
 - **Verified**: `uv run pytest tests -q` → **60 passed**; `crate-analyze --help` shows both flags.
-- **Committed** (all on `master`, like every earlier session): `672599e` — `.gitattributes` + whitespace-only renormalization of the files that had no other change; `f650889` — Phase 2 build + every fix in this entry. Hashes cited in a follow-up journal commit per the contract.
+- **Committed** (on `master`, like every earlier session): `f650889` — Phase 2 build + every fix in this entry, `.gitattributes` included. A separate whitespace-only renormalization commit turned out to be unnecessary: the index already held LF for every file (the CRLF was only ever in the checkout), so `git add --renormalize` staged nothing. The citation commit `bae4856` wrongly named `672599e` (the previous HEAD) as that non-existent commit — corrected here.
