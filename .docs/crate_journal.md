@@ -344,3 +344,24 @@ Directions from the review discussion: (1) frame envelope, then check the number
 - The 34 single-dominant-onset ModeAudio files longer than 2 s, from the verification DB. Shortest: `Metal_Lid02` 2.03 s, `GasHob_ClickBurn02` 2.08 s, `Metal_Lid01` 2.16 s, `Coffee_Beans03` 2.22 s. Longest: `Microwave_Hum01` 20.9 s, `Food_Fry03` 30.8 s, `Kettle_Boil01` 36.4 s, `Kettle_Boil02` 37.6 s. By folder: Kitchen Appliances 8, Food 7, Metal 7, Water 5, Kitchen Utensils 4, Plastic 3. The short end are plainly one-shots, the long end are sustained textures — the population straddles any fixed cap, which is why it is a setting and not a rule.
 - **Verified**: `uv run pytest tests -q` → **60 passed**; `crate-analyze --help` shows both flags.
 - **Committed** (on `master`, like every earlier session): `f650889` — Phase 2 build + every fix in this entry, `.gitattributes` included. A separate whitespace-only renormalization commit turned out to be unnecessary: the index already held LF for every file (the CRLF was only ever in the checkout), so `git add --renormalize` staged nothing. The citation commit `bae4856` wrongly named `672599e` (the previous HEAD) as that non-existent commit — corrected here.
+
+## 2026-09-06 — Published to GitHub
+
+**Phase:** infrastructure (no code change)
+
+**Done**
+
+- Remote `origin` added and the full history pushed to <https://github.com/stubz100/crate-audio-analyzer> (public). The repository was empty beforehand, so this was a clean first push with no reconcile.
+
+**Decided**
+
+- **Pushed `master` as-is rather than renaming to `main`.** The repository's configured default was `main`, but every session in this journal records work on `master`, and GitHub promotes the first branch pushed to an empty repository — so the remote default is now `master`, matching local exactly. Renaming stays a one-command change if it is ever wanted.
+- **Commit author identity left unchanged** after the public-exposure tradeoff was put to the user: the personal address in all 10 commits stays visible in public history. Rewriting to a GitHub noreply address was the alternative, rejected because it changes every hash and would invalidate the commit hashes this journal cites (the maintenance contract above depends on them).
+
+**Verified**
+
+- `git ls-remote --heads origin` → `refs/heads/master` at `cc05635`, identical to local `HEAD`; working tree clean.
+- 22 tracked files published — source, tests, spec/journal, packaging. No audio and no index: `*.db` and `.crate_cache/` are gitignored, confirmed against the file list before pushing.
+- Repository metadata after the push: public, default branch `master`.
+
+**Next** — unchanged: close out Phase 2 (real-DB run + loop-pack review), then Phase 3.
