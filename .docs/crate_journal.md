@@ -15,7 +15,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | Phase | Name | Status |
 |---|---|---|
 | 0 | Foundations | ✅ done — `5bef7d8` |
-| 1 | Ingestion & Metadata | ✅ done |
+| 1 | Ingestion & Metadata | ✅ done — `58da501` |
 | 2 | Heuristic Analysis | ⬜ not started |
 | 3 | Transient Segmentation | ⬜ not started |
 | 4 | Embeddings & Classification | ⬜ not started |
@@ -95,7 +95,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 
 ## 2026-09-05 — Phase 1 implemented: scanner, schema, CLI
 
-**Phase:** 1 — Ingestion & Metadata ✅ (commit cited below once recorded)
+**Phase:** 1 — Ingestion & Metadata ✅ · `58da501`
 
 **Done**
 
