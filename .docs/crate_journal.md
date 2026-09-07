@@ -739,7 +739,7 @@ The user: the right panel overshot its edge and was trimmed; the map's folder gr
 
 ## 2026-09-07 — Third round: CLAP's numbers instead of the class label
 
-**Phase:** feedback on the milestone build · FEEDBACK3_HASH
+**Phase:** feedback on the milestone build · `6ef09fb`
 
 The user asked how CLAP classifies and said they would rather see CLAP's output numbers than the class interpretation.
 
