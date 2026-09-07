@@ -149,3 +149,29 @@ def test_missing_model_stack_skips_embedding_with_a_note(library):
     assert report.embedding is None and not report.stopped
     assert any("uv sync --extra ml" in note for note in report.notes)
     assert "[embedding] not run" in report.format()
+
+
+class _BrokenModel:
+    """A model stack that is installed but cannot load — no checkpoint in the
+    cache and no network, the first-run failure mode."""
+
+    logit_scale = 1.0
+
+    def embed_text(self, texts):
+        raise OSError("checkpoint not in cache and the hub is unreachable")
+
+    def embed_audio(self, clips, sr):
+        raise OSError("checkpoint not in cache and the hub is unreachable")
+
+
+def test_a_failing_model_load_keeps_the_earlier_stages_in_the_report(library):
+    conn, lib = library
+
+    report = recompute_attributes(
+        conn, RecomputeSettings(scope=(str(lib),)), encoder=_BrokenModel()
+    )
+
+    assert report.analysis.analyzed == 4 and report.segmentation is not None
+    assert report.embedding is None and not report.stopped
+    assert any("embedding stage failed" in note and "OSError" in note for note in report.notes)
+    assert "[analysis]" in report.format() and "[embedding] not run" in report.format()

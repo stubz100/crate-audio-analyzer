@@ -591,3 +591,17 @@ Directions from the review discussion: (1) frame envelope, then check the number
 **Next**
 
 - Press the buttons for real: Rescan (the registry root is the Krotos parent folder, so the 3,956 rows come back *unchanged* with their `folder` refreshed), then add a second pack to the scope and Recompute — "new/changed only" against a real re-scan is the one path the synthetic tests cover but real files have not. Then Phase 7.
+
+## 2026-09-07 — Quick review after Phase 8
+
+**Phase:** 8 review + fixes · REVIEW_HASH
+
+**Done** — a static pass (pyflakes) and one probe, closing the window while a job runs:
+
+- **Close during a job** (the probe confirmed it: `sqlite3.ProgrammingError: Cannot operate on a closed database`, raised from `reload`). The window closed its connection and waited at most 15 s for the thread; the job's queued completion then reloaded a window whose connection was gone, and a job outliving the wait would have had its thread destroyed under it. The window now refuses to close while a job runs, asks it to stop, and closes itself when the job ends; `reload` is disconnected before the connection closes; the panel's last-resort wait is unbounded.
+- **A failed model load hid the stages that ran.** An exception from the embedding stage (no checkpoint in the cache and no network — the first-run failure mode) escaped `recompute_attributes`, so the log showed only the failure and not the analysis and segmentation that had already committed. The stage's failure is now a note on the report, with the earlier summaries intact.
+- `db.scope_clause` was annotated with an unimported `Iterable` (harmless under `from __future__ import annotations`, wrong all the same); a scope folder outside the library root is now called out in the log when it is added; an unused variable in a scanner test.
+
+**Verified** — `uv run pytest tests -q` → **141 passed, 1 skipped** (new: the deferred close against a job that ignores the stop for a while; a failed model load keeps the earlier stages); pyflakes clean; the close probe re-run: `close()` refused, the window closed itself after the job, no traceback.
+
+**Next** — Phase 7: list, search and filter proper (nested sub-hit rows, the Attributes tab, free-text CLAP search, tag chips), which closes the first daily-drivable milestone.

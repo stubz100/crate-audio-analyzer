@@ -339,10 +339,17 @@ class RecomputePanel(QWidget):
         return [self._scope_list.item(i).text() for i in range(self._scope_list.count())]
 
     def add_scope_folder(self, path: Path | str) -> None:
-        folder = str(Path(path))
-        if folder not in self.scope_folders():
-            self._scope_list.addItem(folder)
-            self._save_scope()
+        folder = Path(path)
+        text = str(folder)
+        if text in self.scope_folders():
+            return
+        self._scope_list.addItem(text)
+        self._save_scope()
+        if not folder.resolve().is_relative_to(self._library_root.resolve()):
+            self._append_log(
+                f"note: {text} is outside the library root, and Rescan indexes the "
+                "root only — nothing will be found there"
+            )
 
     def log_text(self) -> str:
         return self._log.toPlainText()
@@ -427,14 +434,16 @@ class RecomputePanel(QWidget):
         self._stop_button.setEnabled(False)
         self._append_log("stop requested: finishing the current file")
 
-    def shutdown(self, wait_ms: int = 15_000) -> None:
-        """Window closing: ask a running job to stop and wait for it — a
-        thread destroyed mid-run would take the process down."""
+    def shutdown(self) -> None:
+        """Last resort for a caller tearing the panel down while a job runs:
+        ask it to stop and wait — unbounded, because the stop lands after the
+        current file and a thread destroyed mid-run takes the process down.
+        The window itself defers its close instead (`MainWindow.closeEvent`)."""
         thread = self._thread
         if thread is None:
             return
         thread.request_stop()
-        thread.wait(wait_ms)
+        thread.wait()
         logging.getLogger("crate").removeHandler(self._handler)
 
     # --- plumbing ---

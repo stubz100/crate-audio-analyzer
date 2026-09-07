@@ -181,6 +181,8 @@ class MainWindow(QMainWindow):
         # --- right panel: the Recompute tab (§9.6); Attributes arrives with Phase 7 ---
         self._recompute = RecomputePanel(self._db_path, self._settings, encoder_factory, self)
         self._recompute.index_changed.connect(self.reload)
+        self._close_pending = False
+        self._recompute.index_changed.connect(self._close_if_pending)
         tabs = QTabWidget()
         tabs.addTab(self._recompute, "Recompute")
         tabs.setMinimumWidth(420)
@@ -262,11 +264,26 @@ class MainWindow(QMainWindow):
         self._proxy.setFilterFixedString(text)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._recompute.running:
+            # A job mid-file cannot be cut off (its thread would be destroyed
+            # under it), and its completion must not reload a window whose
+            # connection is gone (2026-09-07 review): ask it to stop, keep the
+            # window, and close when it ends.
+            self._close_pending = True
+            self._recompute.stop()
+            self.statusBar().showMessage("closing after the current file…")
+            event.ignore()
+            return
         self._preview.stop()
+        self._recompute.index_changed.disconnect(self.reload)
         self._recompute.save_settings()
         self._recompute.shutdown()
         self._conn.close()
         super().closeEvent(event)
+
+    def _close_if_pending(self) -> None:
+        if self._close_pending:
+            self.close()
 
 
 def main(argv: list[str] | None = None) -> int:

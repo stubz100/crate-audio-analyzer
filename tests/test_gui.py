@@ -241,3 +241,35 @@ def test_recompute_settings_round_trip_and_validation(app, tmp_path):
 
     again.stop()                                                  # no job: a no-op
     assert not again.running
+
+
+def test_closing_the_window_mid_job_waits_for_the_job(app, tmp_path):
+    """Close while a job runs: the window stays, the job is asked to stop,
+    and the window closes itself when the job ends — never a reload on a
+    closed connection, never a thread destroyed under its job."""
+    from crate.main import MainWindow
+
+    window = MainWindow(
+        db_path=tmp_path / "index.db", cache_dir=tmp_path / "cache", settings=_ini(tmp_path)
+    )
+    window.show()
+    panel = window._recompute
+
+    class Done:
+        def format(self):
+            return "slow job done"
+
+    def slow_job(conn, should_stop):
+        while not should_stop():
+            time.sleep(0.01)
+        time.sleep(0.2)                                   # "the current file" after the stop
+        return Done()
+
+    panel._start("slow job", slow_job)
+    assert panel.running
+
+    assert not window.close() and window.isVisible()      # refused: the job is still running
+    assert "stop requested" in panel.log_text()
+
+    _wait_until(app, lambda: not window.isVisible(), timeout_s=30)
+    assert not panel.running and "slow job done" in panel.log_text()

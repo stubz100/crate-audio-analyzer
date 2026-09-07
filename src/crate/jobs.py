@@ -140,6 +140,16 @@ def recompute_attributes(
         log.warning(note)
         report.notes.append(note)
         return _finish(report, started)
+    except Exception as exc:  # noqa: BLE001 - a failed model load must not hide the stages that ran
+        note = (
+            f"embedding stage failed ({type(exc).__name__}: {exc}); everything analysis "
+            "and segmentation committed is kept — fix the cause and run again with "
+            "'new/changed only'"
+        )
+        log.warning(note)
+        log.debug("embedding stage failure", exc_info=True)
+        report.notes.append(note)
+        return _finish(report, started)
     return _finish(report, started, stopped=report.embedding.stopped)
 
 

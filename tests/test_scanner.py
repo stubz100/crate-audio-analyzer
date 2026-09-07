@@ -74,7 +74,7 @@ def test_extension_case_is_ignored(scanned_tree):
 
 def test_rescan_without_changes_touches_only(scanned_tree):
     root, conn = scanned_tree
-    first = scan_library(conn, root)
+    scan_library(conn, root)
     before = {fp: row["last_scanned_at"] for fp, row in _rows(conn).items()}
 
     second = scan_library(conn, root)
