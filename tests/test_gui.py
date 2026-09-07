@@ -170,10 +170,15 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_pa
         assert window._segments.rowCount() > 0
         assert window._current is not None and window._current.name == "loop.wav"
         assert window._attributes._tag_buttons                            # the chips
+        assert window._waveform.loaded and window._waveform.duration_s == pytest.approx(4.0, abs=0.01)
+        assert window._attributes.isAncestorOf(window._segment_table)     # the table lives in the tab
 
         window._segment_table.selectRow(0)
         assert window._current is not None and window._current.name.startswith("seg_")
         assert window._current.exists()
+        first = window._segments.row_at(window._segments.index(0, 0)).id
+        assert window._waveform._selected_segment == first               # mirrored on the waveform
+        assert window._current_offset_ms == window._segments.row_at(window._segments.index(0, 0)).start_ms
 
         window._filter.setText("hit")
         assert window._proxy.rowCount() == 1
@@ -265,6 +270,16 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         assert window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"   # the anchor itself first
         assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_SIMILARITY)) == "100"
         assert "ranked 2 samples" in window.statusBar().currentMessage()
+
+        values = window._attributes.difference_values()                 # the anchor vs itself
+        assert values["amplitude"] == 0 and values["pitch"] is None      # ... and clicks have no pitch
+        window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "hit.wav"), 0))
+        assert window._attributes.difference_values()["amplitude"] > 0
+        assert "selected: hit.wav" in window._attributes._diff_caption.text()
+        window._colour_by.setCurrentIndex(2)
+        assert window._map.colour_mode == "class"
+        window._colour_by.setCurrentIndex(0)
+        assert window._map.colour_mode == "folder"
 
         # A narrowed axis range now filters on the anchor distances (§9.5).
         window._attributes._range_max["conceptual"].setValue(10)

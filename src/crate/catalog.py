@@ -157,6 +157,18 @@ def describe_item(conn: sqlite3.Connection, kind: str, item_id: int) -> str | No
     return f"hit @ {row[1] / 1000:.3f} s ({row[2] - row[1]} ms) in {row[0]}"
 
 
+def folder_groups(folders: list[str]) -> list[str]:
+    """A colour key per sample from its folder: the first path level at
+    which the folders differ — a library rescanned from a parent root has
+    every sample under one top-level folder, which would colour nothing."""
+    parts = [folder.split("/") if folder else [] for folder in folders]
+    deepest = max((len(p) for p in parts), default=0)
+    depth = 0
+    while depth < deepest - 1 and len({tuple(p[: depth + 1]) for p in parts}) == 1:
+        depth += 1
+    return [p[depth] if len(p) > depth else "(root)" for p in parts]
+
+
 def index_summary(conn: sqlite3.Connection) -> dict[str, int]:
     """Counts for the status bar."""
     q = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731

@@ -26,6 +26,8 @@ First run, in the window: Browse to the library root → **Rescan library** → 
 
 Then, on the **Attributes** tab: type what you are after ("footsteps on gravel", "sword clash") and press Search — a segment that matches better than its parent shows as an indented *hit* row you can preview and drag. Select a sample or a hit, press **⚓ Anchor**, set the weight bars, and press **Recompute ranking** (Recompute tab) for a Similarity column; the distance ranges under Filters then cut the list down per axis. **Recompute map layout** (same tab, needs `uv sync --extra map`) fits the map; the **Map** button switches the list for it — click a point to select and preview, wheel to zoom, drag to pan, right-click to fit.
 
+The bottom panel shows the selected sample's waveform with its segments as begin/end markers, the measured attack/decay envelope and the playhead; the Attributes tab starts with the per-axis difference between the selected sample and the anchor. The "CLAP guess" column and filter are CLAP's zero-shot content class — a hint, often wrong on foley; the map colours by folder by default.
+
 ## Development
 
 Requires Python 3.11+ and [uv](https://github.com/astral-sh/uv).

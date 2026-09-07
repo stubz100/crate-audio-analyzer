@@ -18,12 +18,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSettings, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QSettings, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -39,7 +40,14 @@ from PySide6.QtWidgets import (
 )
 
 from .attributes import AttributesPanel
-from .catalog import describe_item, index_summary, load_samples, load_segments, load_tags
+from .catalog import (
+    describe_item,
+    folder_groups,
+    index_summary,
+    load_samples,
+    load_segments,
+    load_tags,
+)
 from .db import default_db_path, open_db
 from .embedding import ClapEncoder, EmbedSettings
 from .layout import LayoutSettings, fit_layout, load_current_layout, place_anchor
@@ -47,7 +55,8 @@ from .listmodel import ListProxy, SampleTreeModel, SegmentTableModel
 from .mapview import MapView
 from .recompute import EncoderFactory, RecomputePanel
 from .render import default_cache_dir, render_segment
-from .similarity import KIND_SAMPLE, KIND_SEGMENT, FeatureTable
+from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable
+from .waveform import WaveformView
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +104,14 @@ class Preview:
     def stop(self) -> None:
         if self._player is not None:
             self._player.stop()
+
+    def seek(self, position_ms: int) -> None:
+        if self._player is not None:
+            self._player.setPosition(int(position_ms))
+
+    @property
+    def position_ms(self) -> int | None:
+        return None if self._player is None else int(self._player.position())
 
     @property
     def playing(self) -> bool:
@@ -152,6 +169,11 @@ class MainWindow(QMainWindow):
         self._cache_dir = cache_dir if cache_dir is not None else default_cache_dir()
         self._conn = open_db(self._db_path)
         self._preview = Preview(self)
+        self._current_offset_ms = 0                 # a segment preview plays from its start
+        self._playhead = QTimer(self)
+        self._playhead.setInterval(50)
+        self._playhead.timeout.connect(self._on_playhead_tick)
+        self._playhead.start()
         self._encoder_factory = encoder_factory
         self._reducer_factory = reducer_factory   # tests inject PCA; None = UMAP (or PCA fallback)
         self._encoder = None
@@ -175,6 +197,10 @@ class MainWindow(QMainWindow):
             button.setCheckable(True)
             button.setAutoExclusive(True)
         self._list_button.setChecked(True)
+        self._colour_by = QComboBox()
+        self._colour_by.addItems(["Colour by folder", "Colour by type", "Colour by CLAP class"])
+        self._colour_by.setToolTip("How the map's points are coloured; shapes always show the type.")
+        self._colour_by.currentIndexChanged.connect(self._on_colour_mode_changed)
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("Quick filter (file, folder, type, class, tags…)")
         self._filter.setClearButtonEnabled(True)
@@ -217,9 +243,14 @@ class MainWindow(QMainWindow):
         self._list_button.clicked.connect(lambda: self._views.setCurrentWidget(self._table))
         self._map_button.clicked.connect(lambda: self._views.setCurrentWidget(self._map))
 
+        # --- the waveform panel (§9.2's preview strip, at the bottom on the user's steer) ---
+        self._waveform = WaveformView()
+        self._waveform.segment_clicked.connect(self._select_segment_row)
+        self._waveform.position_clicked.connect(self._seek)
+
         tables = QSplitter(Qt.Orientation.Vertical)
         tables.addWidget(self._views)
-        tables.addWidget(self._segment_table)
+        tables.addWidget(self._waveform)
         tables.setStretchFactor(0, 4)
         tables.setStretchFactor(1, 1)
 
@@ -262,6 +293,7 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(self._list_button)
         top.addWidget(self._map_button)
+        top.addWidget(self._colour_by)
         top.addWidget(self._filter, stretch=1)
         left_layout.addLayout(top)
         left_layout.addWidget(tables, stretch=1)
@@ -269,6 +301,7 @@ class MainWindow(QMainWindow):
 
         # --- right panel: Attributes (§9.5) and Recompute (§9.6) ---
         self._attributes = AttributesPanel(self._settings)
+        self._attributes.host_segments(self._segment_table)
         self._attributes.search_requested.connect(self._search)
         self._attributes.search_cleared.connect(self._clear_search)
         self._attributes.criteria_changed.connect(self._proxy.set_criteria)
@@ -358,9 +391,14 @@ class MainWindow(QMainWindow):
         self._map.set_selected(row.id)
         # The drill-down and the chips are the sample's either way — a sub-hit
         # is a segment *of* that sample (2026-09-07 review).
-        self._segments.set_rows(load_segments(self._conn, row.id))
+        segments = load_segments(self._conn, row.id)
+        self._segments.set_rows(segments)
         self._segment_table.resizeColumnsToContents()
         self._attributes.show_tags(load_tags(self._conn, row.id))
+        attack_ms, decay_ms = self._envelope_marks(row.id)
+        self._waveform.load(Path(row.filepath), row.filename, segments, attack_ms, decay_ms)
+        self._waveform.set_selected_segment(hit.segment_id if hit is not None else None)
+        self._current_offset_ms = hit.start_ms if hit is not None else 0
         if hit is not None:
             try:
                 self._current = self._render(hit.segment_id)
@@ -375,6 +413,7 @@ class MainWindow(QMainWindow):
             self._current = Path(row.filepath)
             self._current_item = (KIND_SAMPLE, row.id)
             self._now_playing.setText(row.filename)
+        self._update_difference()
         if self._autoplay.isChecked():
             self._play_current()
 
@@ -388,7 +427,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"segment cannot be rendered: {exc}")
             return
         self._current_item = (KIND_SEGMENT, seg.id)
+        self._current_offset_ms = seg.start_ms
         self._now_playing.setText(f"hit @ {seg.start_ms / 1000:.3f} s ({seg.length_ms} ms)")
+        self._waveform.set_selected_segment(seg.id)
+        self._update_difference()
         if self._autoplay.isChecked():
             self._play_current()
 
@@ -405,6 +447,54 @@ class MainWindow(QMainWindow):
     def _on_filter_changed(self, text: str) -> None:
         self._proxy.setFilterFixedString(text)
         self._sync_map_visibility()
+
+    # --- the waveform panel and the difference readout (2026-09-07 steer) ---
+
+    def _envelope_marks(self, sample_id: int) -> tuple[float | None, float | None]:
+        row = self._conn.execute(
+            "SELECT attack_ms, decay_ms FROM analysis WHERE sample_id = ?", (sample_id,)
+        ).fetchone()
+        return (None, None) if row is None else (row[0], row[1])
+
+    def _update_difference(self) -> None:
+        """The selected item's per-axis distance from the anchor (§9.5)."""
+        anchor_label = None if self._anchor is None else self._anchor_label.text().lstrip("⚓ ")
+        if self._anchor is None or self._axis is None or self._current_item is None:
+            self._attributes.show_difference(anchor_label, None, None)
+            return
+        features = self._ensure_features()
+        kind, item_id = self._current_item
+        row = features.row_of(kind, item_id)
+        if row is None:
+            self._attributes.show_difference(anchor_label, self._now_playing.text(), None)
+            return
+        distances = {axis: float(self._axis[row, j]) for j, axis in enumerate(AXES)}
+        self._attributes.show_difference(anchor_label, self._now_playing.text(), distances)
+
+    def _select_segment_row(self, segment_id: int) -> None:
+        """A click inside a segment on the waveform selects it in the table."""
+        row = self._segments.index_of(segment_id)
+        if row is not None:
+            self._segment_table.selectRow(row)
+
+    def _seek(self, position_ms: int) -> None:
+        """A click on the waveform outside any segment seeks the sample."""
+        if self._current_item is None or self._current_item[0] != KIND_SAMPLE:
+            return
+        self._preview.seek(position_ms)
+        if not self._preview.playing:
+            self._play_current()
+            self._preview.seek(position_ms)
+
+    def _on_playhead_tick(self) -> None:
+        if not self._preview.playing:
+            self._waveform.set_position_ms(None)
+            return
+        position = self._preview.position_ms
+        self._waveform.set_position_ms(None if position is None else position + self._current_offset_ms)
+
+    def _on_colour_mode_changed(self, index: int) -> None:
+        self._map.set_colour_mode(("folder", "type", "class")[index])
 
     # --- anchor (§9.2) and ranking (§9.6) ---
 
@@ -435,6 +525,7 @@ class MainWindow(QMainWindow):
         self._attributes.set_anchor_state(True)
         self._recompute.set_ranking_available(True, label)
         self._map.set_anchor(self._anchor_sample_id())
+        self._update_difference()
         if announce:
             self.statusBar().showMessage(
                 f"anchored on {label} — distances ready; Recompute ranking (Recompute tab) to rank"
@@ -456,6 +547,7 @@ class MainWindow(QMainWindow):
         self._map.set_anchor(None)
         self._map.set_halo(set())
         self._update_badges()
+        self._update_difference()
 
     def _restore_anchor(self) -> None:
         kind = self._settings.value(SETTINGS_KEY_ANCHOR_KIND, "", type=str)
@@ -560,6 +652,7 @@ class MainWindow(QMainWindow):
         self._map.set_points(
             ids, xy, [r.filename for r in rows],
             [r.content_class or "" for r in rows], [r.structural_type or "" for r in rows],
+            folder_groups([r.folder for r in rows]),
         )
         if info is None:
             caption = "no layout yet — Recompute tab → Recompute map layout"
@@ -655,6 +748,8 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._preview.stop()
+        self._playhead.stop()
+        self._waveform.wait_for_load()
         if self._search_thread is not None:
             self._search_thread.wait()           # a model load cannot be interrupted
         self._recompute.index_changed.disconnect(self.reload)

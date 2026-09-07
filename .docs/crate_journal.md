@@ -24,7 +24,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 6 | Map View | ✅ done — `72ad400` (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
 | 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); Recompute map layout (both scopes) added with Phase 6 (`72ad400`); anchored-only Recompute *attributes* remains |
-| 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`); waveform, markers and the header proper not started |
+| 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`), the waveform panel with segment markers, envelope and playhead since FEEDBACK_HASH; marker editing (drag, Save / Delete segment) not started |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
 | 12 | Scale & Polish Hardening | ⬜ not started |
@@ -682,3 +682,31 @@ Directions from the review discussion: (1) frame envelope, then check the number
 **Next**
 
 - Phase 5's Qwen2-Audio spike is the last phase below 7 not yet done; then Phase 9 (header: waveform, markers, the anchor's proper home) and the rest of Phase 8 (anchored-only Recompute *attributes*).
+
+## 2026-09-07 — First real use: waveform panel, difference bars, the class taxonomy
+
+**Phase:** feedback on the milestone build (touches 7, 6 and 9) · FEEDBACK_HASH
+
+The user opened the milestone build and raised three things: the bottom panel showed a segments table where a waveform with markers and the envelope belonged (that table belongs on the Attributes tab); the "comparing factors" bars meant nothing to them — the bars should show how the selected sample differs from the anchor; and the five-way "Class" filter and map colours made no sense on their library (a machine-gun burst was *Vocal*), and they thought these were the presets we had agreed to drop.
+
+**Done**
+
+- `waveform.py` — the bottom panel is now the waveform strip §9.2 describes: the selected sample's waveform (per-column min/max read in blocks), every segment as begin/end markers with its strength (manual green, `needs_review` flagged), the measured attack and decay drawn as the envelope — the Amplitude axis's own numbers; a recording has no ADSR beyond attack and decay — and the preview's playhead (a 50 ms timer; a segment preview is offset by its start). Click inside a segment → it is selected and previewed; click elsewhere → seek. Files over 30 s are read on a thread with a "reading…" placeholder and a generation counter so a newer selection wins. Marker editing stays Phase 9.
+- `attributes.py` — reshaped top to bottom: **Selected vs anchor — difference per axis** (read-only bars in % of the library's spread, each axis with a tooltip saying what it measures; "n/a" where the item lacks the axis), Search + chips, **Segments of the selected sample** (the table, hosted here), Filters (Type first; the class row is labelled "CLAP class guess" with the four §4 classes and their measured reliability in the tooltip), and last **Weights for the next ranking and map layout** with a tooltip saying they change nothing until Recompute is pressed.
+- The list column "Class" → "CLAP guess". The map colours by **folder** by default — the first folder level at which the samples differ (`catalog.folder_groups`), since a library rescanned from a parent root puts everything under one top-level folder — with "Colour by type" and "Colour by CLAP class" as a switch beside the Map button.
+- Chips no longer overlap when the selection changes (old buttons hidden and re-parented before `deleteLater`).
+
+**Decided**
+
+- The four classes are not presets: they are spec §4's Facet A, assigned by CLAP's zero-shot guess in Phase 4 (68–73 % on drum packs; clearly worse on foley). The presets dropped earlier were *weight* presets (§9.5). Recorded in §4 as an open question for the user: keep Facet A as a demoted hint with §11's manual correction on top, or replace the taxonomy (folder-derived or user-defined categories). Until then it drives nothing — not the layout, not the ranking.
+- The waveform lives in the bottom panel, not the header (§9.1's sketch): the user's steer, and it gives the waveform the full width. Anchor and Drag stay in the transport row.
+- The difference readout is per item: selecting a segment (a hit row or a drill-down row) compares that segment's own features with the anchor.
+
+**Verified**
+
+- `uv run pytest tests -q` → **167 passed, 2 skipped**; pyflakes clean. New: the block-wise envelope (shape, duration, peak column, channel mixing, empty file), tick steps, click → segment / seek mapping, header text, threaded read of a long file; folder groups; GUI: waveform loaded on selection, the table hosted in the tab, the selected segment mirrored with its offset, difference bars (0 % against the anchor itself, pitch n/a for clicks, > 0 for another sample), colour modes.
+- Krotos index: a 0.6 s file's waveform is inline; the 16-minute "Train Travel" ambience took 4.7 s to read, which is why long files went on a thread. Anchor on *Surfaces Shoes On Gravel Boots-030* vs *-027*: amplitude 64 %, timbre 43 %, spectrum 13 %, conceptual 24 %, pitch n/a — the numbers the user asked to see.
+
+**Next**
+
+- The user's answer on Facet A (keep as a hint / replace). Then Phase 5 (Qwen2-Audio spike), Phase 9 (marker editing on the new waveform panel), the rest of Phase 8.

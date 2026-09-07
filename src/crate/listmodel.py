@@ -56,7 +56,7 @@ class SampleTreeModel(QAbstractItemModel):
     """Samples, each with at most one sub-hit row underneath (§9.4)."""
 
     COLUMNS = (
-        "File", "Folder", "Length", "Type", "Class", "BPM", "Key", "Tags", "Hits",
+        "File", "Folder", "Length", "Type", "CLAP guess", "BPM", "Key", "Tags", "Hits",
         "Similarity", "Match",
     )
     COL_SIMILARITY = 9
@@ -337,6 +337,12 @@ class SegmentTableModel(QAbstractTableModel):
 
     def row_at(self, index: QModelIndex) -> SegmentRow:
         return self._rows[index.row()]
+
+    def index_of(self, segment_id: int) -> int | None:
+        for i, row in enumerate(self._rows):
+            if row.id == segment_id:
+                return i
+        return None
 
     def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802
         return 0 if parent.isValid() else len(self._rows)

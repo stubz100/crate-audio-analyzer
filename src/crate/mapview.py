@@ -27,6 +27,22 @@ CLASS_COLOURS: dict[str, QColor] = {
     "": QColor(150, 150, 150),        # unclassified / flagged
 }
 CLASS_ORDER = ("rhythmic", "melodic", "vocal", "other", "")
+TYPE_COLOURS: dict[str, QColor] = {
+    "one-shot": QColor(230, 120, 40),
+    "multi-hit": QColor(50, 110, 220),
+    "loop": QColor(60, 160, 90),
+    "": QColor(150, 150, 150),
+}
+TYPE_ORDER = ("one-shot", "multi-hit", "loop", "")
+# A qualitative palette for folders (top-level folder under the scan root).
+FOLDER_PALETTE = tuple(
+    QColor(*rgb) for rgb in (
+        (31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40), (148, 103, 189),
+        (140, 86, 75), (227, 119, 194), (188, 189, 34), (23, 190, 207), (255, 152, 150),
+        (152, 223, 138), (197, 176, 213),
+    )
+)
+COLOUR_MODES = ("folder", "type", "class")
 TYPE_LABELS = {"one-shot": "circle", "multi-hit": "square", "loop": "diamond", "": "dot"}
 
 _POINT = 5.0        # half-size of a marker, px
@@ -65,6 +81,9 @@ class MapView(QWidget):
         self._names: list[str] = []
         self._classes: list[str] = []
         self._types: list[str] = []
+        self._folders: list[str] = []
+        self._folder_index: dict[str, int] = {}
+        self._colour_mode = "folder"
         self._visible = np.zeros(0, dtype=bool)
         self._index_of: dict[int, int] = {}
         self._selected: int | None = None
@@ -86,8 +105,11 @@ class MapView(QWidget):
         names: list[str],
         classes: list[str],
         types: list[str],
+        folders: list[str] | None = None,
     ) -> None:
         self._ids = np.asarray(ids, dtype=np.int64)
+        self._folders = list(folders) if folders is not None else [""] * len(ids)
+        self._folder_index = {name: i for i, name in enumerate(sorted(set(self._folders)))}
         self._xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
         self._names = list(names)
         self._classes = list(classes)
@@ -95,6 +117,25 @@ class MapView(QWidget):
         self._visible = np.ones(len(self._ids), dtype=bool)
         self._index_of = {int(i): n for n, i in enumerate(self._ids)}
         self.fit()
+
+    def set_colour_mode(self, mode: str) -> None:
+        """'folder' (default: what the user actually knows), 'type', or 'class'
+        (CLAP's guess, a hint at best on foley)."""
+        if mode not in COLOUR_MODES:
+            raise ValueError(f"colour mode must be one of {COLOUR_MODES}")
+        self._colour_mode = mode
+        self.update()
+
+    @property
+    def colour_mode(self) -> str:
+        return self._colour_mode
+
+    def _colour_of(self, i: int) -> QColor:
+        if self._colour_mode == "type":
+            return TYPE_COLOURS.get(self._types[i] or "", TYPE_COLOURS[""])
+        if self._colour_mode == "class":
+            return CLASS_COLOURS.get(self._classes[i] or "", CLASS_COLOURS[""])
+        return FOLDER_PALETTE[self._folder_index.get(self._folders[i], 0) % len(FOLDER_PALETTE)]
 
     def set_caption(self, text: str) -> None:
         self._caption = text
@@ -191,7 +232,7 @@ class MapView(QWidget):
                 painter.setPen(halo_pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(QPointF(x, y), _HALO, _HALO)
-            colour = CLASS_COLOURS.get(self._classes[i] or "", CLASS_COLOURS[""])
+            colour = self._colour_of(i)
             painter.setPen(QPen(colour.darker(130), 1.0))
             painter.setBrush(colour)
             painter.drawPath(_marker(self._types[i] or "", x, y, _POINT))
@@ -214,18 +255,28 @@ class MapView(QWidget):
         painter.drawText(QRectF(8, 6, self.width() - 16, 18), Qt.AlignmentFlag.AlignLeft, self._caption)
         painter.end()
 
+    def _legend_entries(self) -> list[tuple[str, QColor]]:
+        if self._colour_mode == "type":
+            return [(name or "untyped", TYPE_COLOURS[name]) for name in TYPE_ORDER]
+        if self._colour_mode == "class":
+            return [((name or "unclassified") + " (CLAP guess)", CLASS_COLOURS[name]) for name in CLASS_ORDER]
+        names = sorted(self._folder_index, key=self._folder_index.get)
+        entries = [(name or "(root)", FOLDER_PALETTE[i % len(FOLDER_PALETTE)]) for i, name in enumerate(names)]
+        return entries[: len(FOLDER_PALETTE)]
+
     def _paint_legend(self, painter: QPainter) -> None:
         x, y = 12.0, self.height() - 14.0
-        for name in CLASS_ORDER:
-            colour = CLASS_COLOURS[name]
+        for label, colour in self._legend_entries():
             painter.setPen(QPen(colour.darker(130), 1.0))
             painter.setBrush(colour)
             painter.drawEllipse(QPointF(x, y), 4.5, 4.5)
             painter.setPen(QColor(70, 70, 70))
-            label = name or "unclassified"
             painter.drawText(QPointF(x + 9, y + 4), label)
-            x += 24 + 6.5 * len(label)
-        painter.drawText(QPointF(x + 6, y + 4), "● one-shot  ■ multi-hit  ◆ loop  · halo = ranked neighbour  • badge = hit inside")
+            x += 22 + 6.0 * len(label)
+            if x > self.width() - 260:
+                break
+        painter.setPen(QColor(70, 70, 70))
+        painter.drawText(QPointF(max(x + 6, self.width() - 250), y + 4), "● one-shot ■ multi-hit ◆ loop · halo = ranked · dot = hit inside")
 
     # --- interaction ---
 

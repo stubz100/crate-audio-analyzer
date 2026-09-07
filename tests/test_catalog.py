@@ -56,3 +56,12 @@ def test_samples_carry_what_the_list_shows(tmp_path):
     summary = index_summary(conn)
     assert summary["samples"] == 2 and summary["analysed"] == 2 and summary["segments"] == len(segments)
     conn.close()
+
+
+def test_folder_groups_skip_the_levels_everyone_shares():
+    from crate.catalog import folder_groups
+
+    assert folder_groups(["A/x", "A/y", "A/y/z"]) == ["x", "y", "y"]         # "A" is shared: skipped
+    assert folder_groups(["A", "B", ""]) == ["A", "B", "(root)"]
+    assert folder_groups(["A/x", "A/x"]) == ["x", "x"]                       # nothing differs: deepest level
+    assert folder_groups([]) == []
