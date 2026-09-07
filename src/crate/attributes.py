@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QProgressBar,
     QPushButton,
@@ -40,6 +41,7 @@ from PySide6.QtWidgets import (
 
 from .catalog import Criteria
 from .similarity import AXES, AXIS_LABELS
+from .theme import SqueezableWidget
 
 _KEY_WEIGHT = "weights/"
 
@@ -104,6 +106,7 @@ class AttributesPanel(QWidget):
             bar = QProgressBar()
             bar.setRange(0, 100)
             bar.setTextVisible(True)
+            bar.setMinimumWidth(60)
             bar.setToolTip(
                 AXIS_HELP[axis] + "\n\n0 % = identical on this axis, 100 % = as far apart as "
                 "the 95th percentile of the library."
@@ -130,12 +133,13 @@ class AttributesPanel(QWidget):
         search_row.addWidget(self._search_button)
         search_row.addWidget(clear_button)
         search_layout.addLayout(search_row)
-        self._tags_label = QLabel("Tags of the selected sample (CLAP zero-shot; click to search):")
-        self._tags_row = QHBoxLayout()
-        self._tags_row.addStretch(1)
+        self._tags_label = QLabel("Tags of the selected sample (CLAP zero-shot; click one to search):")
+        self._tags_label.setWordWrap(True)
+        self._tags_grid = QGridLayout()
+        self._tags_grid.setHorizontalSpacing(4)
         self._tag_buttons: list[QPushButton] = []
         search_layout.addWidget(self._tags_label)
-        search_layout.addLayout(self._tags_row)
+        search_layout.addLayout(self._tags_grid)
 
         # (3) the selected sample's segments — hosted for the window (§6.4 drill-down)
         self._segments_group = QGroupBox("Segments of the selected sample")
@@ -149,44 +153,23 @@ class AttributesPanel(QWidget):
         filters_group = QGroupBox("Filters")
         filters_layout = QVBoxLayout(filters_group)
         self._type_boxes: dict[str, QCheckBox] = {}
-        type_row = QHBoxLayout()
-        type_label = QLabel("Type:")
-        type_label.setToolTip(TYPE_HELP)
-        type_row.addWidget(type_label)
-        for label, key in TYPE_OPTIONS:
-            box = QCheckBox(label)
-            box.setChecked(True)
-            box.setToolTip(TYPE_HELP)
-            box.toggled.connect(self._emit_criteria)
-            type_row.addWidget(box)
-            self._type_boxes[key] = box
-        type_row.addStretch(1)
         self._class_boxes: dict[str, QCheckBox] = {}
-        class_row = QHBoxLayout()
-        class_label = QLabel("CLAP class guess:")
-        class_label.setToolTip(CLASS_HELP)
-        class_row.addWidget(class_label)
-        for label, key in CLASS_OPTIONS:
-            box = QCheckBox(label)
-            box.setChecked(True)
-            box.setToolTip(CLASS_HELP)
-            box.toggled.connect(self._emit_criteria)
-            class_row.addWidget(box)
-            self._class_boxes[key] = box
-        class_row.addStretch(1)
-        filters_layout.addLayout(type_row)
-        filters_layout.addLayout(class_row)
+        filters_layout.addLayout(self._checkbox_grid("Type", TYPE_HELP, TYPE_OPTIONS, self._type_boxes))
+        filters_layout.addLayout(
+            self._checkbox_grid("CLAP class guess", CLASS_HELP, CLASS_OPTIONS, self._class_boxes)
+        )
 
         absolute = QFormLayout()
+        absolute.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self._duration_min = self._seconds_box()
         self._duration_max = self._seconds_box()
-        absolute.addRow("Length (s), 0 = any", _pair(self._duration_min, self._duration_max))
+        absolute.addRow("Length (s)", _pair(self._duration_min, self._duration_max))
         self._tempo_min = self._bpm_box()
         self._tempo_max = self._bpm_box()
-        absolute.addRow("Tempo (BPM), 0 = any", _pair(self._tempo_min, self._tempo_max))
+        absolute.addRow("Tempo (BPM)", _pair(self._tempo_min, self._tempo_max))
         filters_layout.addLayout(absolute)
 
-        self._ranges_group = QGroupBox("Distance from the anchor, % of the library's spread")
+        self._ranges_group = QGroupBox("Distance from the anchor (% of spread)")
         ranges_layout = QGridLayout(self._ranges_group)
         self._range_min: dict[str, QSpinBox] = {}
         self._range_max: dict[str, QSpinBox] = {}
@@ -201,12 +184,13 @@ class AttributesPanel(QWidget):
             ranges_layout.addWidget(high, row, 3)
             self._range_min[axis] = low
             self._range_max[axis] = high
+        ranges_layout.setColumnStretch(4, 1)
         self._ranges_group.setEnabled(False)
         self._ranges_group.setToolTip("Pin an anchor (⚓) to unlock these: a hard cutoff per axis.")
         filters_layout.addWidget(self._ranges_group)
 
         # (5) weights — for the next Recompute ranking / map layout only
-        weights_group = QGroupBox("Weights for the next ranking and map layout")
+        weights_group = QGroupBox("Weights (next ranking / map layout)")
         weights_group.setToolTip(
             "How much each axis counts when you press Recompute ranking or Recompute map "
             "layout. Moving these changes nothing until you do (§9.6). They are not the "
@@ -220,6 +204,7 @@ class AttributesPanel(QWidget):
             slider.setRange(0, 100)
             slider.setValue(int(settings.value(_KEY_WEIGHT + axis, 100, type=int)))
             slider.setToolTip(AXIS_HELP[axis])
+            slider.setMinimumWidth(60)
             value = QLabel(f"{slider.value()} %")
             value.setMinimumWidth(40)
             slider.valueChanged.connect(lambda v, a=axis, lbl=value: self._on_weight(a, v, lbl))
@@ -231,8 +216,11 @@ class AttributesPanel(QWidget):
             self._weight_sliders[axis] = slider
             self._weight_values[axis] = value
 
-        controls = QWidget()
+        controls = SqueezableWidget()
         controls_layout = QVBoxLayout(controls)
+        # Let the contents squeeze to the pane instead of enforcing their
+        # minimum: a five-checkbox row must never push the panel past its edge.
+        controls_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         controls_layout.addWidget(diff_group)
         controls_layout.addWidget(search_group)
         controls_layout.addWidget(self._segments_group)
@@ -242,7 +230,7 @@ class AttributesPanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(controls)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -250,12 +238,30 @@ class AttributesPanel(QWidget):
 
     # --- widgets ---
 
+    def _checkbox_grid(self, title: str, help_text: str, options, boxes: dict, per_row: int = 3) -> QGridLayout:
+        """A labelled row of checkboxes that wraps — a single row of five
+        was what pushed the panel past its pane (2026-09-07)."""
+        grid = QGridLayout()
+        label = QLabel(title + ":")
+        label.setToolTip(help_text)
+        grid.addWidget(label, 0, 0)
+        for n, (text, key) in enumerate(options):
+            box = QCheckBox(text)
+            box.setChecked(True)
+            box.setToolTip(help_text)
+            box.toggled.connect(self._emit_criteria)
+            grid.addWidget(box, n // per_row, 1 + n % per_row)
+            boxes[key] = box
+        grid.setColumnStretch(per_row + 1, 1)
+        return grid
+
     def _seconds_box(self) -> QDoubleSpinBox:
         box = QDoubleSpinBox()
-        box.setRange(0.0, 100_000.0)
+        box.setRange(0.0, 9_999.99)
         box.setDecimals(2)
         box.setSingleStep(0.1)
         box.setSpecialValueText("any")
+        box.setMaximumWidth(84)
         box.valueChanged.connect(self._emit_criteria)
         return box
 
@@ -263,6 +269,7 @@ class AttributesPanel(QWidget):
         box = QSpinBox()
         box.setRange(0, 1000)
         box.setSpecialValueText("any")
+        box.setMaximumWidth(72)
         box.valueChanged.connect(self._emit_criteria)
         return box
 
@@ -271,6 +278,7 @@ class AttributesPanel(QWidget):
         box.setRange(0, 100)
         box.setSuffix(" %")
         box.setValue(value)
+        box.setMaximumWidth(68)
         box.valueChanged.connect(self._emit_criteria)
         return box
 
@@ -349,17 +357,17 @@ class AttributesPanel(QWidget):
 
     def show_tags(self, tags: list[tuple[str, float]]) -> None:
         for button in self._tag_buttons:
-            self._tags_row.removeWidget(button)
+            self._tags_grid.removeWidget(button)
             button.hide()                  # gone now, not at the next event-loop turn
             button.setParent(None)
             button.deleteLater()
         self._tag_buttons = []
-        for tag, score in tags:
+        for n, (tag, score) in enumerate(tags):
             button = QPushButton(f"{tag}  {score * 100:.0f}")
             button.setFlat(True)
             button.setToolTip(f"CLAP zero-shot chip, cosine {score:.2f} — click to search for “{tag}”")
             button.clicked.connect(lambda _checked=False, t=tag: self.search_for(t))
-            self._tags_row.insertWidget(len(self._tag_buttons), button)
+            self._tags_grid.addWidget(button, n // 3, n % 3)   # three per row: the row wraps
             self._tag_buttons.append(button)
 
     def search_for(self, text: str) -> None:

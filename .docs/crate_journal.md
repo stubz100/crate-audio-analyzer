@@ -710,3 +710,29 @@ The user opened the milestone build and raised three things: the bottom panel sh
 **Next**
 
 - The user's answer on Facet A (keep as a hint / replace). Then Phase 5 (Qwen2-Audio spike), Phase 9 (marker editing on the new waveform panel), the rest of Phase 8.
+
+## 2026-09-07 — Second round of first-use feedback: panel width, map colouring, the look
+
+**Phase:** feedback on the milestone build · FEEDBACK2_HASH
+
+The user: the right panel overshot its edge and was trimmed; the map's folder groups ("Ambiences", "Animals") are the kind of static classification a library of hundreds of sounds cannot use unless it is dynamic; and the whole UI looked like basic HTML.
+
+**Done**
+
+- **Panel width.** Measured, not guessed: the Attributes panel's contents needed 840 px at minimum against a 480 px pane (a single row of five class checkboxes, the long labels, spin boxes sized for "100000.00"), the Recompute panel 726 px. Checkbox rows now wrap three per row, labels wrap, spin boxes are capped, titles shortened; the panels' inner layouts use `SetNoConstraint` so the contents squeeze to the pane and a horizontal scrollbar is the fallback rather than clipping; the tag chips wrap three per row; the right pane's default share is 560 px.
+- **Map colouring.** Folder / type / class colouring removed, `catalog.folder_groups` with it. Points are coloured by the current **score**: the last ranking's similarity to the anchor, or the active search's match (stretched between the 5th and 95th percentiles), with a gradient key in the legend; one colour when there is neither. Clearing a search falls back to the ranking's colours; clearing the anchor to uniform unless a search is active.
+- **Look.** `theme.py`: Fusion style, a dark palette and a style sheet (group boxes as cards with small-caps titles, rounded fields and buttons, an accent for selection and Play, amber for the anchor, slim scrollbars, styled headers, tabs, sliders and progress bars), applied once in `main()`; the map and waveform painters use the same colour constants (dark ground, accent waveform, amber segments, green manual segments, pink envelope, white playhead and badges). Tests run unthemed.
+
+**Decided**
+
+- Colour on the map is reserved for something the user just did — rank or search — not for any fixed grouping; the CLAP class stays out of the map for good, and the folder grouping is gone.
+- One theme, dark, no switch: the tool sits next to a DAW; a light variant is a later nicety.
+
+**Verified**
+
+- `uv run pytest tests -q` → **166 passed, 2 skipped**; pyflakes clean.
+- Themed offscreen screenshots on the Krotos index: list + waveform, the map coloured by a gravel-boots ranking (the similar cluster brightens around the anchor), the Recompute tab; the right pane now fits its 560 px share with the chips wrapped.
+
+**Next**
+
+- The user's answer on Facet A (keep as a hint / replace) is still open. Then Phase 5, Phase 9 (marker editing on the waveform), the rest of Phase 8.

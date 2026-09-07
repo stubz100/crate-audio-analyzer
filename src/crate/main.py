@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
-    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -42,7 +41,6 @@ from PySide6.QtWidgets import (
 from .attributes import AttributesPanel
 from .catalog import (
     describe_item,
-    folder_groups,
     index_summary,
     load_samples,
     load_segments,
@@ -55,7 +53,8 @@ from .listmodel import ListProxy, SampleTreeModel, SegmentTableModel
 from .mapview import MapView
 from .recompute import EncoderFactory, RecomputePanel
 from .render import default_cache_dir, render_segment
-from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable
+from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable, Scores
+from .theme import apply_theme
 from .waveform import WaveformView
 
 log = logging.getLogger(__name__)
@@ -197,10 +196,7 @@ class MainWindow(QMainWindow):
             button.setCheckable(True)
             button.setAutoExclusive(True)
         self._list_button.setChecked(True)
-        self._colour_by = QComboBox()
-        self._colour_by.addItems(["Colour by folder", "Colour by type", "Colour by CLAP class"])
-        self._colour_by.setToolTip("How the map's points are coloured; shapes always show the type.")
-        self._colour_by.currentIndexChanged.connect(self._on_colour_mode_changed)
+        self._last_similarity: Scores | None = None
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("Quick filter (file, folder, type, class, tags…)")
         self._filter.setClearButtonEnabled(True)
@@ -256,6 +252,7 @@ class MainWindow(QMainWindow):
 
         # --- transport + anchor (§9.2, the minimal slice Phase 7 needs) ---
         self._play_button = QPushButton("▶ Play")
+        self._play_button.setObjectName("play")
         self._play_button.clicked.connect(self._play_current)
         stop_button = QPushButton("■ Stop")
         stop_button.clicked.connect(self._preview.stop)
@@ -265,7 +262,9 @@ class MainWindow(QMainWindow):
             lambda on: self._settings.setValue(SETTINGS_KEY_AUTOPLAY, bool(on))
         )
         self._now_playing = QLabel("")
+        self._now_playing.setObjectName("nowPlaying")
         self._anchor_button = QPushButton("⚓ Anchor")
+        self._anchor_button.setObjectName("anchor")
         self._anchor_button.setToolTip(
             "Pin the selected sample or hit as the comparison reference (§9.2): "
             "unlocks the Attributes tab's distance ranges and Recompute ranking."
@@ -293,7 +292,6 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(self._list_button)
         top.addWidget(self._map_button)
-        top.addWidget(self._colour_by)
         top.addWidget(self._filter, stretch=1)
         left_layout.addLayout(top)
         left_layout.addWidget(tables, stretch=1)
@@ -314,14 +312,14 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self._attributes, "Attributes")
         tabs.addTab(self._recompute, "Recompute")
-        tabs.setMinimumWidth(420)
+        tabs.setMinimumWidth(360)
 
         body = QSplitter(Qt.Orientation.Horizontal)
         body.addWidget(left)
         body.addWidget(tabs)
         body.setStretchFactor(0, 3)
         body.setStretchFactor(1, 1)
-        body.setSizes([920, 480])
+        body.setSizes([840, 560])
         self.setCentralWidget(body)
 
         self.reload()
@@ -493,9 +491,6 @@ class MainWindow(QMainWindow):
         position = self._preview.position_ms
         self._waveform.set_position_ms(None if position is None else position + self._current_offset_ms)
 
-    def _on_colour_mode_changed(self, index: int) -> None:
-        self._map.set_colour_mode(("folder", "type", "class")[index])
-
     # --- anchor (§9.2) and ranking (§9.6) ---
 
     def _anchor_current(self) -> None:
@@ -548,6 +543,9 @@ class MainWindow(QMainWindow):
         self._map.set_halo(set())
         self._update_badges()
         self._update_difference()
+        self._last_similarity = None
+        if not self._samples.has_match:
+            self._map.set_scores(None)
 
     def _restore_anchor(self) -> None:
         kind = self._settings.value(SETTINGS_KEY_ANCHOR_KIND, "", type=str)
@@ -581,6 +579,9 @@ class MainWindow(QMainWindow):
         ]
         self._map.set_halo(set(ranked[:HALO_NEIGHBOURS]))
         self._update_badges()
+        self._last_similarity = scores
+        if not self._samples.has_match:
+            self._map.set_scores(scores.sample, "similarity to the anchor")
         self.statusBar().showMessage(
             f"ranked {len(scores.sample)} samples against {self._anchor_label.text()} "
             f"({len(scores.hits)} hits inside longer samples)"
@@ -628,6 +629,7 @@ class MainWindow(QMainWindow):
         self._table.sortByColumn(SampleTreeModel.COL_MATCH, Qt.SortOrder.DescendingOrder)
         self._table.expandAll()
         self._update_badges()
+        self._map.set_scores(scores.sample, f"match to “{text}”")
         self.statusBar().showMessage(
             f"“{text}”: {len(scores.sample)} samples scored, "
             f"{len(scores.hits)} hits inside longer samples"
@@ -637,6 +639,8 @@ class MainWindow(QMainWindow):
         self._samples.set_match(None)
         self._update_score_columns()
         self._update_badges()
+        similarity = self._last_similarity
+        self._map.set_scores(similarity.sample if similarity else None, "similarity to the anchor")
         if self._samples.has_similarity:
             self._table.sortByColumn(SampleTreeModel.COL_SIMILARITY, Qt.SortOrder.DescendingOrder)
             self._table.expandAll()
@@ -649,11 +653,9 @@ class MainWindow(QMainWindow):
         ids = [sid for sid in positions if sid in self._rows_by_id]
         xy = np.array([positions[sid] for sid in ids], dtype=float).reshape(-1, 2)
         rows = [self._rows_by_id[sid] for sid in ids]
-        self._map.set_points(
-            ids, xy, [r.filename for r in rows],
-            [r.content_class or "" for r in rows], [r.structural_type or "" for r in rows],
-            folder_groups([r.folder for r in rows]),
-        )
+        self._map.set_points(ids, xy, [r.filename for r in rows], [r.structural_type or "" for r in rows])
+        self._last_similarity = None
+        self._map.set_scores(None)
         if info is None:
             caption = "no layout yet — Recompute tab → Recompute map layout"
         else:
@@ -774,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:
     for noisy in _NOISY_LOGGERS:
         logging.getLogger(noisy).setLevel(logging.WARNING)
     app = QApplication(sys.argv[:1])
+    apply_theme(app)
     window = MainWindow(args.db)
     window.show()
     return app.exec()

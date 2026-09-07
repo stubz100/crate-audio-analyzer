@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QListWidget,
     QPlainTextEdit,
     QPushButton,
@@ -50,6 +51,7 @@ from .db import open_db
 from .embedding import EmbedSettings, Encoder
 from .jobs import RecomputeSettings, recompute_attributes
 from .scanner import scan_library
+from .theme import SqueezableWidget
 from .segmentation import (
     BOUNDARY_MODES,
     DEFAULT_MAX_LENGTH_S,
@@ -197,8 +199,10 @@ class RecomputePanel(QWidget):
         rank_layout.addLayout(rank_row)
         rank_layout.addWidget(self._rank_button)
         # --- recompute map layout (§9.6): full re-fit over the scope, or the anchor only ---
-        self._layout_library = QRadioButton("Library scope — full re-fit over the scope folders")
-        self._layout_anchored = QRadioButton("Anchored only — place the anchor in the existing layout")
+        self._layout_library = QRadioButton("Library scope (full re-fit)")
+        self._layout_library.setToolTip("Re-fit the whole layout over the samples in the scope folders.")
+        self._layout_anchored = QRadioButton("Anchored only (place the anchor)")
+        self._layout_anchored.setToolTip("Transform just the anchor into the existing layout — cheap.")
         self._layout_library.setChecked(True)
         self._layout_button = QPushButton("Recompute map layout")
         self._layout_button.setToolTip(
@@ -346,8 +350,9 @@ class RecomputePanel(QWidget):
         self._log.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
         self._log.setPlaceholderText("Nothing runs until you press a button (§9.6).")
 
-        controls = QWidget()
+        controls = SqueezableWidget()
         controls_layout = QVBoxLayout(controls)
+        controls_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         controls_layout.addWidget(root_group)
         controls_layout.addWidget(rank_group)
         controls_layout.addWidget(layout_group)
@@ -357,7 +362,7 @@ class RecomputePanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(controls)
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(scroll)

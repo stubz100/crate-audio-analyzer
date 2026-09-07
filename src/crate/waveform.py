@@ -25,6 +25,7 @@ from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 from .catalog import SegmentRow
+from .theme import ACCENT, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,12 @@ def envelope_columns(path: Path | str, columns: int = DEFAULT_COLUMNS) -> Envelo
     amplitude = np.maximum(np.abs(mins), np.abs(maxs))
     peak = int(np.argmax(amplitude)) if amplitude.size else 0
     return Envelope(mins, maxs, frames / sr, peak)
+
+
+def _alpha(colour: QColor, alpha: int) -> QColor:
+    out = QColor(colour)
+    out.setAlpha(alpha)
+    return out
 
 
 def _tick_step(duration_s: float, width_px: float, min_px: float = 70.0) -> float:
@@ -248,19 +255,19 @@ class WaveformView(QWidget):
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor(252, 252, 252))
+        painter.fillRect(self.rect(), BG)
         rect = self._plot_rect()
-        painter.setPen(QColor(70, 70, 70))
+        painter.setPen(TEXT)
         painter.drawText(QRectF(_SIDE, 2, self.width() - 2 * _SIDE, _TOP - 2), Qt.AlignmentFlag.AlignLeft, self._header_text())
         if self._env is None:
-            painter.setPen(QColor(120, 120, 120))
+            painter.setPen(TEXT_DIM)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._error or "select a sample to see its waveform")
             painter.end()
             return
         env = self._env
         mid = rect.center().y()
         half = rect.height() / 2 - 2
-        painter.setPen(QPen(QColor(215, 215, 215), 1))
+        painter.setPen(QPen(BORDER, 1))
         painter.drawLine(QPointF(rect.left(), mid), QPointF(rect.right(), mid))
 
         self._paint_segments(painter, rect)
@@ -274,15 +281,15 @@ class WaveformView(QWidget):
             for x, v in zip(xs[::-1], env.mins[::-1]):
                 path.lineTo(float(x), mid - float(v) * half)
             path.closeSubpath()
-            painter.setPen(QPen(QColor(40, 90, 160), 1))
-            painter.setBrush(QColor(70, 130, 200, 170))
+            painter.setPen(QPen(ACCENT, 1))
+            painter.setBrush(_alpha(ACCENT, 150))
             painter.drawPath(path)
 
         self._paint_envelope(painter, rect, mid, half)
         self._paint_axis(painter, rect)
         if self._position_ms is not None:
             x = self._x_of(self._position_ms / 1000, rect)
-            painter.setPen(QPen(QColor(220, 40, 40), 1.5))
+            painter.setPen(QPen(WHITE, 1.5))
             painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
         painter.end()
 
@@ -305,11 +312,11 @@ class WaveformView(QWidget):
             x1 = self._x_of(seg.end_ms / 1000, rect)
             selected = seg.id == self._selected_segment
             manual = seg.detection_method == "manual"
-            fill = QColor(60, 170, 90, 70 if selected else 35) if manual else QColor(240, 170, 40, 80 if selected else 40)
+            fill = _alpha(GREEN, 80 if selected else 40) if manual else _alpha(AMBER, 90 if selected else 45)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(fill)
             painter.drawRect(QRectF(x0, rect.top(), max(x1 - x0, 1.0), rect.height()))
-            edge = QColor(30, 120, 60) if manual else QColor(200, 130, 20)
+            edge = GREEN if manual else AMBER
             painter.setPen(QPen(edge, 2.0 if selected else 1.0))
             painter.drawLine(QPointF(x0, rect.top()), QPointF(x0, rect.bottom()))
             painter.drawLine(QPointF(x1, rect.top()), QPointF(x1, rect.bottom()))
@@ -332,7 +339,7 @@ class WaveformView(QWidget):
         path = QPainterPath(points[0])
         for point in points[1:]:
             path.lineTo(point)
-        painter.setPen(QPen(QColor(200, 40, 120), 1.5, Qt.PenStyle.DashLine))
+        painter.setPen(QPen(PINK, 1.5, Qt.PenStyle.DashLine))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
 
@@ -340,7 +347,7 @@ class WaveformView(QWidget):
         if self._env is None or self._env.duration_s <= 0:
             return
         step = _tick_step(self._env.duration_s, rect.width())
-        painter.setPen(QColor(120, 120, 120))
+        painter.setPen(TEXT_DIM)
         t = 0.0
         while t <= self._env.duration_s + 1e-9:
             x = self._x_of(t, rect)

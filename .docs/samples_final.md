@@ -1,6 +1,6 @@
 # Sample Library Search & Mapping Tool — Specification
 
-**Status: living spec.** *Last updated: 2026-09-07 (first-use feedback: §4 Facet A reliability note, §9.2 waveform panel, §9.3 colour-by, §9.5 reshaped Attributes tab).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
+**Status: living spec.** *Last updated: 2026-09-07 (second round of first-use feedback: §9.1 theme, §9.3 score colouring).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
 
 ---
 
@@ -353,6 +353,8 @@ Two established interaction patterns — Atlas 2's spatial map, Sononym's sortab
 
 ### 9.1 Layout
 
+*Look (2026-09-07, on the user's steer — the default widgets read as "basic HTML"): one dark theme in the idiom of production tools, `theme.py` — Fusion style, a palette and a style sheet applied once by `main()`, and the same colour constants used by the painted map and waveform, so the window reads as one surface. Panels squeeze to their pane and fall back to a scrollbar rather than clipping.*
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  Crate                                              [ Map ]     [ List ]  │  ← header row 1
@@ -377,7 +379,7 @@ Two established interaction patterns — Atlas 2's spatial map, Sononym's sortab
 
 ### 9.3 Map view
 
-One point per **sample** (segments never get their own point), positioned by the last explicitly-computed layout, colored by content class *(since 2026-09-07: by folder by default — the first folder level at which the samples differ — with type and CLAP class as a switch, because the class is a guess, §4)*, sized/shaped by structural type. Clicking previews; if anchored and ranked, nearest neighbors highlight as a halo (last-computed, not live). A **segment match badge** appears on a sample's point when a search/similarity hit actually lands on one of its segments rather than the sample itself.
+One point per **sample** (segments never get their own point), positioned by the last explicitly-computed layout, colored by content class *(since 2026-09-07, on the user's steer: coloured by the current **score** — the last ranking's similarity to the anchor, or the current search's match — and one colour when there is neither; static groupings such as folder or the CLAP class were tried and dropped, since a library of hundreds of kinds of sound needs a colouring that comes from what the user is doing)*, sized/shaped by structural type. Clicking previews; if anchored and ranked, nearest neighbors highlight as a halo (last-computed, not live). A **segment match badge** appears on a sample's point when a search/similarity hit actually lands on one of its segments rather than the sample itself.
 
 *(Implemented 2026-09-07, Phase 6, `layout.py` + `mapview.py`: node G fits UMAP over the §5.1 feature space under the weight bars at fit time — each axis's standardised columns scaled by √(weight / dim), the CLAP vector as the conceptual axis — over the samples in the folder-scope list, writes a `map_layout` row + one `map_position` per sample, and pickles the fitted reducer so the anchored-only path can `transform` one sample into the existing layout; segments get no point. The view is a plain painted widget: colour by class, circle / square / diamond by type, the list's filter mirrored, click = select in the list (preview), double-click = play, wheel/drag = zoom/pan, right-click = fit; the halo is the last ranking's 20 nearest, the badge the current search's or ranking's segment hits. The caption names the layout, its scope, reducer and time, and says when the bars no longer match the weights it was fit under. Without the `map` extra a PCA projection stands in and says so. Measured: 3,956 samples in 20 s with UMAP, one-sample placement 2 s.)*
 

@@ -1,6 +1,11 @@
 """The map view (spec §9.3, Phase 6): one point per **sample** — segments
 never get a point (§6.4) — positioned by the last explicitly computed layout
-(`layout.py`), coloured by content class, shaped by structural type.
+(`layout.py`), shaped by structural type, and coloured by the current
+**score**: the last ranking's similarity to the anchor, or the current text
+search's match. With neither, every point is the same colour. (2026-09-07,
+on the user's steer: static colourings — folder, CLAP class — were dropped;
+a library of hundreds of kinds of sound needs a colouring that comes from
+what the user is doing, not from a fixed grouping.)
 
 Clicking a point selects that sample in the window (which previews it);
 double-clicking plays it. If anchored and ranked, the nearest neighbours
@@ -14,41 +19,20 @@ paint in milliseconds, and pan/zoom is one affine transform.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen, QWheelEvent
 from PySide6.QtWidgets import QToolTip, QWidget
 
-CLASS_COLOURS: dict[str, QColor] = {
-    "rhythmic": QColor(230, 120, 40),
-    "melodic": QColor(50, 110, 220),
-    "vocal": QColor(200, 60, 160),
-    "other": QColor(60, 160, 90),
-    "": QColor(150, 150, 150),        # unclassified / flagged
-}
-CLASS_ORDER = ("rhythmic", "melodic", "vocal", "other", "")
-TYPE_COLOURS: dict[str, QColor] = {
-    "one-shot": QColor(230, 120, 40),
-    "multi-hit": QColor(50, 110, 220),
-    "loop": QColor(60, 160, 90),
-    "": QColor(150, 150, 150),
-}
-TYPE_ORDER = ("one-shot", "multi-hit", "loop", "")
-# A qualitative palette for folders (top-level folder under the scan root).
-FOLDER_PALETTE = tuple(
-    QColor(*rgb) for rgb in (
-        (31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40), (148, 103, 189),
-        (140, 86, 75), (227, 119, 194), (188, 189, 34), (23, 190, 207), (255, 152, 150),
-        (152, 223, 138), (197, 176, 213),
-    )
-)
-COLOUR_MODES = ("folder", "type", "class")
-TYPE_LABELS = {"one-shot": "circle", "multi-hit": "square", "loop": "diamond", "": "dot"}
+from .theme import ACCENT, AMBER, BG, BORDER, SCORE_HIGH, SCORE_LOW, TEXT, TEXT_DIM, WHITE, mix
 
 _POINT = 5.0        # half-size of a marker, px
 _HALO = 10.0
 _PICK_RADIUS = 10.0
 _MARGIN = 30.0
+_UNSCORED = QColor("#3a3b45")
 
 
 def _marker(path_type: str, x: float, y: float, r: float) -> QPainterPath:
@@ -79,17 +63,17 @@ class MapView(QWidget):
         self._ids = np.zeros(0, dtype=np.int64)
         self._xy = np.zeros((0, 2), dtype=np.float64)
         self._names: list[str] = []
-        self._classes: list[str] = []
         self._types: list[str] = []
-        self._folders: list[str] = []
-        self._folder_index: dict[str, int] = {}
-        self._colour_mode = "folder"
         self._visible = np.zeros(0, dtype=bool)
         self._index_of: dict[int, int] = {}
         self._selected: int | None = None
         self._anchor: int | None = None
         self._halo: set[int] = set()
         self._badges: set[int] = set()
+        self._scores: dict[int, float] | None = None
+        self._score_label = ""
+        self._score_lo = 0.0
+        self._score_hi = 1.0
         self._caption = "no layout yet — Recompute tab → Recompute map layout"
         self._scale = 1.0
         self._pan = QPointF(0.0, 0.0)
@@ -98,44 +82,34 @@ class MapView(QWidget):
 
     # --- data in ---
 
-    def set_points(
-        self,
-        ids: list[int],
-        xy: np.ndarray,
-        names: list[str],
-        classes: list[str],
-        types: list[str],
-        folders: list[str] | None = None,
-    ) -> None:
+    def set_points(self, ids: list[int], xy: np.ndarray, names: list[str], types: list[str]) -> None:
         self._ids = np.asarray(ids, dtype=np.int64)
-        self._folders = list(folders) if folders is not None else [""] * len(ids)
-        self._folder_index = {name: i for i, name in enumerate(sorted(set(self._folders)))}
         self._xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
         self._names = list(names)
-        self._classes = list(classes)
         self._types = list(types)
         self._visible = np.ones(len(self._ids), dtype=bool)
         self._index_of = {int(i): n for n, i in enumerate(self._ids)}
         self.fit()
 
-    def set_colour_mode(self, mode: str) -> None:
-        """'folder' (default: what the user actually knows), 'type', or 'class'
-        (CLAP's guess, a hint at best on foley)."""
-        if mode not in COLOUR_MODES:
-            raise ValueError(f"colour mode must be one of {COLOUR_MODES}")
-        self._colour_mode = mode
+    def set_scores(self, scores: Mapping[int, float] | None, label: str = "") -> None:
+        """Colour by per-sample scores, higher = brighter, stretched between
+        their 5th and 95th percentiles; None = one colour for all."""
+        if scores:
+            self._scores = dict(scores)
+            values = np.fromiter(self._scores.values(), dtype=float)
+            self._score_lo = float(np.percentile(values, 5))
+            self._score_hi = float(np.percentile(values, 95))
+            if self._score_hi <= self._score_lo:
+                self._score_hi = self._score_lo + 1e-9
+            self._score_label = label
+        else:
+            self._scores = None
+            self._score_label = ""
         self.update()
 
     @property
-    def colour_mode(self) -> str:
-        return self._colour_mode
-
-    def _colour_of(self, i: int) -> QColor:
-        if self._colour_mode == "type":
-            return TYPE_COLOURS.get(self._types[i] or "", TYPE_COLOURS[""])
-        if self._colour_mode == "class":
-            return CLASS_COLOURS.get(self._classes[i] or "", CLASS_COLOURS[""])
-        return FOLDER_PALETTE[self._folder_index.get(self._folders[i], 0) % len(FOLDER_PALETTE)]
+    def scored(self) -> bool:
+        return self._scores is not None
 
     def set_caption(self, text: str) -> None:
         self._caption = text
@@ -211,20 +185,28 @@ class MapView(QWidget):
             return None
         return int(self._ids[i])
 
+    def _colour_of(self, sample_id: int) -> QColor:
+        if self._scores is None:
+            return ACCENT
+        value = self._scores.get(sample_id)
+        if value is None:
+            return _UNSCORED
+        t = (value - self._score_lo) / (self._score_hi - self._score_lo)
+        return mix(SCORE_LOW, SCORE_HIGH, t)
+
     # --- painting ---
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor(250, 250, 250))
+        painter.fillRect(self.rect(), BG)
         if len(self._ids) == 0:
-            painter.setPen(QColor(90, 90, 90))
+            painter.setPen(TEXT_DIM)
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._caption)
             painter.end()
             return
         pts = self._to_widget(self._xy)
-        halo_pen = QPen(QColor(240, 190, 40), 2.5)
-        badge = QColor(30, 30, 30)
+        halo_pen = QPen(AMBER, 2.0)
         for i in np.flatnonzero(self._visible):
             sid = int(self._ids[i])
             x, y = float(pts[i, 0]), float(pts[i, 1])
@@ -232,15 +214,18 @@ class MapView(QWidget):
                 painter.setPen(halo_pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(QPointF(x, y), _HALO, _HALO)
-            colour = self._colour_of(i)
-            painter.setPen(QPen(colour.darker(130), 1.0))
+            colour = self._colour_of(sid)
+            painter.setPen(QPen(colour.darker(140), 1.0))
             painter.setBrush(colour)
             painter.drawPath(_marker(self._types[i] or "", x, y, _POINT))
             if sid in self._badges:
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(badge)
+                painter.setBrush(WHITE)
                 painter.drawEllipse(QPointF(x + _POINT, y - _POINT), 2.5, 2.5)
-        for sid, colour, width in ((self._anchor, QColor(20, 20, 20), 2.5), (self._selected, QColor(0, 90, 200), 2.0)):
+        for sid, colour, width, extra in (
+            (self._anchor, AMBER, 3.0, 5.0),
+            (self._selected, WHITE, 1.5, 3.0),
+        ):
             if sid is None or sid not in self._index_of:
                 continue
             i = self._index_of[sid]
@@ -248,35 +233,30 @@ class MapView(QWidget):
                 continue
             painter.setPen(QPen(colour, width))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            r = _POINT + (4 if sid == self._anchor else 2.5)
-            painter.drawEllipse(QPointF(float(pts[i, 0]), float(pts[i, 1])), r, r)
+            painter.drawEllipse(QPointF(float(pts[i, 0]), float(pts[i, 1])), _POINT + extra, _POINT + extra)
         self._paint_legend(painter)
-        painter.setPen(QColor(70, 70, 70))
+        painter.setPen(TEXT)
         painter.drawText(QRectF(8, 6, self.width() - 16, 18), Qt.AlignmentFlag.AlignLeft, self._caption)
         painter.end()
 
-    def _legend_entries(self) -> list[tuple[str, QColor]]:
-        if self._colour_mode == "type":
-            return [(name or "untyped", TYPE_COLOURS[name]) for name in TYPE_ORDER]
-        if self._colour_mode == "class":
-            return [((name or "unclassified") + " (CLAP guess)", CLASS_COLOURS[name]) for name in CLASS_ORDER]
-        names = sorted(self._folder_index, key=self._folder_index.get)
-        entries = [(name or "(root)", FOLDER_PALETTE[i % len(FOLDER_PALETTE)]) for i, name in enumerate(names)]
-        return entries[: len(FOLDER_PALETTE)]
-
     def _paint_legend(self, painter: QPainter) -> None:
-        x, y = 12.0, self.height() - 14.0
-        for label, colour in self._legend_entries():
-            painter.setPen(QPen(colour.darker(130), 1.0))
-            painter.setBrush(colour)
-            painter.drawEllipse(QPointF(x, y), 4.5, 4.5)
-            painter.setPen(QColor(70, 70, 70))
-            painter.drawText(QPointF(x + 9, y + 4), label)
-            x += 22 + 6.0 * len(label)
-            if x > self.width() - 260:
-                break
-        painter.setPen(QColor(70, 70, 70))
-        painter.drawText(QPointF(max(x + 6, self.width() - 250), y + 4), "● one-shot ■ multi-hit ◆ loop · halo = ranked · dot = hit inside")
+        y = self.height() - 12.0
+        painter.setPen(TEXT_DIM)
+        painter.drawText(QPointF(12, y), "● one-shot   ■ multi-hit   ◆ loop   ○ halo = ranked neighbour   • dot = hit inside")
+        if self._scores is not None:
+            x0 = self.width() - 340.0
+            for k in range(60):
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(mix(SCORE_LOW, SCORE_HIGH, k / 59))
+                painter.drawRect(QRectF(x0 + k * 2, y - 9, 2, 8))
+            painter.setPen(TEXT_DIM)
+            text = painter.fontMetrics().elidedText(
+                f"colour = {self._score_label}", Qt.TextElideMode.ElideRight, 205
+            )
+            painter.drawText(QPointF(x0 + 126, y), text)
+        else:
+            painter.drawText(QPointF(self.width() - 340.0, y), "colour: uniform — rank or search to colour by score")
+        painter.setPen(QPen(BORDER, 1))
 
     # --- interaction ---
 

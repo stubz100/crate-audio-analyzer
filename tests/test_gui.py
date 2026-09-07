@@ -276,10 +276,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "hit.wav"), 0))
         assert window._attributes.difference_values()["amplitude"] > 0
         assert "selected: hit.wav" in window._attributes._diff_caption.text()
-        window._colour_by.setCurrentIndex(2)
-        assert window._map.colour_mode == "class"
-        window._colour_by.setCurrentIndex(0)
-        assert window._map.colour_mode == "folder"
+        assert window._map.scored                                       # coloured by the ranking
 
         # A narrowed axis range now filters on the anchor distances (§9.5).
         window._attributes._range_max["conceptual"].setValue(10)
