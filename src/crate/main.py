@@ -17,6 +17,7 @@ import logging
 import sys
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import QSettings, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QTableView,
     QTabWidget,
     QTreeView,
@@ -40,7 +42,9 @@ from .attributes import AttributesPanel
 from .catalog import describe_item, index_summary, load_samples, load_segments, load_tags
 from .db import default_db_path, open_db
 from .embedding import ClapEncoder, EmbedSettings
+from .layout import LayoutSettings, fit_layout, load_current_layout, place_anchor
 from .listmodel import ListProxy, SampleTreeModel, SegmentTableModel
+from .mapview import MapView
 from .recompute import EncoderFactory, RecomputePanel
 from .render import default_cache_dir, render_segment
 from .similarity import KIND_SAMPLE, KIND_SEGMENT, FeatureTable
@@ -52,6 +56,7 @@ APP_NAME = "Crate"
 SETTINGS_KEY_AUTOPLAY = "preview/autoplay"
 SETTINGS_KEY_ANCHOR_KIND = "anchor/kind"
 SETTINGS_KEY_ANCHOR_ID = "anchor/id"
+HALO_NEIGHBOURS = 20               # §9.3: nearest neighbours highlighted after a ranking
 # The model stack logs every HTTP request at INFO; that is noise on a
 # multi-hour run, not progress (same list as the CLI).
 _NOISY_LOGGERS = ("httpx", "huggingface_hub", "urllib3", "filelock", "transformers")
@@ -128,7 +133,7 @@ class MainWindow(QMainWindow):
     `settings` defaults to the per-user store (the registry on Windows);
     tests pass an INI-backed one so they never touch the user's own values.
     `encoder_factory` lets tests run the Recompute tab and text search
-    against a fake model.
+    against a fake model; `reducer_factory` does the same for the map layout.
     """
 
     def __init__(
@@ -137,6 +142,7 @@ class MainWindow(QMainWindow):
         cache_dir: Path | None = None,
         settings: QSettings | None = None,
         encoder_factory: EncoderFactory | None = None,
+        reducer_factory=None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Crate")
@@ -147,6 +153,7 @@ class MainWindow(QMainWindow):
         self._conn = open_db(self._db_path)
         self._preview = Preview(self)
         self._encoder_factory = encoder_factory
+        self._reducer_factory = reducer_factory   # tests inject PCA; None = UMAP (or PCA fallback)
         self._encoder = None
         self._search_thread: _EmbedTextThread | None = None
         self._pending_search: str | None = None
@@ -157,8 +164,17 @@ class MainWindow(QMainWindow):
         self._axis = None
         self._axis_by_sample: dict[int, dict[str, float]] = {}
         self._close_pending = False
+        self._layout_dir = Path(self._cache_dir).parent / "layouts"
+        self._rows_by_id: dict[int, object] = {}
+        self._source_row_of: dict[int, int] = {}
 
-        # --- quick filter ---
+        # --- view switch (§9.2) + quick filter ---
+        self._list_button = QPushButton("List")
+        self._map_button = QPushButton("Map")
+        for button in (self._list_button, self._map_button):
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+        self._list_button.setChecked(True)
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("Quick filter (file, folder, type, class, tags…)")
         self._filter.setClearButtonEnabled(True)
@@ -191,8 +207,18 @@ class MainWindow(QMainWindow):
         self._segment_table.selectionModel().currentRowChanged.connect(self._on_segment_selected)
         self._segment_table.doubleClicked.connect(lambda _index: self._play_current())
 
+        # --- the map (§9.3): the same filtered set, one point per sample ---
+        self._map = MapView()
+        self._map.sample_clicked.connect(self._select_sample)
+        self._map.sample_activated.connect(self._play_sample)
+        self._views = QStackedWidget()
+        self._views.addWidget(self._table)
+        self._views.addWidget(self._map)
+        self._list_button.clicked.connect(lambda: self._views.setCurrentWidget(self._table))
+        self._map_button.clicked.connect(lambda: self._views.setCurrentWidget(self._map))
+
         tables = QSplitter(Qt.Orientation.Vertical)
-        tables.addWidget(self._table)
+        tables.addWidget(self._views)
         tables.addWidget(self._segment_table)
         tables.setStretchFactor(0, 4)
         tables.setStretchFactor(1, 1)
@@ -233,7 +259,11 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(4, 4, 4, 4)
-        left_layout.addWidget(self._filter)
+        top = QHBoxLayout()
+        top.addWidget(self._list_button)
+        top.addWidget(self._map_button)
+        top.addWidget(self._filter, stretch=1)
+        left_layout.addLayout(top)
         left_layout.addWidget(tables, stretch=1)
         left_layout.addLayout(transport)
 
@@ -246,6 +276,8 @@ class MainWindow(QMainWindow):
         self._recompute.index_changed.connect(self.reload)
         self._recompute.index_changed.connect(self._close_if_pending)
         self._recompute.rank_requested.connect(self._rank)
+        self._recompute.layout_requested.connect(self._run_layout)
+        self._attributes.criteria_changed.connect(self._sync_map_visibility)
         tabs = QTabWidget()
         tabs.addTab(self._attributes, "Attributes")
         tabs.addTab(self._recompute, "Recompute")
@@ -268,12 +300,16 @@ class MainWindow(QMainWindow):
         """Re-read the index — after a Recompute job, or a CLI run outside.
         Scores are view state and start over; an anchor keeps its place and
         its distances are recomputed on the fresh features."""
-        self._samples.set_rows(load_samples(self._conn))
+        rows = load_samples(self._conn)
+        self._rows_by_id = {r.id: r for r in rows}
+        self._source_row_of = {r.id: i for i, r in enumerate(rows)}
+        self._samples.set_rows(rows)
         self._samples.set_similarity(None)
         self._samples.set_match(None)
         self._segments.set_rows([])
         self._features = None
         self._update_score_columns()
+        self._load_map()
         for column in range(len(SampleTreeModel.COLUMNS)):
             self._table.resizeColumnToContents(column)
         counts = index_summary(self._conn)
@@ -319,6 +355,7 @@ class MainWindow(QMainWindow):
         source = self._proxy.mapToSource(current)
         row = self._samples.row_at(source)
         hit = self._samples.hit_at(source)
+        self._map.set_selected(row.id)
         # The drill-down and the chips are the sample's either way — a sub-hit
         # is a segment *of* that sample (2026-09-07 review).
         self._segments.set_rows(load_segments(self._conn, row.id))
@@ -367,6 +404,7 @@ class MainWindow(QMainWindow):
 
     def _on_filter_changed(self, text: str) -> None:
         self._proxy.setFilterFixedString(text)
+        self._sync_map_visibility()
 
     # --- anchor (§9.2) and ranking (§9.6) ---
 
@@ -396,6 +434,7 @@ class MainWindow(QMainWindow):
         self._proxy.set_axis_lookup(self._axis_by_sample.get)
         self._attributes.set_anchor_state(True)
         self._recompute.set_ranking_available(True, label)
+        self._map.set_anchor(self._anchor_sample_id())
         if announce:
             self.statusBar().showMessage(
                 f"anchored on {label} — distances ready; Recompute ranking (Recompute tab) to rank"
@@ -414,6 +453,9 @@ class MainWindow(QMainWindow):
         self._recompute.set_ranking_available(False)
         self._samples.set_similarity(None)
         self._update_score_columns()
+        self._map.set_anchor(None)
+        self._map.set_halo(set())
+        self._update_badges()
 
     def _restore_anchor(self) -> None:
         kind = self._settings.value(SETTINGS_KEY_ANCHOR_KIND, "", type=str)
@@ -440,6 +482,13 @@ class MainWindow(QMainWindow):
         self._update_score_columns()
         self._table.sortByColumn(SampleTreeModel.COL_SIMILARITY, Qt.SortOrder.DescendingOrder)
         self._table.expandAll()
+        anchor_sample = self._anchor_sample_id()
+        ranked = [
+            sid for sid in sorted(scores.sample, key=scores.sample.get, reverse=True)
+            if sid != anchor_sample
+        ]
+        self._map.set_halo(set(ranked[:HALO_NEIGHBOURS]))
+        self._update_badges()
         self.statusBar().showMessage(
             f"ranked {len(scores.sample)} samples against {self._anchor_label.text()} "
             f"({len(scores.hits)} hits inside longer samples)"
@@ -486,6 +535,7 @@ class MainWindow(QMainWindow):
         self._update_score_columns()
         self._table.sortByColumn(SampleTreeModel.COL_MATCH, Qt.SortOrder.DescendingOrder)
         self._table.expandAll()
+        self._update_badges()
         self.statusBar().showMessage(
             f"“{text}”: {len(scores.sample)} samples scored, "
             f"{len(scores.hits)} hits inside longer samples"
@@ -494,9 +544,102 @@ class MainWindow(QMainWindow):
     def _clear_search(self) -> None:
         self._samples.set_match(None)
         self._update_score_columns()
+        self._update_badges()
         if self._samples.has_similarity:
             self._table.sortByColumn(SampleTreeModel.COL_SIMILARITY, Qt.SortOrder.DescendingOrder)
             self._table.expandAll()
+
+    # --- the map (§9.3) and its layout (§9.6) ---
+
+    def _load_map(self) -> None:
+        """Draw the last explicitly computed layout — samples only (§6.4)."""
+        info, positions = load_current_layout(self._conn)
+        ids = [sid for sid in positions if sid in self._rows_by_id]
+        xy = np.array([positions[sid] for sid in ids], dtype=float).reshape(-1, 2)
+        rows = [self._rows_by_id[sid] for sid in ids]
+        self._map.set_points(
+            ids, xy, [r.filename for r in rows],
+            [r.content_class or "" for r in rows], [r.structural_type or "" for r in rows],
+        )
+        if info is None:
+            caption = "no layout yet — Recompute tab → Recompute map layout"
+        else:
+            caption = (
+                f"layout #{info.id}: {len(ids)} samples · {info.scope_description} · "
+                f"{info.reducer} · {info.computed_at[:16].replace('T', ' ')}"
+            )
+            bars = {k: round(v, 2) for k, v in self._attributes.weights().items()}
+            if {k: round(v, 2) for k, v in info.weights.items()} != bars:
+                caption += " · fit under other weights than the bars show"
+        self._map.set_caption(caption)
+        self._map.set_anchor(self._anchor_sample_id())
+        self._map.set_halo(set())
+        self._update_badges()
+        self._sync_map_visibility()
+
+    def _sync_map_visibility(self, *_args) -> None:
+        self._map.set_visible(self._proxy.visible_sample_ids())
+
+    def _update_badges(self) -> None:
+        self._map.set_badges(self._samples.hit_sample_ids())
+
+    def _anchor_sample_id(self) -> int | None:
+        if self._anchor is None:
+            return None
+        kind, item_id = self._anchor
+        if kind == KIND_SAMPLE:
+            return int(item_id)
+        row = self._conn.execute("SELECT sample_id FROM segments WHERE id = ?", (item_id,)).fetchone()
+        return None if row is None else int(row[0])
+
+    def _select_sample(self, sample_id: int) -> None:
+        """A click on the map selects the sample in the list (and previews it)."""
+        source_row = self._source_row_of.get(sample_id)
+        if source_row is None:
+            return
+        proxy_index = self._proxy.mapFromSource(self._samples.index(source_row, 0))
+        if proxy_index.isValid():
+            self._table.setCurrentIndex(proxy_index)
+
+    def _play_sample(self, sample_id: int) -> None:
+        self._select_sample(sample_id)
+        self._play_current()
+
+    def _run_layout(self, mode: str) -> None:
+        """§9.6 *Recompute map layout*: a full re-fit over the scope folders,
+        or the anchor alone transformed into the existing layout."""
+        if mode == "anchored":
+            if self._anchor is None:
+                self.statusBar().showMessage("anchored-only layout needs an anchor (⚓)")
+                return
+            kind, item_id = self._anchor
+            self._recompute.start_job(
+                "place the anchor in the map layout",
+                lambda conn, _stop: place_anchor(conn, kind, item_id),
+            )
+            return
+        weights = self._attributes.weights()
+        if not any(weights.values()):
+            self.statusBar().showMessage(
+                "a layout needs at least one weight above zero (Attributes tab)"
+            )
+            return
+        scope = tuple(self._recompute.scope_folders())
+        if not scope:
+            self.statusBar().showMessage(
+                "library scope is empty: add a folder (or the root) on the Recompute tab first"
+            )
+            return
+        description = ", ".join(Path(folder).name or folder for folder in scope)
+        settings = LayoutSettings(weights=weights, scope=scope, scope_description=description[:80])
+        layout_dir = self._layout_dir
+        reducer = self._reducer_factory() if self._reducer_factory is not None else None
+        self._recompute.start_job(
+            "recompute map layout",
+            lambda conn, stop: fit_layout(
+                conn, settings, layout_dir, reducer=reducer, should_stop=stop
+            ),
+        )
 
     # --- lifecycle ---
 

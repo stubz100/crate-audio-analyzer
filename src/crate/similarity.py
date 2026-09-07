@@ -334,6 +334,27 @@ class FeatureTable:
                 )
         return scores
 
+    def weighted_matrix(self, rows: np.ndarray, weights: Mapping[str, float]) -> np.ndarray:
+        """The §5.1 blend as one feature space, for a projection (node G):
+        each axis's standardised columns scaled so the axis contributes in
+        proportion to its weight (÷ √dim keeps a 33-column axis from
+        outweighing a 1-column one), missing values at the median (0 after
+        standardisation), the CLAP vector as the conceptual axis."""
+        blocks: list[np.ndarray] = []
+        for axis in AXES[:4]:
+            weight = max(0.0, float(weights.get(axis, 0.0)))
+            matrix = self._features[axis]
+            if weight == 0.0 or matrix.size == 0:
+                continue
+            block = np.nan_to_num(matrix[rows], nan=0.0)
+            blocks.append(block * np.sqrt(weight / block.shape[1]))
+        weight = max(0.0, float(weights.get("conceptual", 0.0)))
+        if weight > 0.0 and self._vectors.size:
+            blocks.append(self._vectors[rows].astype(np.float64) * np.sqrt(weight))
+        if not blocks:
+            raise ValueError("every weight is zero: nothing to project")
+        return np.hstack(blocks).astype(np.float32)
+
     def axis_distances_by_sample(self, distances: np.ndarray) -> dict[int, dict[str, float]]:
         """The per-axis distances of every *sample* (not segment) keyed by
         id — what the Attributes tab's range filters read (§9.5)."""

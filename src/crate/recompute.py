@@ -131,6 +131,7 @@ class RecomputePanel(QWidget):
 
     index_changed = Signal()
     rank_requested = Signal(str)   # "whole" | "visible" — §9.6 Recompute ranking
+    layout_requested = Signal(str) # "library" | "anchored" — §9.6 Recompute map layout
 
     def __init__(
         self,
@@ -195,6 +196,25 @@ class RecomputePanel(QWidget):
         rank_row.addWidget(self._rank_visible)
         rank_layout.addLayout(rank_row)
         rank_layout.addWidget(self._rank_button)
+        # --- recompute map layout (§9.6): full re-fit over the scope, or the anchor only ---
+        self._layout_library = QRadioButton("Library scope — full re-fit over the scope folders")
+        self._layout_anchored = QRadioButton("Anchored only — place the anchor in the existing layout")
+        self._layout_library.setChecked(True)
+        self._layout_button = QPushButton("Recompute map layout")
+        self._layout_button.setToolTip(
+            "UMAP over the §5.1 feature space under the current weights. A full re-fit "
+            "moves every point in scope (minutes at library scale); anchored-only moves one."
+        )
+        self._layout_button.clicked.connect(
+            lambda: self.layout_requested.emit(
+                "anchored" if self._layout_anchored.isChecked() else "library"
+            )
+        )
+        layout_group = QGroupBox("Recompute map layout")
+        layout_layout = QVBoxLayout(layout_group)
+        layout_layout.addWidget(self._layout_library)
+        layout_layout.addWidget(self._layout_anchored)
+        layout_layout.addWidget(self._layout_button)
         self.set_ranking_available(False)
 
         # --- folder-scope list ---
@@ -330,6 +350,7 @@ class RecomputePanel(QWidget):
         controls_layout = QVBoxLayout(controls)
         controls_layout.addWidget(root_group)
         controls_layout.addWidget(rank_group)
+        controls_layout.addWidget(layout_group)
         controls_layout.addWidget(scope_group)
         controls_layout.addWidget(attributes_group)
         controls_layout.addStretch(1)
@@ -366,6 +387,9 @@ class RecomputePanel(QWidget):
         """The window tells the tab whether there is an anchor to rank against."""
         self._rank_available = available
         self._rank_button.setEnabled(available and not self.running)
+        self._layout_anchored.setEnabled(available)
+        if not available and self._layout_anchored.isChecked():
+            self._layout_library.setChecked(True)
         self._rank_anchor.setText(
             f"anchor: {anchor_label}" if available
             else "no anchor — select a sample or a hit in the list and press ⚓ Anchor"
@@ -482,6 +506,11 @@ class RecomputePanel(QWidget):
         thread.wait()
         logging.getLogger("crate").removeHandler(self._handler)
 
+    def start_job(self, name: str, job: Job) -> None:
+        """Run `job(conn, should_stop)` on the worker — the window's map-layout
+        actions come through here so every job shares the log, Stop and reload."""
+        self._start(name, job)
+
     # --- plumbing ---
 
     def _start(self, name: str, job: Job) -> None:
@@ -519,6 +548,7 @@ class RecomputePanel(QWidget):
         ):
             button.setEnabled(not running)
         self._rank_button.setEnabled(not running and self._rank_available)
+        self._layout_button.setEnabled(not running)
         self._stop_button.setEnabled(running)
 
     def _append_log(self, text: str) -> None:

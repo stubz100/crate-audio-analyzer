@@ -20,7 +20,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 # v1 = Phase 1: `samples`
 # v2 = Phase 2: `analysis` + `classification`
 # v3 = Phase 2 review: staleness timestamps (`samples.content_changed_at`,
@@ -31,6 +31,7 @@ SCHEMA_VERSION = 6
 # v5 = Phase 3 review: `segments.needs_review` (a manual segment whose parent's
 #      content changed underneath it)
 # v6 = Phase 4: `embedding` + `text_tags` (spec §8; nodes D, X, E)
+# v7 = Phase 6: `map_layout` + `map_position` (spec §8; node G)
 
 
 def scope_clause(
@@ -259,6 +260,34 @@ CREATE TABLE IF NOT EXISTS segment_classification (  -- Phase 4; structural_type
     confidence        REAL,
     is_user_confirmed INTEGER NOT NULL DEFAULT 0
 );
+
+-- Phase 6 (spec §8): node G. One row per explicitly computed layout. The
+-- coordinates are a function of weights + scope + fit, never of one
+-- embedding model, which is why they live here and not on embedding rows.
+CREATE TABLE IF NOT EXISTS map_layout (
+    id                 INTEGER PRIMARY KEY,
+    computed_at        TEXT NOT NULL,
+    scope_description  TEXT,
+    blend_weights_json TEXT,                          -- the per-axis weights the fit used
+    umap_params_json   TEXT,
+    random_seed        INTEGER,
+    is_current         INTEGER NOT NULL DEFAULT 0,
+    reducer            TEXT,                          -- 'umap' | 'pca' (no `map` extra)
+    model_path         TEXT                           -- pickled reducer: the anchored-only transform
+);
+
+CREATE TABLE IF NOT EXISTS map_position (
+    layout_id  INTEGER NOT NULL REFERENCES map_layout(id) ON DELETE CASCADE,
+    sample_id  INTEGER REFERENCES samples(id) ON DELETE CASCADE,
+    segment_id INTEGER REFERENCES segments(id) ON DELETE CASCADE,   -- badge / nested display
+                                                                    -- only, never a point (§6.4)
+    map_x      REAL NOT NULL,
+    map_y      REAL NOT NULL,
+    CHECK ((sample_id IS NULL) <> (segment_id IS NULL)),
+    UNIQUE (layout_id, sample_id),
+    UNIQUE (layout_id, segment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_map_position_layout ON map_position(layout_id);
 """
 
 
@@ -312,6 +341,7 @@ _MIGRATIONS: dict[int, list] = {
     4: [_migrate_v4],   # v3 -> v4: segment tables + samples.segments_detected_at
     5: [_migrate_v5],   # v4 -> v5: segments.needs_review
     6: [],              # v5 -> v6: embedding + text_tags; CREATE IF NOT EXISTS covers it
+    7: [],              # v6 -> v7: map_layout + map_position; CREATE IF NOT EXISTS covers it
 }
 
 

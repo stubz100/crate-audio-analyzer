@@ -104,6 +104,10 @@ class SampleTreeModel(QAbstractItemModel):
             return dict(self._similarity.hits)
         return {}
 
+    def hit_sample_ids(self) -> set[int]:
+        """Samples whose current hit is one of their segments — the map's badges (§9.3)."""
+        return set(self._hits)
+
     @property
     def has_similarity(self) -> bool:
         return self._similarity is not None

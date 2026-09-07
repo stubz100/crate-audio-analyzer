@@ -21,9 +21,9 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 4 | Embeddings & Classification | ✅ done — `1e1b585` (nodes D/C2/X/E on transformers' CLAP; Facet A 68% on 335 labeled files; full index embedded at 0.21 s/sample) |
 | 4.5 | "Listen and grab" (pull-forward) | ✅ done — `f715d03` (sortable/filterable list, segments drill-down, Qt Multimedia preview, lazy segment render, file-URL drag-out) |
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
-| 6 | Map View | ⬜ not started |
+| 6 | Map View | ✅ done — PHASE6_HASH (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
-| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); map layout / anchored-only wait for Phases 6 / 9 |
+| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); Recompute map layout (both scopes) added with Phase 6 (PHASE6_HASH); anchored-only Recompute *attributes* remains |
 | 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`); waveform, markers and the header proper not started |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
@@ -653,3 +653,32 @@ Directions from the review discussion: (1) frame envelope, then check the number
 **Verified** — `uv run pytest tests -q` → **153 passed, 1 skipped**, pyflakes clean; the two probes now show the parent's segments and chips after selecting a sub-hit, and the all-zero-weights message. The GUI tests cover both.
 
 **Next** — Use the milestone build. Then Phase 9 (header: waveform, marker editing, the anchor's proper home) or Phase 6 (map).
+
+## 2026-09-07 — Phase 6: the map view
+
+**Phase:** 6 ✅ · PHASE6_HASH
+
+**Done**
+
+- `layout.py` (no Qt) — node G. `fit_layout` projects the §5.1 feature space under the weight bars at fit time (`FeatureTable.weighted_matrix`: each axis's standardised columns × √(weight / dim), the CLAP vector as the conceptual axis, missing values at the median) with UMAP over the samples in the folder-scope list, writes the `map_layout` row + one `map_position` per sample, marks it current, and pickles the fitted reducer next to the segment cache (`…\Crate\cache\layouts\layout_<id>.pkl`). `place_anchor` is the anchored-only path: `transform` one sample into the current layout (a segment anchor places its parent). `load_current_layout` feeds the view. `PcaReducer` stands in without the `map` extra (the summary says so) and is the test double. A stop is honoured only before the fit — UMAP cannot be interrupted — and writes nothing.
+- Schema **v7**: §8's `map_layout` / `map_position`, plus `reducer` and `model_path` on the layout row.
+- `mapview.py` — a painted widget: one point per sample (§6.4), colour by class, circle / square / diamond by type, legend; the list's filter mirrored; click selects in the list (which previews), double-click plays, wheel zooms about the cursor, drag pans, right-click fits, hover names the file; the halo is the last ranking's 20 nearest (§9.3, last-computed not live), the badge the current search's or ranking's segment hits, the anchor and the selection ringed. The caption names the layout, scope, reducer and time and says when the bars no longer match the weights it was fit under.
+- `main.py` — List / Map switch above the quick filter (a stacked widget; the segments drill-down stays under both); `_load_map` on every reload; `_run_layout` puts the fit (or the placement) on the Recompute tab's worker through the panel's new `start_job`, so it shares the log, Stop and the reload. `recompute.py` — **Recompute map layout** with its two radios (anchored-only enabled by the anchor).
+- `uv sync --extra map` installs umap-learn 0.5.12 + pynndescent; the extra stays optional per CLAUDE.md.
+
+**Decided**
+
+- The map is fit on the same weighted space the ranking blends, so weights + scope + fit define coordinates exactly as §8 says; the caption flags a mismatch with the bars rather than re-fitting anything on its own (§9.6).
+- The layout's scope is the folder-scope list, like Recompute attributes: an empty scope is refused with the same hint.
+- One point per sample, never per segment; badges carry the segment information (§6.4, §9.3).
+- `MIN_SAMPLES = 3` for a fit; `n_neighbors` is clamped to n − 1 for small scopes.
+
+**Verified**
+
+- `uv run pytest tests -q` → **160 passed, 2 skipped** (the real-CLAP and real-UMAP opt-ins); pyflakes clean. New: fit places every sample in scope and becomes current (same-pitch tones closer than the click), a second fit replaces the current layout and keeps history, anchored placement adds / updates one row and lands where the fit put an in-layout sample, refusals (zero weights, too few samples, no layout, unknown segment) and the pre-fit stop, the weighted matrix's shape and NaN-freedom, PCA pickling; GUI: fit from the window, points, filter mirrored, map click → list → preview, badges from a search, halo + anchor mark from a ranking, anchored-only placement, the view switch, an offscreen paint.
+- Krotos index, real UMAP: **3,956 samples placed in 20.4 s** (feature table 1 s, numba already warm; 555 features), model file 10 MB; anchored placement 2.1 s, landing 0.05 from the fitted position of the same sample. Window: up in 0.9 s with the layout, anchor + ranking 1.1 s, the map paints in 20 ms with 3,956 points, 20 halos and 1,050 badges.
+- Offscreen screenshot checked: clusters by class, the sword cluster's halo around the anchor, badges on multi-hits.
+
+**Next**
+
+- Phase 5's Qwen2-Audio spike is the last phase below 7 not yet done; then Phase 9 (header: waveform, markers, the anchor's proper home) and the rest of Phase 8 (anchored-only Recompute *attributes*).

@@ -29,6 +29,7 @@ from crate.analysis import analyze_pending
 from crate.catalog import load_samples, load_segments
 from crate.db import open_db
 from crate.embedding import embed_pending
+from crate.layout import PcaReducer
 from crate.listmodel import ListProxy, SampleTreeModel, SegmentTableModel
 from crate.render import render_segment
 from crate.scanner import scan_library
@@ -439,3 +440,77 @@ def test_closing_the_window_mid_job_waits_for_the_job(app, tmp_path):
 
     _wait_until(app, lambda: not window.isVisible(), timeout_s=30)
     assert not panel.running and "slow job done" in panel.log_text()
+
+
+# --- the map view (Phase 6, spec §9.3 / §9.6) ---
+
+
+def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
+    """Layout fit from the Recompute tab (PCA injected), points on the map,
+    the list's filter and selection mirrored, badges from a search, halo and
+    anchor mark from a ranking, and the anchored-only placement."""
+    from crate.main import MainWindow
+
+    lib = _write_library(tmp_path / "lib")
+    t = np.arange(SR) / SR
+    sf.write(lib / "tone.wav", (0.8 * np.sin(2 * np.pi * 220 * t)).astype("float32"), SR)
+    db = tmp_path / "index.db"
+    conn = open_db(db)
+    scan_library(conn, lib)
+    analyze_pending(conn)
+    segment_pending(conn)
+    embed_pending(conn, encoder=_encoder())
+    loop_id = conn.execute("SELECT id FROM samples WHERE filename = 'loop.wav'").fetchone()[0]
+    conn.close()
+
+    window = MainWindow(
+        db_path=db, cache_dir=tmp_path / "cache", settings=_ini(tmp_path),
+        encoder_factory=_encoder, reducer_factory=PcaReducer,
+    )
+    try:
+        window._autoplay.setChecked(False)
+        panel = window._recompute
+        assert window._map.point_count == 0 and "no layout" in window._map._caption
+
+        window._run_layout("library")                             # empty scope: refused
+        assert not panel.running and "scope is empty" in window.statusBar().currentMessage()
+        panel.add_scope_folder(lib)
+        window._run_layout("library")
+        _wait_until(app, lambda: not panel.running)
+        assert window._map.point_count == 3 and "layout #1" in window._map._caption
+        assert "3 samples placed" in panel.log_text()
+        assert (tmp_path / "layouts" / "layout_1.pkl").exists()   # next to the segment cache
+
+        window._filter.setText("hit")                             # one shared filtered set
+        assert window._map.visible_count == 1
+        window._filter.setText("")
+        assert window._map.visible_count == 3
+
+        window._map.sample_clicked.emit(loop_id)                  # map → list → preview target
+        assert window._current is not None and window._current.name == "loop.wav"
+        assert window._map._selected == loop_id
+
+        window._attributes.search_for("kick drum")               # the loop's hit is a segment
+        _wait_until(app, lambda: window._search_thread is None)
+        assert loop_id in window._map._badges
+        window._attributes._clear_search()
+        assert loop_id not in window._map._badges
+
+        window._anchor_current()                                  # the loop is current
+        window._recompute._rank_button.click()
+        assert window._map._anchor == loop_id
+        assert window._map._halo and loop_id not in window._map._halo
+        assert "fit under other weights" not in window._map._caption
+
+        window._run_layout("anchored")                            # cheap transform of one point
+        _wait_until(app, lambda: not panel.running)
+        assert "anchor placed in layout #1" in panel.log_text()
+        assert window._map.point_count == 3
+
+        window._map_button.click()
+        assert window._views.currentWidget() is window._map
+        assert not window._map.grab().isNull()                    # paints offscreen
+        window._list_button.click()
+        assert window._views.currentWidget() is window._table
+    finally:
+        window.close()
