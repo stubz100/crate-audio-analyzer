@@ -639,3 +639,17 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 - **Milestone reached (spec §12): Phases 1–4 + 4.5 + 7.** Use it for a while — searches, anchors, ranges, drags into Bitwig — before Phase 9 (the header: waveform, marker editing, the anchor's proper home) or Phase 6 (the map).
 - Phase 12 note: the feature table at full scale (110k samples + ~250k segments) holds ~700 MB of float32 vectors; float16, or embedded-only rows, before the whole library.
+
+## 2026-09-07 — Quick review after Phase 7
+
+**Phase:** 7 review + fixes · REVIEW7_HASH
+
+**Done** — a re-read of `similarity.py`, `listmodel.py`, `attributes.py` and the window, and two probes against a small index built in-process; both hypotheses held:
+
+- **Selecting a sub-hit left the drill-down and the chips on the previously selected sample.** The hit row only set the preview target; the segments table and the tag chips still belonged to whatever was selected before it (probe: 0 segments and the other sample's 5 chips). A sub-hit is a segment *of* its parent, so the drill-down and the chips are now the parent's for both kinds of row.
+- **Ranking with every weight at zero said "ranked 0 samples" and nothing else.** The blend is NaN everywhere when no axis carries weight; the window now says that ranking needs a weight above zero and leaves the Similarity column hidden, instead of an empty result that reads as a bug.
+- Looked at and left alone, for the record: the feature table is loaded on the GUI thread (1 s at 12,918 items; at library scale — ~350k items, ~700 MB of vectors — this and the anchor restore at start-up become Phase 12 work, already noted); the search encoder and the Recompute tab's encoder are two model instances if both are used in one session (memory, not correctness); two active scorings can disagree on a parent's best segment and only one child row is shown (documented in the model).
+
+**Verified** — `uv run pytest tests -q` → **153 passed, 1 skipped**, pyflakes clean; the two probes now show the parent's segments and chips after selecting a sub-hit, and the all-zero-weights message. The GUI tests cover both.
+
+**Next** — Use the milestone build. Then Phase 9 (header: waveform, marker editing, the anchor's proper home) or Phase 6 (map).

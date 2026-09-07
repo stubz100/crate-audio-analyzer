@@ -319,6 +319,11 @@ class MainWindow(QMainWindow):
         source = self._proxy.mapToSource(current)
         row = self._samples.row_at(source)
         hit = self._samples.hit_at(source)
+        # The drill-down and the chips are the sample's either way — a sub-hit
+        # is a segment *of* that sample (2026-09-07 review).
+        self._segments.set_rows(load_segments(self._conn, row.id))
+        self._segment_table.resizeColumnsToContents()
+        self._attributes.show_tags(load_tags(self._conn, row.id))
         if hit is not None:
             try:
                 self._current = self._render(hit.segment_id)
@@ -330,12 +335,9 @@ class MainWindow(QMainWindow):
                 f"hit @ {hit.start_ms / 1000:.3f} s ({hit.end_ms - hit.start_ms} ms) in {row.filename}"
             )
         else:
-            self._segments.set_rows(load_segments(self._conn, row.id))
-            self._segment_table.resizeColumnsToContents()
             self._current = Path(row.filepath)
             self._current_item = (KIND_SAMPLE, row.id)
             self._now_playing.setText(row.filename)
-            self._attributes.show_tags(load_tags(self._conn, row.id))
         if self._autoplay.isChecked():
             self._play_current()
 
@@ -425,8 +427,13 @@ class MainWindow(QMainWindow):
         if self._anchor is None or self._axis is None:
             self.statusBar().showMessage("ranking needs an anchor (⚓)")
             return
-        features = self._ensure_features()
         weights = self._attributes.weights()
+        if not any(weights.values()):
+            self.statusBar().showMessage(
+                "ranking needs at least one weight above zero (Attributes tab)"
+            )
+            return
+        features = self._ensure_features()
         sample_ids = self._proxy.visible_sample_ids() if scope == "visible" else None
         scores = features.rank(self._axis, weights, sample_ids)
         self._samples.set_similarity(scores)

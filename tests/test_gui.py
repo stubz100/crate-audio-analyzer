@@ -212,6 +212,8 @@ def test_text_search_scores_the_list_and_nests_a_sub_hit(app, index, tmp_path):
         window._table.setCurrentIndex(sub_hit)
         assert window._current is not None and window._current.name.startswith("seg_")
         assert window._current_item[0] == "segment"
+        assert window._segments.rowCount() > 0                  # the drill-down shows the parent's segments
+        assert window._attributes._tag_buttons                    # ... and the chips are the parent's
         mime = window._samples.mimeData([window._proxy.mapToSource(sub_hit)])
         assert [Path(u.toLocalFile()) for u in mime.urls()] == [window._current]
 
@@ -248,6 +250,14 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         assert window._attributes._ranges_group.isEnabled()
         assert window._recompute._rank_button.isEnabled()
         assert "loop.wav" in window._recompute._rank_anchor.text()
+
+        for slider in window._attributes._weight_sliders.values():
+            slider.setValue(0)
+        window._recompute._rank_button.click()                     # nothing to blend: told, not silent
+        assert "weight" in window.statusBar().currentMessage()
+        assert window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
+        for slider in window._attributes._weight_sliders.values():
+            slider.setValue(100)
 
         window._recompute._rank_button.click()                     # → rank_requested("whole")
         assert not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
