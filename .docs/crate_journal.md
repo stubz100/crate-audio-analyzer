@@ -22,7 +22,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 4.5 | "Listen and grab" (pull-forward) | ✅ done — `f715d03` (sortable/filterable list, segments drill-down, Qt Multimedia preview, lazy segment render, file-URL drag-out) |
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
 | 6 | Map View | ⬜ not started |
-| 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it) |
+| 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
 | 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); map layout / anchored-only wait for Phases 6 / 9 |
 | 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`); waveform, markers and the header proper not started |
 | 10 | Bitwig Integration | ⬜ not started |
@@ -642,7 +642,7 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 ## 2026-09-07 — Quick review after Phase 7
 
-**Phase:** 7 review + fixes · REVIEW7_HASH
+**Phase:** 7 review + fixes · `7e3e6fb`
 
 **Done** — a re-read of `similarity.py`, `listmodel.py`, `attributes.py` and the window, and two probes against a small index built in-process; both hypotheses held:
 
