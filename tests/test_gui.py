@@ -332,6 +332,18 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
         panel._tempo_min.setValue(0)
         assert window._proxy.rowCount() == 2
 
+        # CLAP's numbers, not a label: four sortable columns, bars, a minimum-score filter.
+        window._autoplay.setChecked(False)
+        window._table.setCurrentIndex(window._proxy.index(0, 0))
+        values = panel.clap_values()
+        assert all(values[name] is not None for name in ("rhythmic", "melodic", "vocal", "other"))
+        assert sum(values.values()) == pytest.approx(100, abs=3)
+        assert window._proxy.data(window._proxy.index(0, 4)).isdigit()
+        panel._clap_min["rhythmic"].setValue(100)
+        assert window._proxy.rowCount() == 0
+        panel._clap_min["rhythmic"].setValue(0)
+        assert window._proxy.rowCount() == 2
+
         panel._weight_sliders["pitch"].setValue(30)
         assert panel.weights()["pitch"] == pytest.approx(0.3)
     finally:

@@ -736,3 +736,27 @@ The user: the right panel overshot its edge and was trimmed; the map's folder gr
 **Next**
 
 - The user's answer on Facet A (keep as a hint / replace) is still open. Then Phase 5, Phase 9 (marker editing on the waveform), the rest of Phase 8.
+
+## 2026-09-07 — Third round: CLAP's numbers instead of the class label
+
+**Phase:** feedback on the milestone build · FEEDBACK3_HASH
+
+The user asked how CLAP classifies and said they would rather see CLAP's output numbers than the class interpretation.
+
+**How it works (for the record).** CLAP embeds the first 10 s of a sample (48 kHz) into a unit vector of 512 numbers; the same model embeds text into the same space. The chips are cosine similarities to 32 prompts of the form "the sound of {tag}", top five kept. The class was four sets of twelve prompts (`CLASS_PROMPTS`): each set scores as its best-matching prompt's cosine, the four scores are scaled by the model's logit scale (18.66) and softmaxed into probabilities summing to 1; the largest was the class, below 0.5 unclassified, with a harmonic-ratio tie-break between Rhythmic and Melodic. Only the winner's probability was stored.
+
+**Done**
+
+- `embedding._write_tags` stores **all four** probabilities (`text_tags`, source `clap-class`, one row per set); `crate-embed --reclassify` regenerates them from stored vectors without audio.
+- `catalog.SampleRow.clap_scores`; `Criteria.clap_min` (minimum probability per set) replaces the class filter; the list's "CLAP guess" column became four sortable numeric columns — Rhythmic, Melodic, Vocal, Other — with a header tooltip saying what they are.
+- Attributes tab: "CLAP scores of the selected sample" — four bars, the twelve prompts of each set in the tooltip, a caption explaining softmax vs the chips' raw cosines; the filter row is "CLAP score at least" with a box per set (0 = any).
+- `classification.content_class` stays in the index (§11 will need it) but is not shown anywhere.
+
+**Verified**
+
+- `uv run pytest tests -q` → **166 passed, 2 skipped**; pyflakes clean (the embedding tests now expect four class rows per sample; the GUI test checks the four values sum to ~100, the column shows a number, and a 100 % minimum empties the list).
+- The user's index: `reclassify` over 3,956 samples in 7.4 s → 15,824 class rows, four per sample; the columns and bars are populated on next launch.
+
+**Next**
+
+- The taxonomy question is now moot in the UI: the numbers are what is shown. Phase 5, Phase 9 (marker editing), the rest of Phase 8.

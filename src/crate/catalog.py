@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,7 @@ class SampleRow:
     tags: str                 # top zero-shot chips, best first, comma-joined
     segment_count: int
     flagged_segments: int     # manual segments needing review (§6.3)
+    clap_scores: dict[str, float] = field(default_factory=dict)  # CLAP class probabilities, by name
 
 
 @dataclass(frozen=True)
@@ -53,25 +54,28 @@ class SegmentRow:
 class Criteria:
     """The Attributes tab's filter criteria (§9.5), applied to sample rows.
 
-    `classes` / `types`: the values to keep, `""` standing for unclassified
-    / untyped; None keeps everything. Absolute ranges are open-ended with
-    None. `axis_ranges` are per-axis distance-from-anchor windows in 0..1,
+    `types`: the values to keep, `""` standing for untyped; None keeps
+    everything. `clap_min`: (prompt set, minimum probability) pairs — a
+    sample without CLAP numbers fails any of them. Absolute ranges are
+    open-ended with None. `axis_ranges` are per-axis distance-from-anchor windows in 0..1,
     listed only for axes the user narrowed: a sample whose distance on such
     an axis is unknown (no anchor, or the axis is missing for it) is
     excluded — narrowing an axis is asking for samples that *have* it.
     """
 
-    classes: frozenset[str] | None = None
     types: frozenset[str] | None = None
+    clap_min: tuple[tuple[str, float], ...] = ()
     duration_s: tuple[float | None, float | None] = (None, None)
     tempo_bpm: tuple[float | None, float | None] = (None, None)
     axis_ranges: tuple[tuple[str, float, float], ...] = ()
 
     def accepts(self, row: SampleRow, axis_distance: Mapping[str, float] | None) -> bool:
-        if self.classes is not None and (row.content_class or "") not in self.classes:
-            return False
         if self.types is not None and (row.structural_type or "") not in self.types:
             return False
+        for name, minimum in self.clap_min:
+            value = row.clap_scores.get(name)
+            if value is None or value < minimum:
+                return False
         low, high = self.duration_s
         if low is not None and (row.duration_s is None or row.duration_s < low):
             return False
@@ -103,7 +107,9 @@ SELECT s.id, s.filepath, s.filename, s.folder, s.duration_s,
                     WHERE t.sample_id = s.id AND t.source_model = 'clap-zeroshot'
                     ORDER BY t.score DESC LIMIT ?)), '') AS tags,
        (SELECT COUNT(*) FROM segments g WHERE g.sample_id = s.id) AS segment_count,
-       (SELECT COUNT(*) FROM segments g WHERE g.sample_id = s.id AND g.needs_review = 1) AS flagged
+       (SELECT COUNT(*) FROM segments g WHERE g.sample_id = s.id AND g.needs_review = 1) AS flagged,
+       COALESCE((SELECT group_concat(tag_or_caption || '=' || score, ';') FROM text_tags t
+                 WHERE t.sample_id = s.id AND t.source_model = 'clap-class'), '') AS clap
 FROM samples s
 LEFT JOIN classification k ON k.sample_id = s.id
 LEFT JOIN analysis a ON a.sample_id = s.id
@@ -111,9 +117,24 @@ ORDER BY s.folder, s.filename
 """
 
 
+def _parse_scores(text: str) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for part in text.split(";") if text else ():
+        name, _, value = part.partition("=")
+        try:
+            scores[name] = float(value)
+        except ValueError:
+            continue
+    return scores
+
+
 def load_samples(conn: sqlite3.Connection, top_tags: int = 3) -> list[SampleRow]:
     """Every sample in the index, one row each, with what the list displays."""
-    return [SampleRow(*row) for row in conn.execute(_SAMPLES_SQL, (top_tags,))]
+    rows: list[SampleRow] = []
+    for row in conn.execute(_SAMPLES_SQL, (top_tags,)):
+        *fields, clap = row
+        rows.append(SampleRow(*fields, clap_scores=_parse_scores(clap)))
+    return rows
 
 
 def load_segments(conn: sqlite3.Connection, sample_id: int) -> list[SegmentRow]:

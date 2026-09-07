@@ -176,8 +176,9 @@ def _row(**overrides) -> SampleRow:
 
 def test_criteria_rules():
     assert Criteria().accepts(_row(), None)
-    assert not Criteria(classes=frozenset({"melodic"})).accepts(_row(), None)
-    assert Criteria(classes=frozenset({""})).accepts(_row(content_class=None), None)
+    assert not Criteria(clap_min=(("melodic", 0.5),)).accepts(_row(), None)          # no numbers: out
+    assert Criteria(clap_min=(("melodic", 0.5),)).accepts(_row(clap_scores={"melodic": 0.7}), None)
+    assert not Criteria(clap_min=(("melodic", 0.5),)).accepts(_row(clap_scores={"melodic": 0.2}), None)
     assert not Criteria(types=frozenset({"loop"})).accepts(_row(), None)
     assert not Criteria(duration_s=(2.0, None)).accepts(_row(), None)
     assert Criteria(duration_s=(0.5, 1.5)).accepts(_row(), None)

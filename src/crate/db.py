@@ -245,7 +245,8 @@ CREATE TABLE IF NOT EXISTS text_tags (
     source_model      TEXT NOT NULL,                 -- 'clap-zeroshot' | 'clap-class' |
                                                      -- 'qwen2audio-caption'
     score             REAL,                          -- zero-shot: cosine similarity;
-                                                     -- clap-class: softmax confidence
+                                                     -- clap-class: one row per class,
+                                                     -- its softmax probability
     is_user_confirmed INTEGER NOT NULL DEFAULT 0,
     created_at        TEXT,
     UNIQUE (sample_id, source_model, tag_or_caption)

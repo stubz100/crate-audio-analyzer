@@ -44,8 +44,9 @@ def test_samples_carry_what_the_list_shows(tmp_path):
     assert hit.structural_type == "one-shot" and loop.structural_type == "loop"
     assert loop.tempo_bpm is not None and hit.tempo_bpm is None
     assert loop.segment_count > 0 and hit.segment_count == 0
-    assert loop.tags == "kick drum, snare drum"                        # best first, class chip excluded
+    assert loop.tags == "kick drum, snare drum"                        # best first, class rows excluded
     assert hit.tags == ""
+    assert loop.clap_scores == {"rhythmic": 0.9} and hit.clap_scores == {}
 
     create_manual_segment(conn, loop_id, 100, 700)
     segments = load_segments(conn, loop_id)

@@ -198,7 +198,7 @@ class MainWindow(QMainWindow):
         self._list_button.setChecked(True)
         self._last_similarity: Scores | None = None
         self._filter = QLineEdit()
-        self._filter.setPlaceholderText("Quick filter (file, folder, type, class, tags…)")
+        self._filter.setPlaceholderText("Quick filter (file, folder, type, tags…)")
         self._filter.setClearButtonEnabled(True)
         self._filter.textChanged.connect(self._on_filter_changed)
 
@@ -393,6 +393,7 @@ class MainWindow(QMainWindow):
         self._segments.set_rows(segments)
         self._segment_table.resizeColumnsToContents()
         self._attributes.show_tags(load_tags(self._conn, row.id))
+        self._attributes.show_clap(row.clap_scores)
         attack_ms, decay_ms = self._envelope_marks(row.id)
         self._waveform.load(Path(row.filepath), row.filename, segments, attack_ms, decay_ms)
         self._waveform.set_selected_segment(hit.segment_id if hit is not None else None)

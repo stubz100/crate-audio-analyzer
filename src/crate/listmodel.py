@@ -56,11 +56,12 @@ class SampleTreeModel(QAbstractItemModel):
     """Samples, each with at most one sub-hit row underneath (§9.4)."""
 
     COLUMNS = (
-        "File", "Folder", "Length", "Type", "CLAP guess", "BPM", "Key", "Tags", "Hits",
-        "Similarity", "Match",
+        "File", "Folder", "Length", "Type", "Rhythmic", "Melodic", "Vocal", "Other",
+        "BPM", "Key", "Tags", "Hits", "Similarity", "Match",
     )
-    COL_SIMILARITY = 9
-    COL_MATCH = 10
+    CLAP_COLUMNS = {4: "rhythmic", 5: "melodic", 6: "vocal", 7: "other"}   # CLAP's numbers, not a label
+    COL_SIMILARITY = 12
+    COL_MATCH = 13
 
     def __init__(
         self,
@@ -157,8 +158,16 @@ class SampleTreeModel(QAbstractItemModel):
         return len(self.COLUMNS)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):  # noqa: N802
-        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+        if orientation != Qt.Orientation.Horizontal:
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
             return self.COLUMNS[section]
+        if role == Qt.ItemDataRole.ToolTipRole and section in self.CLAP_COLUMNS:
+            return (
+                f"CLAP: how well the sample matches the “{self.CLAP_COLUMNS[section]}” prompt set, "
+                "as a softmax percentage over the four sets (they sum to 100). The prompts are "
+                "listed on the Attributes tab."
+            )
         return None
 
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
@@ -203,19 +212,20 @@ class SampleTreeModel(QAbstractItemModel):
             return _fmt_seconds(r.duration_s) if display else (r.duration_s if r.duration_s is not None else -1.0)
         if col == 3:
             return r.structural_type or ""
-        if col == 4:
-            if r.content_class:
-                return r.content_class
-            return "?" if (display and r.confidence is not None) else ""
-        if col == 5:
+        if col in self.CLAP_COLUMNS:
+            value = r.clap_scores.get(self.CLAP_COLUMNS[col])
+            if display:
+                return "" if value is None else f"{value * 100:.0f}"
+            return -1.0 if value is None else value
+        if col == 8:
             if display:
                 return "" if r.tempo_bpm is None else f"{r.tempo_bpm:.0f}"
             return r.tempo_bpm if r.tempo_bpm is not None else -1.0
-        if col == 6:
+        if col == 9:
             return r.key or ""
-        if col == 7:
+        if col == 10:
             return r.tags
-        if col == 8:
+        if col == 11:
             if display:
                 if not r.segment_count:
                     return ""

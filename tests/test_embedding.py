@@ -201,7 +201,7 @@ def test_embed_pending_writes_vectors_tags_and_facet_a(library):
     tags = conn.execute(
         "SELECT source_model, COUNT(*) FROM text_tags GROUP BY source_model"
     ).fetchall()
-    assert dict(tags) == {SOURCE_TAGS: 8, SOURCE_CLASS: 2}
+    assert dict(tags) == {SOURCE_TAGS: 8, SOURCE_CLASS: 8}      # 4 tags + all 4 class numbers per sample
 
 
 def test_segments_are_embedded_when_long_enough_and_inherit_the_class(library):
@@ -279,7 +279,7 @@ def test_manual_classification_is_protected(library):
     assert conn.execute(
         "SELECT COUNT(*) FROM text_tags t JOIN samples s ON s.id = t.sample_id "
         "WHERE s.filename = 'hit.wav' AND t.source_model = ?", (SOURCE_CLASS,)
-    ).fetchone()[0] == 1
+    ).fetchone()[0] == 4
 
 
 def test_reclassify_uses_stored_vectors_without_touching_audio(library):

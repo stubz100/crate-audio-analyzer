@@ -381,7 +381,12 @@ def _write_tags(conn: sqlite3.Connection, sample_id: int, result: ZeroShot) -> N
         (sample_id, SOURCE_TAGS, SOURCE_CLASS),
     )
     rows = [(sample_id, tag, SOURCE_TAGS, score, now) for tag, score in result.tags]
-    rows.append((sample_id, result.best_class, SOURCE_CLASS, result.confidence, now))
+    # Every class's probability, not only the winner's: the numbers are what
+    # the UI shows (2026-09-07, the user's steer); the "class" is their argmax.
+    rows.extend(
+        (sample_id, name, SOURCE_CLASS, probability, now)
+        for name, probability in result.class_scores.items()
+    )
     conn.executemany(
         "INSERT OR IGNORE INTO text_tags (sample_id, tag_or_caption, source_model, "
         "score, created_at) VALUES (?, ?, ?, ?, ?)",
