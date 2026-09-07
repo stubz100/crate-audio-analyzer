@@ -713,7 +713,7 @@ The user opened the milestone build and raised three things: the bottom panel sh
 
 ## 2026-09-07 — Second round of first-use feedback: panel width, map colouring, the look
 
-**Phase:** feedback on the milestone build · FEEDBACK2_HASH
+**Phase:** feedback on the milestone build · `5707f53`
 
 The user: the right panel overshot its edge and was trimmed; the map's folder groups ("Ambiences", "Animals") are the kind of static classification a library of hundreds of sounds cannot use unless it is dynamic; and the whole UI looked like basic HTML.
 
