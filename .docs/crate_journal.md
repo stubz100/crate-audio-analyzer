@@ -763,7 +763,7 @@ The user asked how CLAP classifies and said they would rather see CLAP's output 
 
 ## 2026-09-07 — Fourth round: how CLAP sees a file, the vector itself, worker processes
 
-**Phase:** feedback on the milestone build · FEEDBACK4_HASH
+**Phase:** feedback on the milestone build · `66e9e78`
 
 The user asked what a model that takes 10 s makes of a 1-s one-shot and of a 16-minute ambience; asked to keep and see the 512-number vector; and noticed a folder recompute using 5 % of a 32-core CPU.
 
