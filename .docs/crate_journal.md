@@ -24,7 +24,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 6 | Map View | ✅ done — `72ad400` (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
 | 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); Recompute map layout (both scopes) added with Phase 6 (`72ad400`); anchored-only Recompute *attributes* remains |
-| 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`), the waveform panel with segment markers, envelope and playhead since FEEDBACK_HASH; marker editing (drag, Save / Delete segment) not started |
+| 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`), the waveform panel with segment markers, envelope and playhead since `5acfcd4`; marker editing (drag, Save / Delete segment) not started |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
 | 12 | Scale & Polish Hardening | ⬜ not started |
@@ -685,7 +685,7 @@ Directions from the review discussion: (1) frame envelope, then check the number
 
 ## 2026-09-07 — First real use: waveform panel, difference bars, the class taxonomy
 
-**Phase:** feedback on the milestone build (touches 7, 6 and 9) · FEEDBACK_HASH
+**Phase:** feedback on the milestone build (touches 7, 6 and 9) · `5acfcd4`
 
 The user opened the milestone build and raised three things: the bottom panel showed a segments table where a waveform with markers and the envelope belonged (that table belongs on the Attributes tab); the "comparing factors" bars meant nothing to them — the bars should show how the selected sample differs from the anchor; and the five-way "Class" filter and map colours made no sense on their library (a machine-gun burst was *Vocal*), and they thought these were the presets we had agreed to drop.
 
