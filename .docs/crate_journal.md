@@ -760,3 +760,39 @@ The user asked how CLAP classifies and said they would rather see CLAP's output 
 **Next**
 
 - The taxonomy question is now moot in the UI: the numbers are what is shown. Phase 5, Phase 9 (marker editing), the rest of Phase 8.
+
+## 2026-09-07 — Fourth round: how CLAP sees a file, the vector itself, worker processes
+
+**Phase:** feedback on the milestone build · FEEDBACK4_HASH
+
+The user asked what a model that takes 10 s makes of a 1-s one-shot and of a 16-minute ambience; asked to keep and see the 512-number vector; and noticed a folder recompute using 5 % of a 32-core CPU.
+
+**Done**
+
+- **Windows.** Measured on the feature extractor: a short clip is **repeat-padded** — a 1-s hit is tiled to fill 10 s, how CLAP was trained; the vector is dense, never "mostly zeros" — and a long clip used to contribute its first 10 s only (`crop_for_clap`, chosen for determinism over the extractor's random crop). Now `sample_windows`: a file is embedded as the **mean of its 10-s windows** — contiguous up to 24, beyond that 24 spread evenly across the file — re-normalised; a short tail is dropped; segments keep their own window vectors. The user's index: 1,907 files longer than 10 s re-embedded (465 s).
+- **The vector.** It was already stored for every sample and segment (`embedding` / `segment_embedding`, float32, unit length). Now it is visible — `vectorstrip.py`: 512 colour stripes, amber positive, blue negative, scaled to the vector's own peak, the anchor's stripes underneath and their cosine — and exportable: `crate-embed --export FILE.npz` (ids, kinds, paths, bounds, vectors, row-aligned).
+- **Worker processes.** `parallel.py`: a bounded `ProcessPoolExecutor` map — at most 2 × workers tasks in flight, one BLAS thread per worker, the stop flag polled between submissions, results in completion order. Analysis and segmentation fan their per-file computation out: `analyze_file` as it was; segmentation split into a pure `detect_file` (decode, detect, describe every window including the manual segments handed in) and `apply_segment_work` (the SQLite writes, in the calling process). `workers` on both functions, on `RecomputeSettings`, on the Recompute tab (*Worker processes*) and as `--workers` on `crate-analyze` / `crate-segment`. Embedding stays in-process on torch's threads.
+
+**Decided**
+
+- Mean of windows for the whole-file vector: the standard whole-clip embedding for a fixed-window model. The alternative — per-window vectors as searchable hits inside long files — needs a third kind of segment row and is the user's call.
+- Default workers = min(8, cores ÷ 2): measured below, 16 was slower than 8 on short files, and the DAW keeps the rest of the machine.
+- A process pool is within CLAUDE.md's "single-process" rule as it was meant — one codebase, one writer of the index, no native component; the wording now says so.
+- A Windows lesson, recorded because it cost an hour: a spawned worker re-imports the parent's `__main__`; my first benchmark script had no `if __name__ == "__main__"` guard, re-ran itself in every child and the pool died "abruptly". The app's entry points are guarded. That run also copied the live index file while another process was writing it — a torn copy, "database disk image is malformed" — so benchmarks now take their copy through SQLite's backup API; the real index checked out (`integrity_check` ok).
+
+**Verified**
+
+- `uv run pytest tests -q` → **170 passed, 2 skipped**; pyflakes clean. New: `sample_windows` (1 / 3 / 24 windows, a 2 ms tail dropped) and a 25-s file reaching the model as three clips and coming back as one unit vector; two workers producing the same analysis and segmentation rows as one process; a stop with workers keeping what finished; the bounded map's results, errors and stop; the strip's 512 (32 in tests) dimensions.
+- Footsteps folder, 600 short files, on a copy of the user's index (8,524 samples now — more packs scanned since):
+
+  | workers | analysis | segmentation |
+  |---|---|---|
+  | 1 | 12.9 s | 11.4 s |
+  | 8 | 4.2 s | 4.5 s |
+  | 16 | 7.3 s | 5.4 s |
+
+  Longer files gain more: the per-file hand-off is fixed, the work is not.
+
+**Next**
+
+- Phase 5, Phase 9, the rest of Phase 8; per-window search hits inside long files if wanted.

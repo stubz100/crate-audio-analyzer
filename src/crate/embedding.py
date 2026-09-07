@@ -261,6 +261,30 @@ def projected_features(output) -> np.ndarray:
     return tensor.detach().cpu().numpy()
 
 
+CLAP_MAX_WINDOWS = 24   # windows per file: a 16-minute ambience is sampled across, not just its start
+
+
+def sample_windows(y: np.ndarray, sr: int) -> list[np.ndarray]:
+    """The 10-s windows that stand for a whole file (2026-09-07, the user's
+    steer — the first 10 s alone misrepresented anything longer). One window
+    for a clip up to 10 s; contiguous windows up to CLAP_MAX_WINDOWS; beyond
+    that, that many spread evenly over the file. A short tail (< 1 s) is
+    dropped when there are other windows. Their vectors are averaged and
+    re-normalised — the usual whole-clip embedding for a fixed-window model.
+    Clips shorter than 10 s are repeat-padded by the feature extractor, as
+    CLAP was trained."""
+    limit = int(CLAP_MAX_SECONDS * sr)
+    if y.size <= limit:
+        return [y]
+    count = int(np.ceil(y.size / limit))
+    if count <= CLAP_MAX_WINDOWS:
+        starts = [i * limit for i in range(count)]
+    else:
+        starts = np.linspace(0, y.size - limit, CLAP_MAX_WINDOWS).astype(int).tolist()
+    windows = [y[s : s + limit] for s in starts]
+    return [w for w in windows if w.size >= sr] or windows[:1]
+
+
 def crop_for_clap(clip: np.ndarray, sr: int) -> np.ndarray:
     """First CLAP_MAX_SECONDS of a clip, as float32 — deterministic, unlike the
     feature extractor's random truncation."""
@@ -480,20 +504,24 @@ def _embed_one_sample(
             segment_rows.append((seg_id, start_ms, end_ms))
             windows.append(y[start:end])
 
-    clips = ([y] if embed_parent else []) + windows
+    parent_windows = sample_windows(y, sr) if embed_parent else []
+    clips = parent_windows + windows
     if not clips:
         return True
     vectors = encoder.embed_audio(clips, sr)
     now = now_iso()
 
+    parent_vec = None
     if embed_parent:
+        mean = vectors[: len(parent_windows)].astype(np.float64).mean(axis=0)
+        parent_vec = (mean / (np.linalg.norm(mean) or 1.0)).astype(np.float32)
         conn.execute(
             "INSERT INTO embedding (sample_id, model_name, vector, embedded_at) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(sample_id, model_name) DO UPDATE "
             "SET vector = excluded.vector, embedded_at = excluded.embedded_at",
-            (sample_id, MODEL_NAME, vector_to_blob(vectors[0]), now),
+            (sample_id, MODEL_NAME, vector_to_blob(parent_vec), now),
         )
-    segment_vectors = vectors[1:] if embed_parent else vectors
+    segment_vectors = vectors[len(parent_windows):]
     for (seg_id, _s, _e), vec in zip(segment_rows, segment_vectors):
         conn.execute(
             "INSERT INTO segment_embedding (segment_id, model_name, vector) VALUES (?, ?, ?) "
@@ -503,7 +531,7 @@ def _embed_one_sample(
     summary.segments_embedded += len(segment_rows)
 
     if embed_parent:
-        result = classify(vectors[0], prompts, encoder.logit_scale, settings, harmonic_ratio)
+        result = classify(parent_vec, prompts, encoder.logit_scale, settings, harmonic_ratio)
         _write_tags(conn, sample_id, result)
         if _write_facet_a(conn, sample_id, result):
             summary.protected += 1
@@ -645,3 +673,53 @@ def reclassify(
     conn.commit()
     summary.elapsed_s = time.perf_counter() - started
     return summary
+
+
+@dataclass
+class ExportSummary:
+    path: str = ""
+    samples: int = 0
+    segments: int = 0
+    dimensions: int = 0
+
+    def format(self) -> str:
+        return (
+            f"exported {self.samples} sample + {self.segments} segment vectors "
+            f"({self.dimensions} dims) to {self.path}"
+        )
+
+
+def export_vectors(conn: sqlite3.Connection, path, model_name: str = MODEL_NAME) -> ExportSummary:
+    """Every stored CLAP vector as one `.npz` for use outside Crate (a
+    notebook, a classifier of your own): arrays `ids`, `kinds` ('sample' |
+    'segment'), `filepaths`, `start_ms`, `end_ms`, `vectors` (n × dim,
+    float32, unit length), row-aligned."""
+    ids: list[int] = []
+    kinds: list[str] = []
+    paths: list[str] = []
+    starts: list[int] = []
+    ends: list[int] = []
+    vectors: list[np.ndarray] = []
+    for sid, filepath, blob in conn.execute(
+        "SELECT e.sample_id, s.filepath, e.vector FROM embedding e "
+        "JOIN samples s ON s.id = e.sample_id WHERE e.model_name = ? ORDER BY e.sample_id",
+        (model_name,),
+    ):
+        ids.append(int(sid)); kinds.append("sample"); paths.append(str(filepath))
+        starts.append(0); ends.append(0); vectors.append(blob_to_vector(blob))
+    n_samples = len(ids)
+    for gid, filepath, start, end, blob in conn.execute(
+        "SELECT g.id, s.filepath, g.start_ms, g.end_ms, se.vector FROM segment_embedding se "
+        "JOIN segments g ON g.id = se.segment_id JOIN samples s ON s.id = g.sample_id "
+        "WHERE se.model_name = ? ORDER BY g.id",
+        (model_name,),
+    ):
+        ids.append(int(gid)); kinds.append("segment"); paths.append(str(filepath))
+        starts.append(int(start)); ends.append(int(end)); vectors.append(blob_to_vector(blob))
+    matrix = np.stack(vectors).astype(np.float32) if vectors else np.zeros((0, EMBED_DIM), np.float32)
+    np.savez_compressed(
+        str(path), ids=np.asarray(ids, dtype=np.int64), kinds=np.asarray(kinds),
+        filepaths=np.asarray(paths), start_ms=np.asarray(starts, dtype=np.int64),
+        end_ms=np.asarray(ends, dtype=np.int64), vectors=matrix,
+    )
+    return ExportSummary(str(path), n_samples, len(ids) - n_samples, int(matrix.shape[1]))

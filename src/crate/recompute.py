@@ -17,6 +17,7 @@ through a queued signal.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -65,6 +66,9 @@ from .segmentation import (
 log = logging.getLogger(__name__)
 
 SETTINGS_KEY_LIBRARY_PATH = "library/root_path"
+# Measured 2026-09-07 on 600 short files, 32 cores: 8 workers 3× faster than one,
+# 16 slower than 8 (process start-up and per-file hand-off outweigh the work).
+DEFAULT_WORKERS = max(1, min(8, (os.cpu_count() or 2) // 2))
 _KEY = "recompute/"
 
 EncoderFactory = Callable[[EmbedSettings], Encoder]
@@ -308,6 +312,13 @@ class RecomputePanel(QWidget):
         )
         self._one_shot_seconds.setEnabled(self._one_shot_cap.isChecked())
         self._one_shot_cap.toggled.connect(self._one_shot_seconds.setEnabled)
+        self._workers = QSpinBox()
+        self._workers.setRange(1, max(1, os.cpu_count() or 1))
+        self._workers.setValue(v(_KEY + "workers", DEFAULT_WORKERS, type=int))
+        self._workers.setToolTip(
+            "Worker processes for analysis and segmentation (this machine has "
+            f"{os.cpu_count() or 1} cores). Embedding uses the model's own threads."
+        )
         self._qwen = QCheckBox("off")
         self._qwen.setEnabled(False)
         self._qwen.setToolTip("Phase 5 (spec §5.2): opt-in, CPU-only, not built yet.")
@@ -324,6 +335,7 @@ class RecomputePanel(QWidget):
         form.addRow("Segmentation boundary mode", self._boundary)
         form.addRow("Max segments per sample", self._max_segments)
         form.addRow("One-shot max duration", _pair(self._one_shot_cap, self._one_shot_seconds))
+        form.addRow("Worker processes", self._workers)
         form.addRow("Qwen2-Audio captioning", self._qwen)
 
         self._recompute_button = QPushButton("Recompute attributes")
@@ -441,6 +453,7 @@ class RecomputePanel(QWidget):
             scope=tuple(self.scope_folders()),
             force_full=self._force_full.isChecked(),
             one_shot_max_duration_s=cap,
+            workers=self._workers.value(),
             segmentation=segmentation,
             embedding=embedding,
         )
@@ -460,6 +473,7 @@ class RecomputePanel(QWidget):
         s(_KEY + "max_segments", self._max_segments.value())
         s(_KEY + "one_shot_cap", self._one_shot_cap.isChecked())
         s(_KEY + "one_shot_max_duration_s", self._one_shot_seconds.value())
+        s(_KEY + "workers", self._workers.value())
         self._save_scope()
 
     # --- actions (§9.6) ---

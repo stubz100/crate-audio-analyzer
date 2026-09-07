@@ -30,6 +30,7 @@ class RecomputeSettings:
     scope: tuple[str, ...] = ()          # the folder-scope list: absolute folders
     force_full: bool = False             # "new/changed only" vs "force full re-index"
     one_shot_max_duration_s: float | None = ONE_SHOT_MAX_DURATION_S
+    workers: int = 1                     # worker processes for analysis + segmentation (parallel.py)
     segmentation: SegmentationSettings = field(default_factory=SegmentationSettings)
     embedding: EmbedSettings = field(default_factory=EmbedSettings)
 
@@ -93,7 +94,10 @@ def recompute_attributes(
     started = time.perf_counter()
     scope = list(settings.scope)
     mode = "force full re-index" if settings.force_full else "new/changed only"
-    log.info("recompute attributes (%s) over %d scope folder(s)", mode, len(scope))
+    log.info(
+        "recompute attributes (%s) over %d scope folder(s), %d worker process(es)",
+        mode, len(scope), max(1, settings.workers),
+    )
     for folder in scope:
         log.info("  scope: %s", folder)
 
@@ -104,6 +108,7 @@ def recompute_attributes(
         one_shot_max_duration_s=settings.one_shot_max_duration_s,
         scope=scope,
         should_stop=should_stop,
+        workers=settings.workers,
     )
     if report.analysis.stopped:
         return _finish(report, started, stopped=True)
@@ -115,6 +120,7 @@ def recompute_attributes(
         progress_every=progress_every,
         scope=scope,
         should_stop=should_stop,
+        workers=settings.workers,
     )
     if report.segmentation.stopped:
         return _finish(report, started, stopped=True)

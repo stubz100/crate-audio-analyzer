@@ -43,6 +43,7 @@ from .catalog import Criteria
 from .embedding import CLASS_PROMPTS, CONTENT_CLASSES, TAG_PROMPT
 from .similarity import AXES, AXIS_LABELS
 from .theme import SqueezableWidget
+from .vectorstrip import VectorStrip
 
 _KEY_WEIGHT = "weights/"
 
@@ -164,6 +165,17 @@ class AttributesPanel(QWidget):
             self._clap_bars[name] = bar
         clap_layout.setColumnStretch(1, 1)
 
+        # (2c) the embedding itself: 512 numbers as colour stripes
+        strip_group = QGroupBox("CLAP embedding — the 512 numbers")
+        strip_layout = QVBoxLayout(strip_group)
+        self._strip = VectorStrip()
+        self._strip.setToolTip(
+            "The stored CLAP vector of the selected sample or hit: one stripe per dimension, "
+            "amber positive, blue negative, scaled to its largest value. The anchor's vector "
+            "is drawn underneath for comparison. `crate-embed --export FILE.npz` writes them all."
+        )
+        strip_layout.addWidget(self._strip)
+
         # (3) the selected sample's segments — hosted for the window (§6.4 drill-down)
         self._segments_group = QGroupBox("Segments of the selected sample")
         self._segments_layout = QVBoxLayout(self._segments_group)
@@ -257,6 +269,7 @@ class AttributesPanel(QWidget):
         controls_layout.addWidget(diff_group)
         controls_layout.addWidget(search_group)
         controls_layout.addWidget(clap_group)
+        controls_layout.addWidget(strip_group)
         controls_layout.addWidget(self._segments_group)
         controls_layout.addWidget(filters_group)
         controls_layout.addWidget(weights_group)
@@ -401,6 +414,9 @@ class AttributesPanel(QWidget):
             else:
                 bar.setValue(int(round(min(max(value, 0.0), 1.0) * 100)))
                 bar.setFormat("%v %")
+
+    def show_vector(self, vector, anchor=None) -> None:
+        self._strip.show_vectors(vector, anchor)
 
     def clap_values(self) -> dict[str, int | None]:
         return {

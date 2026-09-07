@@ -162,6 +162,24 @@ def load_tags(conn: sqlite3.Connection, sample_id: int) -> list[tuple[str, float
     ]
 
 
+def load_vector(conn: sqlite3.Connection, kind: str, item_id: int, model_name: str = "clap"):
+    """The stored CLAP vector of a sample or a segment (float32, unit
+    length), or None if it has not been embedded. The embedding strip and
+    anything else that wants the raw numbers reads them from here."""
+    from .embedding import blob_to_vector  # local: catalog stays importable without the model stack
+
+    if kind == "sample":
+        row = conn.execute(
+            "SELECT vector FROM embedding WHERE sample_id = ? AND model_name = ?", (item_id, model_name)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT vector FROM segment_embedding WHERE segment_id = ? AND model_name = ?",
+            (item_id, model_name),
+        ).fetchone()
+    return None if row is None else blob_to_vector(row[0])
+
+
 def describe_item(conn: sqlite3.Connection, kind: str, item_id: int) -> str | None:
     """A short label for a sample or a segment (the anchor's caption); None
     if the id is unknown."""

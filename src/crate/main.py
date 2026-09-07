@@ -45,6 +45,7 @@ from .catalog import (
     load_samples,
     load_segments,
     load_tags,
+    load_vector,
 )
 from .db import default_db_path, open_db
 from .embedding import ClapEncoder, EmbedSettings
@@ -182,6 +183,7 @@ class MainWindow(QMainWindow):
         self._current: Path | None = None
         self._current_item: tuple[str, int] | None = None
         self._anchor: tuple[str, int] | None = None
+        self._anchor_vector = None
         self._axis = None
         self._axis_by_sample: dict[int, dict[str, float]] = {}
         self._close_pending = False
@@ -413,6 +415,7 @@ class MainWindow(QMainWindow):
             self._current_item = (KIND_SAMPLE, row.id)
             self._now_playing.setText(row.filename)
         self._update_difference()
+        self._show_vector()
         if self._autoplay.isChecked():
             self._play_current()
 
@@ -430,6 +433,7 @@ class MainWindow(QMainWindow):
         self._now_playing.setText(f"hit @ {seg.start_ms / 1000:.3f} s ({seg.length_ms} ms)")
         self._waveform.set_selected_segment(seg.id)
         self._update_difference()
+        self._show_vector()
         if self._autoplay.isChecked():
             self._play_current()
 
@@ -469,6 +473,14 @@ class MainWindow(QMainWindow):
             return
         distances = {axis: float(self._axis[row, j]) for j, axis in enumerate(AXES)}
         self._attributes.show_difference(anchor_label, self._now_playing.text(), distances)
+
+    def _show_vector(self) -> None:
+        """The selected item's CLAP vector as stripes, the anchor's beneath it."""
+        if self._current_item is None:
+            self._attributes.show_vector(None, None)
+            return
+        kind, item_id = self._current_item
+        self._attributes.show_vector(load_vector(self._conn, kind, item_id), self._anchor_vector)
 
     def _select_segment_row(self, segment_id: int) -> None:
         """A click inside a segment on the waveform selects it in the table."""
@@ -521,7 +533,9 @@ class MainWindow(QMainWindow):
         self._attributes.set_anchor_state(True)
         self._recompute.set_ranking_available(True, label)
         self._map.set_anchor(self._anchor_sample_id())
+        self._anchor_vector = load_vector(self._conn, kind, item_id)
         self._update_difference()
+        self._show_vector()
         if announce:
             self.statusBar().showMessage(
                 f"anchored on {label} — distances ready; Recompute ranking (Recompute tab) to rank"
@@ -543,7 +557,9 @@ class MainWindow(QMainWindow):
         self._map.set_anchor(None)
         self._map.set_halo(set())
         self._update_badges()
+        self._anchor_vector = None
         self._update_difference()
+        self._show_vector()
         self._last_similarity = None
         if not self._samples.has_match:
             self._map.set_scores(None)

@@ -170,6 +170,7 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_pa
         assert window._segments.rowCount() > 0
         assert window._current is not None and window._current.name == "loop.wav"
         assert window._attributes._tag_buttons                            # the chips
+        assert window._attributes._strip.dimensions == 32                 # the fake model's vector
         assert window._waveform.loaded and window._waveform.duration_s == pytest.approx(4.0, abs=0.01)
         assert window._attributes.isAncestorOf(window._segment_table)     # the table lives in the tab
 

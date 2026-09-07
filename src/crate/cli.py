@@ -26,7 +26,7 @@ from typing import Any
 from .analysis import ONE_SHOT_MAX_DURATION_S, analyze_pending
 from .config import DEFAULT_LIBRARY_PATH
 from .db import default_db_path, open_db
-from .embedding import DEFAULT_CHECKPOINT, EmbedSettings, embed_pending, reclassify
+from .embedding import DEFAULT_CHECKPOINT, EmbedSettings, embed_pending, export_vectors, reclassify
 from .scanner import scan_library
 from .segmentation import (
     BOUNDARY_MODES,
@@ -133,6 +133,10 @@ def analyze_main(argv: list[str] | None = None) -> int:
         help="turn the length cap off: any sample with at most one dominant "
         "onset is a one-shot, however long (ringing hits, cinematic impacts)",
     )
+    parser.add_argument(
+        "--workers", type=int, default=1, metavar="N",
+        help="worker processes for the per-file work (default: 1)",
+    )
     args = parser.parse_args(argv)
     one_shot_cap = None if args.one_shot_any_duration else args.one_shot_max_duration
     return _run(
@@ -142,6 +146,7 @@ def analyze_main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             reanalyze=args.reanalyze,
             one_shot_max_duration_s=one_shot_cap,
+            workers=args.workers,
         ),
     )
 
@@ -198,6 +203,10 @@ def segment_main(argv: list[str] | None = None) -> int:
         help="cap per sample, strongest transients win (default: %(default)s)",
     )
     parser.add_argument(
+        "--workers", type=int, default=1, metavar="N",
+        help="worker processes for the decode + detection (default: 1)",
+    )
+    parser.add_argument(
         "--no-segment-analysis", action="store_true",
         help="index segment boundaries only, skipping the per-segment "
         "descriptor pass",
@@ -224,6 +233,7 @@ def segment_main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             resegment=args.resegment,
             analyze_segments=not args.no_segment_analysis,
+            workers=args.workers,
         ),
     )
 
@@ -250,6 +260,11 @@ def embed_main(argv: list[str] | None = None) -> int:
         "--reclassify", action="store_true",
         help="re-run tags + Facet A from the stored vectors only (no audio, no "
         "model audio pass) — cheap prompt/threshold tuning",
+    )
+    parser.add_argument(
+        "--export", type=Path, default=None, metavar="FILE.npz",
+        help="write every stored vector (samples + segments, with ids and paths) to a "
+        "NumPy .npz for use outside Crate, and do nothing else",
     )
     parser.add_argument(
         "--no-segments", action="store_true",
@@ -283,6 +298,8 @@ def embed_main(argv: list[str] | None = None) -> int:
         )
     except ValueError as exc:
         parser.error(str(exc))
+    if args.export is not None:
+        return _run(args, lambda conn: export_vectors(conn, args.export))
     if args.reclassify:
         return _run(args, lambda conn: reclassify(conn, settings=settings))
     return _run(

@@ -749,6 +749,7 @@ def analyze_pending(
     one_shot_max_duration_s: float | None = ONE_SHOT_MAX_DURATION_S,
     scope: Sequence[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    workers: int = 1,
 ) -> AnalysisSummary:
     """Analyze samples that are new (no `analysis` row) or stale (content
     changed since `analyzed_at`) — or every sample, if `reanalyze`.
@@ -757,6 +758,8 @@ def analyze_pending(
     `scope`: folders (the §9.6 folder-scope list); only files under one of
     them are visited. None = everything, the CLI's behaviour.
     `should_stop`: polled before each file (the GUI's Stop button).
+    `workers`: above 1, the per-file computation fans out to that many Python
+    worker processes (`parallel.py`); the index is still written here.
 
     Commits per file: analysis is the expensive stage (§3), so an interrupted
     run must keep everything it already computed.
@@ -780,25 +783,25 @@ def analyze_pending(
     total = len(worklist)
     log.info("analysis: %d samples to do", total)
 
-    for sample_id, filepath, duration_s, is_refresh in worklist:
-        if should_stop is not None and should_stop():
-            summary.stopped = True
-            log.info("analysis stopped by request after %d of %d", summary.analyzed, total)
-            break
-        # One file must never take a multi-hour run down with it (spec §7
-        # "logged, not fatal"; 2026-09-06 review): decode failures return
-        # None, anything else — a librosa edge case, a MemoryError on a very
-        # long recording — is caught here, rolled back, counted, and skipped.
+    def finish(sample_id, filepath, duration_s, is_refresh, descriptors, error) -> None:
+        """Store one file's result, or count its failure. One file must never
+        take a multi-hour run down with it (spec §7 "logged, not fatal";
+        2026-09-06 review): decode failures come back as None, anything else
+        — a librosa edge case, a MemoryError on a very long recording — as
+        `error`; both are counted and skipped, a store failure rolled back."""
+        if error is not None:
+            summary.failed += 1
+            log.warning("analysis failed: %s (%s: %s)", filepath, type(error).__name__, error)
+            if len(summary.error_samples) < 5:
+                summary.error_samples.append(f"{type(error).__name__}: {filepath}")
+            return
+        if descriptors is None:
+            summary.failed += 1
+            if len(summary.error_samples) < 5:
+                summary.error_samples.append(f"decode failed: {filepath}")
+            return
         try:
-            descriptors = analyze_file(filepath)
-            if descriptors is None:
-                summary.failed += 1
-                if len(summary.error_samples) < 5:
-                    summary.error_samples.append(f"decode failed: {filepath}")
-                continue
-            facet_b = structural_type(
-                descriptors, duration_s or 0.0, one_shot_max_duration_s
-            )
+            facet_b = structural_type(descriptors, duration_s or 0.0, one_shot_max_duration_s)
             protected = _store(conn, sample_id, descriptors, facet_b)
             conn.commit()
         except Exception as exc:  # noqa: BLE001 - per-file isolation is the point
@@ -807,7 +810,7 @@ def analyze_pending(
             log.warning("analysis failed: %s (%s: %s)", filepath, type(exc).__name__, exc)
             if len(summary.error_samples) < 5:
                 summary.error_samples.append(f"{type(exc).__name__}: {filepath}")
-            continue
+            return
         if protected:
             summary.skipped_confirmed += 1
         summary.analyzed += 1
@@ -819,6 +822,29 @@ def analyze_pending(
                 "analyzed %d/%d (%.2f s/file, %d failed)",
                 summary.analyzed, total, elapsed / summary.analyzed, summary.failed,
             )
+
+    if workers > 1 and worklist:
+        from .parallel import BoundedMap, make_pool
+
+        log.info("analysis: %d worker processes", workers)
+        with make_pool(workers) as pool:
+            mapping = BoundedMap(pool, worklist, analyze_file, lambda row: (row[1],), should_stop)
+            for (sample_id, filepath, duration_s, is_refresh), descriptors, error in mapping:
+                finish(sample_id, filepath, duration_s, is_refresh, descriptors, error)
+        if mapping.stopped:
+            summary.stopped = True
+            log.info("analysis stopped by request after %d of %d", summary.analyzed, total)
+    else:
+        for sample_id, filepath, duration_s, is_refresh in worklist:
+            if should_stop is not None and should_stop():
+                summary.stopped = True
+                log.info("analysis stopped by request after %d of %d", summary.analyzed, total)
+                break
+            try:
+                descriptors, error = analyze_file(filepath), None
+            except Exception as exc:  # noqa: BLE001 - reported through finish()
+                descriptors, error = None, exc
+            finish(sample_id, filepath, duration_s, is_refresh, descriptors, error)
 
     summary.elapsed_s = time.perf_counter() - started
     return summary

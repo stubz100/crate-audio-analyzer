@@ -413,3 +413,28 @@ def test_manual_segment_past_the_end_does_not_fail_its_parent(library):
     assert summary.failed == 0 and summary.samples_embedded == 2
     assert conn.execute("SELECT COUNT(*) FROM segment_embedding WHERE segment_id = ?", (mid,)).fetchone()[0] == 0
     assert summary.segments_skipped_short >= 1
+
+
+def test_long_files_are_embedded_as_the_mean_of_spread_windows(tmp_path):
+    from crate.embedding import CLAP_MAX_WINDOWS, sample_windows
+
+    sr = CLAP_SAMPLE_RATE
+    assert len(sample_windows(np.zeros(sr * 4, np.float32), sr)) == 1
+    assert [w.size for w in sample_windows(np.zeros(sr * 25, np.float32), sr)] == [sr * 10, sr * 10, sr * 5]
+    spread = sample_windows(np.zeros(sr * 600, np.float32), sr)
+    assert len(spread) == CLAP_MAX_WINDOWS and spread[-1].size == sr * 10   # spread over the file, to its end
+    assert len(sample_windows(np.zeros(sr * 10 + 100, np.float32), sr)) == 1  # a 2 ms tail is dropped
+
+    # End to end: a 25 s file goes to the model as three clips and comes back as one unit vector.
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _write(lib / "long.wav", np.random.default_rng(0).normal(0, 0.05, SR * 25), SR)
+    conn = open_db(tmp_path / "index.db")
+    scan_library(conn, lib)
+    analyze_pending(conn)
+    enc = FakeEncoder()
+    embed_pending(conn, encoder=enc)
+    assert enc.clips_seen == 3
+    vec = blob_to_vector(conn.execute("SELECT vector FROM embedding").fetchone()[0])
+    assert vec.size == DIM and abs(float(np.linalg.norm(vec)) - 1.0) < 1e-5
+    conn.close()

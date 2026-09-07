@@ -1,6 +1,6 @@
 # Sample Library Search & Mapping Tool — Specification
 
-**Status: living spec.** *Last updated: 2026-09-07 (third round: §4 — CLAP's numbers shown instead of the class label).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
+**Status: living spec.** *Last updated: 2026-09-07 (fourth round: §5.2 how the CLAP vector is made + whole-file windows, §9.6 worker processes, §10 process pool).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
 
 ---
 
@@ -132,6 +132,8 @@ Two models, different jobs, not a bake-off:
 `bosonai/higgs-audio-v2-tokenizer` was evaluated and dropped — it's a generative TTS/voice tokenizer, not trained with a text-audio contrastive objective, and a poor fit for retrieval.
 
 **Where this shows up:** free-text search box (CLAP), auto-suggested/editable tag chips (CLAP + Qwen2-Audio when enabled), optional semantic cluster labels on the map.
+
+*How the vector is made (2026-09-07, after the user asked):* CLAP's audio encoder takes a fixed 10-s window at 48 kHz. A shorter clip is **repeat-padded** by the feature extractor (a 1-s hit is tiled to fill the window — how the model was trained, and the reason a lone hit can read as "rhythmic"); a longer file used to contribute only its first 10 s. Now a file is embedded as the **mean of its 10-s windows** (contiguous up to 24, beyond that 24 spread evenly across the file), re-normalised — the usual whole-clip embedding for a fixed-window model. Segments keep their own window vectors (§6.4). The 512-number vector is stored for every sample and segment (`embedding` / `segment_embedding`), shown as colour stripes on the Attributes tab, and `crate-embed --export FILE.npz` writes them all for use outside Crate.
 
 ### 5.3 Open research item: Qwen2-Audio's latent space as a similarity axis
 
@@ -426,6 +428,7 @@ Policy: **no map layout, ranking, or attribute recomputation ever runs automatic
 | Min/max segment length | Seconds or % of parent duration; drop-short/truncate-long (§6.2) | *(tuning pass expected)* |
 | Segmentation boundary mode | Transient-to-transient / transient-to-fixed-length (§6.2) | Transient-to-transient |
 | Max segments per sample | Cap; strongest-first tie-break + capped warning (§6.2) | 5 |
+| Worker processes | How many Python processes the analysis and segmentation stages fan out to (§10); the index is written by the window's own process regardless. Added 2026-09-07 | 8, or half the cores if fewer |
 | One-shot max duration | **On:** a sample with at most one dominant onset is a one-shot only up to this length (§4 "short"). **Off:** length is ignored — a 2.2 s ringing metal lid *and* a 37 s kettle recording with one dominant onset are both one-shots. Added 2026-09-06 after 34 of a 322-file foley subset fell on the "long single onset" side; CLI: `--one-shot-max-duration` / `--one-shot-any-duration` | On, 2.0 s |
 
 Manually-corrected samples and manually-saved segments stay protected from silent overwrite under either scope.
@@ -433,6 +436,8 @@ Manually-corrected samples and manually-saved segments stay protected from silen
 ---
 
 ## 10. Technology Stack
+
+*Parallelism (2026-09-07, the user's steer — a folder recompute used 5 % of a 32-core machine):* the per-file computation of analysis and segmentation (decode + descriptors + detection) fans out to a **pool of Python worker processes** (`parallel.py`, bounded submission, one BLAS thread per worker); the SQLite writes stay in the calling process, which remains the index's only writer. Set on the Recompute tab (*Worker processes*, default 8 or half the cores if fewer — measured: 8 workers 3× faster than one on 600 short files, 16 slower than 8) and `--workers` on the CLI. Still one Python codebase and no native component — the single-process rule below was about the latter. CLAP embedding stays in-process on the model's own threads.
 
 Single-process Python for v1 — no C++ or Rust component planned.
 

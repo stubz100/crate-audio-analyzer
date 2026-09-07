@@ -407,9 +407,19 @@ def _write_segment_analysis(
     `tempo_bpm` stays NULL: a segment is a one-shot by construction (§6.4) and
     the Phase 2 policy is that tempo is stored only for loops.
     """
+    _store_segment_analysis(conn, segment_id, _describe_window(y, sr, start_ms, end_ms))
+
+
+def _describe_window(y: np.ndarray, sr: int, start_ms: int, end_ms: int):
+    """The descriptor half of node `C2` on one window — pure, so a worker
+    process can do it (`detect_file`)."""
     start = max(0, int(start_ms * sr / 1000))
     end = min(y.size, int(end_ms * sr / 1000))
     core, _evidence = describe_buffer(y[start:end], sr)
+    return core
+
+
+def _store_segment_analysis(conn: sqlite3.Connection, segment_id: int, core) -> None:
     columns = ("analyzed_at",) + _SEGMENT_DESCRIPTOR_FIELDS
     values = [now_iso()] + [getattr(core, name) for name in _SEGMENT_DESCRIPTOR_FIELDS]
     conn.execute(
@@ -465,13 +475,29 @@ def _refresh_manual_segments(
     instead of silently indexing air. Returns the number flagged.
     """
     duration_ms = int(round(y.size / sr * 1000.0))
+    manual = [
+        (seg_id, start_ms, end_ms, _describe_window(y, sr, start_ms, end_ms) if analyze_segments else None)
+        for seg_id, start_ms, end_ms in _manual_rows(conn, sample_id)
+    ]
+    return _apply_manual_refresh(conn, duration_ms, manual)
+
+
+def _manual_rows(conn: sqlite3.Connection, sample_id: int) -> tuple[tuple[int, int, int], ...]:
+    return tuple(
+        (int(r[0]), int(r[1]), int(r[2]))
+        for r in conn.execute(
+            "SELECT id, start_ms, end_ms FROM segments WHERE sample_id = ? "
+            "AND (detection_method = 'manual' OR is_user_confirmed = 1)",
+            (sample_id,),
+        )
+    )
+
+
+def _apply_manual_refresh(conn: sqlite3.Connection, duration_ms: int, manual) -> int:
+    """Write the refresh of manual segments: the review flag, the cleared
+    render and vector, and the descriptors computed on the new audio."""
     flagged = 0
-    rows = conn.execute(
-        "SELECT id, start_ms, end_ms FROM segments WHERE sample_id = ? "
-        "AND (detection_method = 'manual' OR is_user_confirmed = 1)",
-        (sample_id,),
-    ).fetchall()
-    for segment_id, start_ms, end_ms in rows:
+    for segment_id, start_ms, end_ms, core in manual:
         out_of_range = start_ms >= duration_ms or end_ms > duration_ms
         flagged += int(out_of_range)
         conn.execute(
@@ -481,8 +507,8 @@ def _refresh_manual_segments(
         )
         # Its vector was of the old audio too: drop it, crate-embed refills it.
         conn.execute("DELETE FROM segment_embedding WHERE segment_id = ?", (segment_id,))
-        if analyze_segments:
-            _write_segment_analysis(conn, segment_id, y, sr, start_ms, end_ms)
+        if core is not None:
+            _store_segment_analysis(conn, segment_id, core)
     return flagged
 
 
@@ -503,15 +529,62 @@ def segment_sample(
     driver passes it when the parent's content changed — their descriptors and
     review flag are brought up to date against the new audio.
     """
+    manual_rows = _manual_rows(conn, sample_id) if refresh_manual else ()
+    work = detect_file(
+        filepath, structural_type_value, settings, content_class, analyze_segments, manual_rows
+    )
+    if work is None:
+        return None
+    return apply_segment_work(conn, sample_id, work, refresh_manual)
+
+
+@dataclass
+class SegmentWork:
+    """Everything node `T` computes for one file without touching the index
+    — so `detect_file` can run in a worker process (`parallel.py`) and
+    `apply_segment_work` writes it here."""
+
+    result: DetectionResult
+    descriptors: list                         # per candidate: CoreDescriptors | None
+    duration_ms: int
+    manual: list                              # (id, start_ms, end_ms, CoreDescriptors | None)
+
+
+def detect_file(
+    filepath: str,
+    structural_type_value: str,
+    settings: SegmentationSettings,
+    content_class: str | None = None,
+    analyze_segments: bool = True,
+    manual_rows=(),
+) -> SegmentWork | None:
+    """Decode, detect, and describe every window (the candidates and the
+    manual segments handed in) — pure; None if the file cannot decode."""
     loaded = load_audio(filepath)
     if loaded is None:
         return None
     y, sr = loaded
-
     result = detect(y, sr, settings, structural_type_value, content_class)
+    descriptors = [
+        _describe_window(y, sr, c.start_ms, c.end_ms) if analyze_segments else None
+        for c in result.segments
+    ]
+    manual = [
+        (seg_id, start_ms, end_ms, _describe_window(y, sr, start_ms, end_ms) if analyze_segments else None)
+        for seg_id, start_ms, end_ms in manual_rows
+    ]
+    return SegmentWork(result, descriptors, int(round(y.size / sr * 1000.0)), manual)
+
+
+def apply_segment_work(
+    conn: sqlite3.Connection, sample_id: int, work: SegmentWork, refresh_manual: bool
+) -> DetectionResult:
+    """Write one file's `SegmentWork`: replace its automatic segments, store
+    their descriptors, refresh manual ones, stamp the parent (§6.2)."""
+    result = work.result
     _clear_auto_segments(conn, sample_id)
     now = now_iso()
-    for candidate in result.segments:
+    for candidate, core in zip(result.segments, work.descriptors):
         cursor = conn.execute(
             "INSERT OR IGNORE INTO segments "
             "(sample_id, start_ms, end_ms, detection_method, is_user_confirmed, "
@@ -521,14 +594,10 @@ def segment_sample(
         if not cursor.rowcount:
             continue  # duplicate rounded bounds, or a window that rounds to 0 ms
         result.rows_inserted += 1
-        if analyze_segments:
-            _write_segment_analysis(
-                conn, int(cursor.lastrowid), y, sr, candidate.start_ms, candidate.end_ms
-            )
+        if core is not None:
+            _store_segment_analysis(conn, int(cursor.lastrowid), core)
     if refresh_manual:
-        result.manual_flagged = _refresh_manual_segments(
-            conn, sample_id, y, sr, analyze_segments
-        )
+        result.manual_flagged = _apply_manual_refresh(conn, work.duration_ms, work.manual)
     _stamp_parent(conn, sample_id, result, now)
     return result
 
@@ -569,6 +638,7 @@ def segment_pending(
     progress_every: int = 100,
     scope: Sequence[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    workers: int = 1,
 ) -> SegmentationSummary:
     """Run nodes `S` + `T` over samples that need it.
 
@@ -579,7 +649,9 @@ def segment_pending(
     cleared and stamped rather than detected.
 
     `scope` (folders, §9.6) limits the visit to files under them; None is
-    everything. `should_stop` is polled before each sample.
+    everything. `should_stop` is polled before each sample. `workers` above 1
+    fans the decode + detection out to worker processes (`parallel.py`);
+    the index is still written here.
     """
     settings = settings or SegmentationSettings()
     summary = SegmentationSummary()
@@ -606,46 +678,24 @@ def segment_pending(
     total = len(worklist)
     log.info("segmentation: %d samples to visit", total)
 
-    for sample_id, filepath, structural_type_value, content_class, is_stale in worklist:
-        if should_stop is not None and should_stop():
-            summary.stopped = True
-            log.info(
-                "segmentation stopped by request after %d of %d",
-                summary.samples_segmented + summary.one_shots_skipped, total,
-            )
-            break
-        # Per-sample isolation (2026-09-06 review): one exotic file must not
-        # take the run down. Decode failures return None; anything else is
-        # rolled back, counted, and skipped.
-        try:
-            if structural_type_value == "one-shot":
-                summary.manual_flagged += _skip_one_shot(
-                    conn, sample_id, filepath, bool(is_stale), analyze_segments
-                )
-                conn.commit()
-                summary.one_shots_skipped += 1
-                continue
-            result = segment_sample(
-                conn, sample_id, filepath, structural_type_value, settings,
-                analyze_segments, refresh_manual=bool(is_stale),
-                content_class=content_class,
-            )
-            if result is None:
-                conn.rollback()
-                summary.failed += 1
-                if len(summary.error_samples) < 5:
-                    summary.error_samples.append(f"decode failed: {filepath}")
-                continue
-            conn.commit()
-        except Exception as exc:  # noqa: BLE001 - per-file isolation is the point
+    def finish(row, result, error) -> None:
+        """Count one file's outcome. Per-sample isolation (2026-09-06 review):
+        one exotic file must not take the run down — a decode failure is
+        `result is None`, anything else arrives as `error`, rolled back."""
+        filepath = row[1]
+        if error is not None:
             conn.rollback()
             summary.failed += 1
-            log.warning(
-                "segmentation failed: %s (%s: %s)", filepath, type(exc).__name__, exc
-            )
+            log.warning("segmentation failed: %s (%s: %s)", filepath, type(error).__name__, error)
             if len(summary.error_samples) < 5:
-                summary.error_samples.append(f"{type(exc).__name__}: {filepath}")
-            continue
+                summary.error_samples.append(f"{type(error).__name__}: {filepath}")
+            return
+        if result is None:
+            conn.rollback()
+            summary.failed += 1
+            if len(summary.error_samples) < 5:
+                summary.error_samples.append(f"decode failed: {filepath}")
+            return
         summary.samples_segmented += 1
         summary.segments_created += result.rows_inserted
         summary.manual_flagged += result.manual_flagged
@@ -660,6 +710,79 @@ def segment_pending(
                 summary.samples_segmented, total,
                 elapsed / summary.samples_segmented, summary.segments_created,
             )
+
+    def stop_now() -> bool:
+        if should_stop is not None and should_stop():
+            summary.stopped = True
+            log.info(
+                "segmentation stopped by request after %d of %d",
+                summary.samples_segmented + summary.one_shots_skipped, total,
+            )
+            return True
+        return False
+
+    # Node S first: a one-shot has nothing inside to find, costs no detection,
+    # and stays in this process; the rest is node T's decode + detect.
+    to_detect = []
+    for row in worklist:
+        sample_id, filepath, structural_type_value, content_class, is_stale = row
+        if structural_type_value != "one-shot":
+            to_detect.append(row)
+            continue
+        if stop_now():
+            break
+        try:
+            summary.manual_flagged += _skip_one_shot(
+                conn, sample_id, filepath, bool(is_stale), analyze_segments
+            )
+            conn.commit()
+            summary.one_shots_skipped += 1
+        except Exception as exc:  # noqa: BLE001 - per-file isolation is the point
+            finish(row, None, exc)
+
+    if not summary.stopped and workers > 1 and to_detect:
+        from .parallel import BoundedMap, make_pool
+
+        def args_of(row):
+            sample_id, filepath, structural_type_value, content_class, is_stale = row
+            manual = _manual_rows(conn, sample_id) if is_stale else ()
+            return (filepath, structural_type_value, settings, content_class, analyze_segments, manual)
+
+        log.info("segmentation: %d worker processes", workers)
+        with make_pool(workers) as pool:
+            mapping = BoundedMap(pool, to_detect, detect_file, args_of, should_stop)
+            for row, work, error in mapping:
+                result = None
+                if error is None and work is not None:
+                    try:
+                        result = apply_segment_work(conn, row[0], work, refresh_manual=bool(row[4]))
+                        conn.commit()
+                    except Exception as exc:  # noqa: BLE001
+                        error = exc
+                finish(row, result, error)
+        if mapping.stopped:
+            summary.stopped = True
+            log.info(
+                "segmentation stopped by request after %d of %d",
+                summary.samples_segmented + summary.one_shots_skipped, total,
+            )
+    elif not summary.stopped:
+        for row in to_detect:
+            if stop_now():
+                break
+            sample_id, filepath, structural_type_value, content_class, is_stale = row
+            result, error = None, None
+            try:
+                result = segment_sample(
+                    conn, sample_id, filepath, structural_type_value, settings,
+                    analyze_segments, refresh_manual=bool(is_stale),
+                    content_class=content_class,
+                )
+                if result is not None:
+                    conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                error = exc
+            finish(row, result, error)
 
     # One query, not one per sample: manual segments under everything this
     # run stamped (all stamps are >= run_started_at).
