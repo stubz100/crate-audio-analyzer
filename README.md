@@ -10,7 +10,7 @@ Not a sampler, drum machine, or plugin — a standalone search engine over `D:\_
 
 ## Status
 
-Phases 1–3 (ingestion & metadata, heuristic analysis, transient segmentation) — complete, validated against the real library. Phase 4 (CLAP embeddings & classification) and Phase 4.5 ("listen and grab": sortable list, preview, drag into Bitwig) — complete. Phase 8's Recompute tab (rescan, folder scope, recompute attributes with its settings, stop, log) is in the window, so an index can be built without the CLI. Next: Phase 7 (list, search, filter) for the first daily-drivable milestone.
+Phases 1–3 (ingestion & metadata, heuristic analysis, transient segmentation) — complete, validated against the real library. Phase 4 (CLAP embeddings & classification) and Phase 4.5 ("listen and grab": sortable list, preview, drag into Bitwig) — complete. Phase 8's Recompute tab (rescan, folder scope, recompute attributes with its settings, stop, log) is in the window, so an index can be built without the CLI. Phase 7 (list, search, filter) — complete: CLAP text search, filters, an anchor with per-axis distance ranges, Recompute ranking with the weight bars, and sub-hit rows for segments that beat their parent. **The first daily-drivable milestone (Phases 1–4 + 4.5 + 7) is reached.** Next: use it; then Phase 9 (header: waveform, markers) or Phase 6 (map).
 
 ```bash
 uv sync --extra ml   # Phase 4 onwards: torch + transformers (CLAP downloads on first use, ~600 MB)
@@ -23,6 +23,8 @@ crate           # the window: filter, sort, preview, drag a sample or a buried h
 ```
 
 First run, in the window: Browse to the library root → **Rescan library** → add a folder to the **Library scope** (or *Add root*) → **Recompute attributes**. Nothing runs until you press a button; **Stop** ends the current stage after its current file and keeps everything committed so far.
+
+Then, on the **Attributes** tab: type what you are after ("footsteps on gravel", "sword clash") and press Search — a segment that matches better than its parent shows as an indented *hit* row you can preview and drag. Select a sample or a hit, press **⚓ Anchor**, set the weight bars, and press **Recompute ranking** (Recompute tab) for a Similarity column; the distance ranges under Filters then cut the list down per axis.
 
 ## Development
 

@@ -1,14 +1,18 @@
-"""Read-side queries for the list view — plain rows, no Qt (Phase 4.5).
+"""Read-side queries and filter rules for the list view — plain rows, no
+Qt (Phase 4.5, extended in Phase 7).
 
-Everything the "listen and grab" list shows comes from here, so the GUI
-model is a thin adapter and this layer is testable on its own. Segments are
-never rows in the sample list (§6.4); they are fetched per sample for the
-drill-down.
+Everything the list shows comes from here, so the GUI model is a thin
+adapter and this layer is testable on its own. Segments are never rows in
+the sample list (§6.4); they are fetched per sample for the drill-down, and
+surface in the list only as a parent's "hit within" row (§9.4), which the
+similarity module decides.
 """
 
 from __future__ import annotations
 
+import math
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -45,6 +49,51 @@ class SegmentRow:
         return self.end_ms - self.start_ms
 
 
+@dataclass(frozen=True)
+class Criteria:
+    """The Attributes tab's filter criteria (§9.5), applied to sample rows.
+
+    `classes` / `types`: the values to keep, `""` standing for unclassified
+    / untyped; None keeps everything. Absolute ranges are open-ended with
+    None. `axis_ranges` are per-axis distance-from-anchor windows in 0..1,
+    listed only for axes the user narrowed: a sample whose distance on such
+    an axis is unknown (no anchor, or the axis is missing for it) is
+    excluded — narrowing an axis is asking for samples that *have* it.
+    """
+
+    classes: frozenset[str] | None = None
+    types: frozenset[str] | None = None
+    duration_s: tuple[float | None, float | None] = (None, None)
+    tempo_bpm: tuple[float | None, float | None] = (None, None)
+    axis_ranges: tuple[tuple[str, float, float], ...] = ()
+
+    def accepts(self, row: SampleRow, axis_distance: Mapping[str, float] | None) -> bool:
+        if self.classes is not None and (row.content_class or "") not in self.classes:
+            return False
+        if self.types is not None and (row.structural_type or "") not in self.types:
+            return False
+        low, high = self.duration_s
+        if low is not None and (row.duration_s is None or row.duration_s < low):
+            return False
+        if high is not None and (row.duration_s is None or row.duration_s > high):
+            return False
+        low, high = self.tempo_bpm
+        if low is not None or high is not None:
+            if row.tempo_bpm is None:
+                return False
+            if low is not None and row.tempo_bpm < low:
+                return False
+            if high is not None and row.tempo_bpm > high:
+                return False
+        for axis, low, high in self.axis_ranges:
+            distance = None if axis_distance is None else axis_distance.get(axis)
+            if distance is None or math.isnan(distance):
+                return False
+            if distance < low or distance > high:
+                return False
+        return True
+
+
 _SAMPLES_SQL = """
 SELECT s.id, s.filepath, s.filename, s.folder, s.duration_s,
        k.structural_type, k.content_class, k.confidence,
@@ -77,6 +126,35 @@ def load_segments(conn: sqlite3.Connection, sample_id: int) -> list[SegmentRow]:
             (sample_id,),
         )
     ]
+
+
+def load_tags(conn: sqlite3.Connection, sample_id: int) -> list[tuple[str, float]]:
+    """One sample's zero-shot chips, best first — the Attributes tab's
+    auto-tag chips (§5.2 "auto-suggested"); editing them is Phase 11."""
+    return [
+        (row[0], float(row[1]))
+        for row in conn.execute(
+            "SELECT tag_or_caption, score FROM text_tags "
+            "WHERE sample_id = ? AND source_model = 'clap-zeroshot' ORDER BY score DESC",
+            (sample_id,),
+        )
+    ]
+
+
+def describe_item(conn: sqlite3.Connection, kind: str, item_id: int) -> str | None:
+    """A short label for a sample or a segment (the anchor's caption); None
+    if the id is unknown."""
+    if kind == "sample":
+        row = conn.execute("SELECT filename FROM samples WHERE id = ?", (item_id,)).fetchone()
+        return None if row is None else str(row[0])
+    row = conn.execute(
+        "SELECT s.filename, g.start_ms, g.end_ms FROM segments g "
+        "JOIN samples s ON s.id = g.sample_id WHERE g.id = ?",
+        (item_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return f"hit @ {row[1] / 1000:.3f} s ({row[2] - row[1]} ms) in {row[0]}"
 
 
 def index_summary(conn: sqlite3.Connection) -> dict[str, int]:

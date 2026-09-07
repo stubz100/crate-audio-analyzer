@@ -130,6 +130,7 @@ class RecomputePanel(QWidget):
     included, since a per-file-committing stage leaves real rows behind."""
 
     index_changed = Signal()
+    rank_requested = Signal(str)   # "whole" | "visible" — §9.6 Recompute ranking
 
     def __init__(
         self,
@@ -143,6 +144,7 @@ class RecomputePanel(QWidget):
         self._settings = settings
         self._encoder_factory = encoder_factory
         self._thread: JobThread | None = None
+        self._rank_available = False
         self._relay = _LogRelay(self)
         self._relay.message.connect(self._append_log)
         self._handler = _LogHandler(self._relay)
@@ -170,6 +172,30 @@ class RecomputePanel(QWidget):
         root_layout = QVBoxLayout(root_group)
         root_layout.addLayout(root_row)
         root_layout.addWidget(self._rescan_button)
+
+        # --- recompute ranking (§9.6): cheap, but explicit; needs an anchor (§9.2) ---
+        self._rank_anchor = QLabel("")
+        self._rank_anchor.setWordWrap(True)
+        self._rank_whole = QRadioButton("Whole index")
+        self._rank_visible = QRadioButton("Visible rows only")
+        self._rank_whole.setChecked(True)
+        self._rank_button = QPushButton("Recompute ranking")
+        self._rank_button.setToolTip(
+            "Blend the anchor's per-axis distances with the Attributes tab's weights "
+            "into the Similarity column. Nothing re-ranks until you press this."
+        )
+        self._rank_button.clicked.connect(
+            lambda: self.rank_requested.emit("visible" if self._rank_visible.isChecked() else "whole")
+        )
+        rank_group = QGroupBox("Recompute ranking")
+        rank_layout = QVBoxLayout(rank_group)
+        rank_layout.addWidget(self._rank_anchor)
+        rank_row = QHBoxLayout()
+        rank_row.addWidget(self._rank_whole)
+        rank_row.addWidget(self._rank_visible)
+        rank_layout.addLayout(rank_row)
+        rank_layout.addWidget(self._rank_button)
+        self.set_ranking_available(False)
 
         # --- folder-scope list ---
         self._scope_list = QListWidget()
@@ -303,6 +329,7 @@ class RecomputePanel(QWidget):
         controls = QWidget()
         controls_layout = QVBoxLayout(controls)
         controls_layout.addWidget(root_group)
+        controls_layout.addWidget(rank_group)
         controls_layout.addWidget(scope_group)
         controls_layout.addWidget(attributes_group)
         controls_layout.addStretch(1)
@@ -334,6 +361,15 @@ class RecomputePanel(QWidget):
         self._library_root = Path(path)
         self._root_label.setText(str(self._library_root))
         self._settings.setValue(SETTINGS_KEY_LIBRARY_PATH, str(self._library_root))
+
+    def set_ranking_available(self, available: bool, anchor_label: str = "") -> None:
+        """The window tells the tab whether there is an anchor to rank against."""
+        self._rank_available = available
+        self._rank_button.setEnabled(available and not self.running)
+        self._rank_anchor.setText(
+            f"anchor: {anchor_label}" if available
+            else "no anchor — select a sample or a hit in the list and press ⚓ Anchor"
+        )
 
     def scope_folders(self) -> list[str]:
         return [self._scope_list.item(i).text() for i in range(self._scope_list.count())]
@@ -482,6 +518,7 @@ class RecomputePanel(QWidget):
             self._add_button, self._add_root_button, self._remove_button,
         ):
             button.setEnabled(not running)
+        self._rank_button.setEnabled(not running and self._rank_available)
         self._stop_button.setEnabled(running)
 
     def _append_log(self, text: str) -> None:

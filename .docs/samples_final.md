@@ -1,6 +1,6 @@
 # Sample Library Search & Mapping Tool — Specification
 
-**Status: living spec.** *Last updated: 2026-09-06 (Phase 8 pulled forward: §9.6 implementation note, §12 Phase 8 line).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
+**Status: living spec.** *Last updated: 2026-09-07 (Phase 7: §5.1 blend implementation note, §9.4 / §9.5 implementation notes, §12 Phase 7 line).* This document consolidates and supersedes [Sample proposal #1](samples001.md) and [Sample proposal #2](samples002.md), which remain on disk as the historical discussion trail (why each decision was made, what alternatives were considered, the back-and-forth that resolved open questions). This document states the *current* design directly, without the proposal/delta framing — update it in place as the design keeps evolving.
 
 ---
 
@@ -115,6 +115,8 @@ A single learned embedding is a black box — insensitive to exact pitch/loudnes
 | **Vocal-semantic** *(optional, §5.3)* | Qwen2-Audio encoder latent | Speech/vocal-nuance axis CLAP wasn't optimized for — unconfirmed, spike-gated |
 
 All descriptor computation stays in `librosa`/`numpy`/`scipy` — no new dependency.
+
+*Implemented (Phase 7, 2026-09-07, `similarity.py`):* every scalar is standardised robustly over the whole population (median / MAD, clipped at ±4) so no descriptor dominates its axis; Amplitude = peak, RMS, log crest, log attack, log decay; Pitch = log₂ f₀ (absent below the gate, so unpitched material simply has no pitch axis); Timbre = 13 MFCC means + 13 log MFCC variances + 7 spectral-contrast bands; Spectrum = log centroid, log bandwidth, log rolloff, flatness; Conceptual = 1 − cosine on the CLAP vectors. Each axis distance from the anchor is scaled by its 95th percentile over the population (clipped to 1) so the five axes are comparable before the weights blend them — the blend is the weighted mean over the axes an item *has*. Samples and segments are both items: a segment that beats its parent is the parent's sub-hit (§9.4).
 
 ### 5.2 Audio-to-text tagging
 
@@ -377,9 +379,13 @@ One point per **sample** (segments never get their own point), positioned by the
 
 Sortable/filterable table of samples. Once anchored **and** ranked (§9.6), a **Similarity** column appears (stable until the next explicit recompute). Ranking results are **view state, not persisted** — they're cheap to regenerate and meaningless without their anchor. What *does* persist across restarts is the anchor itself and the weight settings, so a fresh session is one click from reproducing the same ranking rather than needing it stored. **Nested sub-hit rows**: a segment that's the actual best match appears as an indented "hit within `<parent>`" row under its parent — the concrete mechanism keeping segments findable without cluttering the default view.
 
+*(Implemented 2026-09-07, Phase 7: a two-level list — samples, and under a sample at most one "↳ hit @ …" row when its best segment beats it for the current search or ranking; the parent inherits that score so it sorts by its best hit. A **Similarity** column appears once anchored and ranked, a **Match** column once searched; both are view state. Selecting or dragging a sub-hit previews / hands out the rendered segment. The anchor and the weights persist across restarts as specified; the anchor itself is a minimal ⚓ button in the transport row until Phase 9's header lands.)*
+
 ### 9.5 Attributes tab — merged filters + comparing-factor weights
 
 Top to bottom: **(1)** weight bars per axis (Amplitude/Pitch/Timbre/Spectrum/Conceptual, plus Vocal-semantic if §5.3 ships) — set the blend used on the *next* recompute, no presets for now. **(2)** free-text search (CLAP), instant. **(3)** filter criteria — content class/structural type checkboxes, duration/tempo absolute ranges (no anchor needed), and per-axis distance-from-anchor ranges (needs an anchor — computed once at anchor-time, then instant to adjust). Weight (blend importance) and range (hard cutoff) are deliberately separate controls on the same axis.
+
+*(Implemented 2026-09-07, Phase 7, `attributes.py`: weight sliders per axis (persisted), the CLAP search box — the query is embedded on a worker thread, since the first use loads the model (20 s cold) — class / type checkboxes, length and tempo ranges (a tempo range excludes samples without a tempo), and per-axis distance-from-anchor ranges in % of the library's spread, unlocked by the anchor and instant since the distances are computed once at anchor time; a narrowed axis excludes samples that lack it. The selected sample's zero-shot chips sit under the search box; clicking one searches for it. Editing or promoting chips is Phase 11; the Vocal-semantic axis waits for Phase 5.)*
 
 ### 9.6 Recompute tab — on-demand only, nothing automatic
 
@@ -459,7 +465,7 @@ Bitwig exposes no public API for injecting tags into its own browser database, s
 **Phase 4 — Embeddings & Classification.** CLAP for samples and segments; classifier for both facets (full for samples, inherited/lighter for segments).
 **Phase 5 — Qwen2-Audio Integration + Latent-Similarity Spike.** Small-subset benchmark (per §3's real-scale arithmetic) of captioning cost/quality; latent-axis evaluation per §5.3. Deliverable: measured per-file cost, a go/no-go on the latent axis.
 **Phase 6 — Map View.** 2D projection (anchored-transform + full-refit paths), segment-match badges.
-**Phase 7 — List, Search, Filter.** List view with nested sub-hit rows, Attributes tab (weights + filters + anchor-relative ranges), free-text search, auto-tag chips.
+**Phase 7 — List, Search, Filter.** List view with nested sub-hit rows, Attributes tab (weights + filters + anchor-relative ranges), free-text search, auto-tag chips. *(Built 2026-09-07 — see the §9.4 / §9.5 notes — together with §9.6's Recompute ranking and a minimal anchor, the two things the ranking column cannot exist without; the header proper stays Phase 9.)*
 **Phase 8 — Recompute Tab.** Both scope types, the folder-scope list, Recompute-attributes settings panel. *(Library scope, the folder-scope list, Recompute attributes + settings, Rescan, Stop: built 2026-09-06, right after 4.5 — see the §9.6 note. Anchored-only scope, ranking and map-layout actions follow their own phases.)*
 **Phase 9 — Header Interactions.** Preview, anchor, drag-out, manual marker create/edit/delete/save.
 **Phase 10 — Bitwig Integration.** Native drag-out (samples and lazily-rendered segments), reveal-in-Explorer, crate export.

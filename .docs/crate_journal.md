@@ -22,15 +22,15 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 4.5 | "Listen and grab" (pull-forward) | ✅ done — `f715d03` (sortable/filterable list, segments drill-down, Qt Multimedia preview, lazy segment render, file-URL drag-out) |
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
 | 6 | Map View | ⬜ not started |
-| 7 | List, Search, Filter | ⬜ not started |
-| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; ranking / map layout / anchored-only wait for Phases 7 / 6 / 9 |
-| 9 | Header Interactions | ⬜ not started |
+| 7 | List, Search, Filter | ✅ done — PHASE7_HASH (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it) |
+| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (PHASE7_HASH); map layout / anchored-only wait for Phases 6 / 9 |
+| 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (PHASE7_HASH); waveform, markers and the header proper not started |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
 | 12 | Scale & Polish Hardening | ⬜ not started |
 | 13 | Stretch | ⬜ not started |
 
-**Target: first daily-drivable milestone = Phases 1–4 + 4.5 + 7** (scan → analyze → embed → list/search/filter → audition → drag into Bitwig), per spec §12.
+**Target: first daily-drivable milestone = Phases 1–4 + 4.5 + 7** (scan → analyze → embed → list/search/filter → audition → drag into Bitwig), per spec §12. **Reached 2026-09-07.**
 
 ---
 
@@ -605,3 +605,37 @@ Directions from the review discussion: (1) frame envelope, then check the number
 **Verified** — `uv run pytest tests -q` → **141 passed, 1 skipped** (new: the deferred close against a job that ignores the stop for a while; a failed model load keeps the earlier stages); pyflakes clean; the close probe re-run: `close()` refused, the window closed itself after the job, no traceback.
 
 **Next** — Phase 7: list, search and filter proper (nested sub-hit rows, the Attributes tab, free-text CLAP search, tag chips), which closes the first daily-drivable milestone.
+
+## 2026-09-07 — Phase 7: list, search and filter — the first daily-drivable milestone
+
+**Phase:** 7 ✅, plus §9.6's Recompute ranking and a minimal anchor · PHASE7_HASH
+
+**Done**
+
+- `similarity.py` (no Qt) — the §5.1 blend. A `FeatureTable` holds every analysed sample *and* segment as robustly standardised per-axis descriptors plus its CLAP vector; `distances(anchor)` gives every item's per-axis distance once per anchor (scaled by the population's 95th percentile to 0..1, NaN where the item lacks the axis); `blend` is the weighted mean over the axes an item has; `rank` = 1 − blend; `search` = cosine against a CLAP text vector; `fold` turns item scores into per-sample scores with **sub-hits** — a segment that beats its own parent (§9.4).
+- `catalog.py` — `Criteria` (class / type / length / tempo / per-axis anchor ranges), `load_tags`, `describe_item`.
+- `listmodel.py` — `SampleTreeModel`: samples with at most one "↳ hit @ …" child row; Similarity and Match columns; dragging a sub-hit renders the segment. `ListProxy` applies the criteria to samples and lets a sub-hit follow its parent.
+- `attributes.py` — the §9.5 tab in the spec's order: weight bars (persisted), the CLAP search box with the selected sample's tag chips under it (click = search), class / type / length / tempo filters, and per-axis distance-from-anchor ranges unlocked by the anchor.
+- `main.py` — the list is a tree; **⚓ Anchor** / ✕ in the transport row (persisted, restored on start, re-derived after a Recompute); the query is embedded on a worker thread and the newest query wins while one is in flight; score columns appear only when present and sit next to the file name; column measuring samples 200 rows (0.38 s → 0.07 s on 3,956 rows).
+- `recompute.py` — **Recompute ranking** (whole index, or visible rows only), enabled by the anchor.
+
+**Decided**
+
+- Segments are items for ranking and search and fold into their parents; the list never grows a segment row of its own (§6.4). The parent inherits its best hit's score, so it sorts by what is actually inside it.
+- Per-axis distances are scaled by the 95th percentile of the population so the weights and the % ranges mean the same on every axis; an item without an axis (unpitched → no pitch) drops out of the blend rather than being penalised.
+- A tempo range excludes samples without a tempo; a narrowed anchor range excludes samples without that axis — narrowing is asking for samples that have it.
+- Sub-hits follow the search while one is active, else the ranking; two scorings can disagree on which segment wins and only one child row is shown.
+- Text embedding runs off the GUI thread: the cold CLAP load measured 20 s inside the window.
+- The anchor is Phase 9's, but the Similarity column and the ranges cannot exist without one, so a minimal button ships now; the header proper (waveform, markers) stays Phase 9.
+- Qt 6.10 deprecated `invalidateFilter()` and `invalidateRowsFilter()` in favour of begin/endFilterChange; the proxy uses those when present.
+
+**Verified**
+
+- `uv run pytest tests -q` → **153 passed, 1 skipped**; pyflakes clean; no Qt deprecation warnings. New: the feature table over samples + segments; anchor distances (zero at the anchor, same pitch closer than two octaves up, unpitched → NaN); blend NaN rules; ranking order (anchor first, its twin second); scope; text search folding a winning segment into a hit; criteria rules. GUI: search → Match column, sub-hit row, preview and drag of the sub-hit, a query replaced while in flight; anchor → ranges + ranking + persistence across a restart, visible-only scope; filters; weights persisting.
+- Krotos index (3,956 samples + 8,962 segments): feature table of **12,918 items in 1.0 s**; distances 5 ms; ranking 5 ms headless, 1.0 s in the window (model reset, sort, expand). Anchored on *Surface Wooden Plank On Gravel-001* with equal weights, the next seven rows are its siblings 002–019. Text search: "sword clash" → five sword hits at 60–62; "kick drum" → body hits, punches, bass drops; "footsteps on gravel" → two ice-crunch *hits inside* spell sounds first, then the gravel footsteps; "wind howling" weak (car interiors) — CLAP sees the first 10 s only and ambiences are where its zero-shot is weakest. Pitch axis covers 0 items here (foley: nothing passes the gate) — expected.
+- Window on that index: up in 1.4 s; the first search 8–20 s (the model load, now off the GUI thread), later searches instant.
+
+**Next**
+
+- **Milestone reached (spec §12): Phases 1–4 + 4.5 + 7.** Use it for a while — searches, anchors, ranges, drags into Bitwig — before Phase 9 (the header: waveform, marker editing, the anchor's proper home) or Phase 6 (the map).
+- Phase 12 note: the feature table at full scale (110k samples + ~250k segments) holds ~700 MB of float32 vectors; float16, or embedded-only rows, before the whole library.
