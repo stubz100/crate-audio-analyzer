@@ -1082,7 +1082,7 @@ The user: the waveform needs a zoom for precision; some GPU support for a less c
 
 ## 2026-09-08 — The header across the window; filters in the column headers
 
-**Phase:** 7 / 9 polish (the list and the header) · `HEADER_HASH`
+**Phase:** 7 / 9 polish (the list and the header) · `4223b78`
 
 The user: the quick filter should live at each column header — a text field for the name, a pulldown of the types, and so on; the quick filter bar goes; the header should span the window with the List / Map buttons stacked (room for a third), the CLAP tag scores as clickable vertical bars, and the CLAP "DNA" stretched underneath; the three groups stay on the Attributes tab for now.
 
