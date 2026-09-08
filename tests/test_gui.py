@@ -188,12 +188,11 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_pa
         window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
         assert window._segment_rows
         assert window._current is not None and window._current.name == "loop.wav"
-        assert window._attributes._tag_buttons                            # the chips
+        assert window._tag_bars.tags                                      # the header's tag bars
         assert "a click loop" in window._waveform_panel.caption_text     # the §5.2 sentence, at the top of the waveform
-        assert window._attributes._strip.dimensions == 32                 # the fake model's vector
+        assert window._header_strip.dimensions == 32                      # the fake model's vector, in the header
         window._waveform.wait_for_load()                                  # read on a thread: the preview never waits
         assert window._waveform.loaded and window._waveform.duration_s == pytest.approx(4.0, abs=0.01)
-        assert window._drag_handle.mime_data().urls()[0].toLocalFile().endswith("loop.wav")
 
         window._select_segment(window._segment_rows[0].id)                # a click inside a segment on the waveform
         assert window._current is not None and window._current.name.startswith("seg_")
@@ -201,7 +200,6 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_pa
         first = window._segment_rows[0].id
         assert window._waveform._selected_segment == first               # mirrored on the waveform
         assert window._current_offset_ms == window._segment_rows[0].start_ms
-        assert window._drag_handle.mime_data().urls()[0].toLocalFile().endswith(window._current.name)   # the segment drags out
 
         window._on_column_filter(0, ColumnFilter(text="hit"))         # the File header's filter
         assert window._proxy.rowCount() == 1 and 0 in window._header.filters
@@ -242,7 +240,7 @@ def test_text_search_scores_the_list_and_nests_a_sub_hit(app, index, tmp_path):
         assert window._current is not None and window._current.name.startswith("seg_")
         assert window._current_item[0] == "segment"
         assert window._segment_rows                             # the parent's segments, on the waveform
-        assert window._attributes._tag_buttons                    # ... and the chips are the parent's
+        assert window._tag_bars.tags                              # ... and the tag bars are the parent's
         mime = window._samples.mimeData([window._proxy.mapToSource(sub_hit)])
         assert [Path(u.toLocalFile()) for u in mime.urls()] == [window._current]
 
@@ -277,7 +275,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
         _anchor_current(app, window)                               # anchors, then ranks at once…
 
-        assert window._anchor_label.text().endswith("loop.wav")
+        assert window._anchor_name.endswith("loop.wav")
         assert window._samples.anchor == ("sample", window._rows_by_id and next(
             r.id for r in window._rows_by_id.values() if r.filename == "loop.wav"))
         assert window._search_panel._ranges_group.isEnabled()
@@ -297,7 +295,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         # ⚓ on another row: anchored and ranked in one click, that row on top;
         # ✕ leaves the ranked list as it is.
         window._anchor_delegate.anchor_clicked.emit(window._proxy.index(_proxy_row_named(window, "hit.wav"), 0))
-        assert window._anchor_label.text().endswith("hit.wav")
+        assert window._anchor_name.endswith("hit.wav")
         assert window._proxy.data(window._proxy.index(0, 0)) == "hit.wav"
         assert "ranked 2 samples" in window.statusBar().currentMessage()
         window._clear_anchor()
@@ -329,7 +327,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
     again = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
     try:
         _wait_until(app, lambda: again._feature_thread is None and not again._feature_waiters)
-        assert again._anchor is not None and again._anchor_label.text().endswith("loop.wav")
+        assert again._anchor is not None and again._anchor_name.endswith("loop.wav")
         assert again._search_panel._ranges_group.isEnabled()
         assert not again._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
         again._clear_anchor()
@@ -369,9 +367,9 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
         # four prompt-set numbers only as a minimum-score filter (2026-09-08).
         window._autoplay.setChecked(False)
         window._table.setCurrentIndex(window._proxy.index(0, 0))
-        values = window._attributes.tag_values()                          # the tags' cosines, best first
-        assert 0 < len(values) <= 10 and list(values.values()) == sorted(values.values(), reverse=True)
-        assert all(0 <= v <= 100 for v in values.values())
+        values = [round(score * 100) for _, score in window._tag_bars.tags]   # the tags' cosines, best first
+        assert 0 < len(values) <= 10 and values == sorted(values, reverse=True)
+        assert all(0 <= v <= 100 for v in values)
         assert "Rhythmic" not in SampleTreeModel.COLUMNS
         panel._clap_min["rhythmic"].setValue(100)
         assert window._proxy.rowCount() == 0
@@ -701,7 +699,7 @@ def test_a_search_can_land_on_a_window_inside_a_long_file(app, tmp_path):
         assert window._proxy.data(window._proxy.index(0, 3, parent)) == "window"
 
         window._table.setCurrentIndex(sub_hit)
-        assert window._now_playing.text() == "window @ 20.000 s (5 s) in ambience.wav"
+        assert window._current_label == "window @ 20.000 s (5 s) in ambience.wav"
         assert window._current is not None and window._current.name.startswith("seg_") and window._current.exists()
         assert window._current_offset_ms == 20000
         assert window._current_item[0] == "segment"
@@ -710,7 +708,7 @@ def test_a_search_can_land_on_a_window_inside_a_long_file(app, tmp_path):
         assert len(window._waveform._windows) == 3
         assert "3 CLAP windows" in window._waveform._header_text()
         assert window._waveform._selected_segment == window._current_item[1]
-        assert window._attributes._strip.dimensions == 32                             # the window's own vector
+        assert window._header_strip.dimensions == 32                                  # the window's own vector
         assert not window._waveform.grab().isNull()
     finally:
         window.close()
@@ -737,13 +735,12 @@ def test_long_names_do_not_move_the_panes_and_their_position_persists(app, index
         assert abs(before[0] - before[1]) <= 8                              # half and half by default (2026-09-08)
         panes = window._panes.sizes()
         assert abs(panes[0] - panes[1]) <= 8
-        window._now_playing.setText("Ambience Los Angeles Street Traffic Cars Pedestrians Dog Night Loop.wav" * 2)
-        window._anchor_label.setText("window @ 2:20.000 (10 s) in Ambience Venice Canals Crowd Footsteps Loop.wav" * 2)
+        window._waveform_panel.set_caption("Ambience Los Angeles Street Traffic Cars Pedestrians Dog Night Loop.wav" * 2)
         app.processEvents()
         assert window._body.sizes() == before                                # nothing moved
-        assert window._now_playing.minimumSizeHint().width() == 0
-        assert window._now_playing.text().startswith("Ambience")             # the full text is kept
-        assert window._now_playing.toolTip() == window._now_playing.text()
+        label = window._waveform_panel._caption_label
+        assert label.minimumSizeHint().width() == 0
+        assert label.text().startswith("Ambience") and label.toolTip() == label.text()   # the full text is kept
 
         # "Dragged" by hand — to a width above the left pane's own minimum (the
         # transport row's buttons; larger under the test's default font).
@@ -879,7 +876,7 @@ def test_anchor_only_attributes_redo_the_anchor_alone(app, index, tmp_path):
         now = dict(conn.execute("SELECT sample_id, analyzed_at FROM analysis").fetchall())
         assert now[loop_id] != stamps[loop_id] and now[hit_id] == stamps[hit_id]   # … and to nothing else
         assert window._anchor == ("sample", loop_id)                # the hit is gone: its parent is the anchor
-        assert window._anchor_label.text().endswith("loop.wav")
+        assert window._anchor_name.endswith("loop.wav")
         assert "anchored on its parent" in log
 
         window._clear_anchor()
@@ -946,5 +943,33 @@ def test_save_and_delete_segments_from_the_waveform(app, index, tmp_path):
                     and conn.execute("SELECT COUNT(*) FROM segments WHERE id = ?", (new_id,)).fetchone()[0] == 0)
         _wait_until(app, lambda: all(s.id != new_id for s in window._segment_rows))
         assert "deleted" in jobs.log_text() and window._current_sample == loop_id
+    finally:
+        window.close()
+
+
+# --- the anchor circle (2026-09-08): a second click on the filled circle clears the anchor ---
+
+
+def test_a_second_click_on_the_anchor_circle_clears_the_anchor(app, index, tmp_path):
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
+    try:
+        window._autoplay.setChecked(False)
+        assert window._waveform_panel.play_button.text() == "▶" and window._autoplay is window._waveform_panel.autoplay
+        row = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
+        window._table.setCurrentIndex(row)
+        _anchor_current(app, window)
+        assert window._anchor is not None and window._anchor_name.endswith("loop.wav")
+        assert not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
+
+        window._on_anchor_clicked(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))   # the filled circle
+        assert window._anchor is None and window._anchor_name is None
+        assert not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)   # the ranking stays, as with ✕
+
+        window._on_anchor_clicked(window._proxy.index(_proxy_row_named(window, "hit.wav"), 0))    # an empty one anchors
+        _wait_until(app, lambda: window._anchor is not None and not window._feature_waiters)
+        assert window._anchor_name.endswith("hit.wav")
     finally:
         window.close()

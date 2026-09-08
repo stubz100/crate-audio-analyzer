@@ -206,8 +206,9 @@ class SampleTreeModel(QAbstractItemModel):
             return "Click the header to sort this column or filter on it."
         if role == Qt.ItemDataRole.ToolTipRole and section == 0:
             return (
-                "⚓ at the start of a row anchors that sample (or hit) and ranks every "
-                "sample against it, with the weight bars as they are (§9.2). "
+                "The circle at the start of a row anchors that sample (or hit) and ranks every "
+                "sample against it, with the weight bars as they are (§9.2); a click on the "
+                "filled circle clears the anchor. "
                 "Click the header to sort or filter by file name"
             )
         return None
@@ -503,27 +504,25 @@ class SegmentTableModel(QAbstractTableModel):
 
 
 def _paint_anchor(painter: QPainter, zone: QRectF, colour, bold: bool = False) -> None:
-    """A small anchor drawn with the pen — a text glyph would come out as a
-    colour emoji on Windows and ignore it: ring, stem, crossbar, flukes."""
+    """A radio-button-like circle (2026-09-08, the user's steer — the drawn
+    anchor "looked awful"): an empty ring on a row that could be the anchor,
+    a filled dot inside it on the row that is."""
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(colour, 2.0 if bold else 1.4)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    painter.setPen(pen)
+    painter.setPen(QPen(colour, 1.4))
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    cx, cy = zone.center().x(), zone.center().y()
-    h = min(zone.height(), 18.0) - 5.0
-    top = cy - h / 2
-    r = h * 0.14
-    painter.drawEllipse(QPointF(cx, top + r), r, r)
-    painter.drawLine(QPointF(cx, top + 2 * r), QPointF(cx, top + h))
-    painter.drawLine(QPointF(cx - h * 0.3, top + h * 0.45), QPointF(cx + h * 0.3, top + h * 0.45))
-    painter.drawArc(QRectF(cx - h * 0.45, top + h * 0.3, h * 0.9, h * 0.7), 200 * 16, 140 * 16)
+    centre = QPointF(zone.center().x(), zone.center().y())
+    r = min(zone.height(), 18.0) * 0.28
+    painter.drawEllipse(centre, r, r)
+    if bold:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colour)
+        painter.drawEllipse(centre, r * 0.55, r * 0.55)
     painter.restore()
 
 
 class AnchorDelegate(QStyledItemDelegate):
-    """The ⚓ at the start of every row of the list (2026-09-08, the user's
+    """The anchor circle at the start of every row of the list (2026-09-08, the user's
     steer: anchoring and ranking should be one click on the row, not a
     button, a tab and a step). Paints the File cell shifted right by a click
     zone that shows the glyph — accent for the row that is the anchor, dim

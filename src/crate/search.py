@@ -112,7 +112,7 @@ class SearchPanel(QWidget):
             self._range_max[axis] = high
         ranges_layout.setColumnStretch(4, 1)
         self._ranges_group.setEnabled(False)
-        self._ranges_group.setToolTip("Press ⚓ on a row to unlock these: a hard cutoff per axis.")
+        self._ranges_group.setToolTip("Anchor a row (the circle at its start) to unlock these: a hard cutoff per axis.")
         filters_layout.addWidget(self._ranges_group)
 
         # (3) the weights (2026-09-08, the user's steer: they belong with the search)

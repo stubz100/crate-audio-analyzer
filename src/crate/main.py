@@ -18,14 +18,12 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QMimeData, QSettings, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDrag, QKeySequence, QShortcut
+from PySide6.QtCore import QSettings, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QHBoxLayout,
-    QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -62,7 +60,7 @@ from .tagbars import TagBars
 from .segmentation import create_manual_segment, delete_segment, update_segment
 from .render import default_cache_dir, render_segment
 from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable, Scores
-from .theme import ElidedLabel, apply_theme
+from .theme import apply_theme
 from .vectorstrip import VectorStrip
 from .waveform import WaveformPanel
 
@@ -143,48 +141,6 @@ class Preview:
         from PySide6.QtMultimedia import QMediaPlayer
 
         return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-
-
-class DragHandle(QLabel):
-    """*Drag into Bitwig ↗* in the transport row: hands the OS the current
-    item's file — the sample, or the rendered segment (§11) — the way a list
-    row does, so any segment on the waveform can be dragged out (the
-    drill-down table left the Attributes tab, 2026-09-08)."""
-
-    def __init__(self, current, parent=None) -> None:
-        super().__init__("Drag into Bitwig ↗", parent)
-        self._current = current
-        self._press = None
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.setToolTip("Drag this into Bitwig: the selected sample, or the selected hit / segment as a rendered clip.")
-
-    def mime_data(self) -> QMimeData | None:
-        path = self._current()
-        if path is None:
-            return None
-        mime = QMimeData()
-        mime.setUrls([QUrl.fromLocalFile(str(path))])
-        return mime
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._press = event.position()
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._press is None:
-            return
-        if (event.position() - self._press).manhattanLength() < QApplication.startDragDistance():
-            return
-        self._press = None
-        mime = self.mime_data()
-        if mime is None:
-            return
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.CopyAction)
-
-    def mouseReleaseEvent(self, _event) -> None:  # noqa: N802
-        self._press = None
 
 
 class _Outcome:
@@ -285,6 +241,8 @@ class MainWindow(QMainWindow):
         self._current: Path | None = None
         self._current_item: tuple[str, int] | None = None
         self._current_sample: int | None = None     # the selected sample (a hit's parent): where markers are saved
+        self._current_label = ""                    # how the current item is named (the difference readout)
+        self._anchor_name: str | None = None        # the anchor's label (status bar, difference readout)
         self._anchor: tuple[str, int] | None = None
         self._anchor_parent: int | None = None    # the anchor's sample (a hit's parent)
         self._anchor_vector = None
@@ -362,38 +320,16 @@ class MainWindow(QMainWindow):
         self._waveform_panel.save_requested.connect(self._save_segments)
         self._waveform_panel.delete_requested.connect(self._delete_segment)
 
-        # --- transport + anchor (§9.2, the minimal slice Phase 7 needs) ---
-        self._play_button = QPushButton("▶ Play")
-        self._play_button.setObjectName("play")
-        self._play_button.clicked.connect(self._play_current)
-        stop_button = QPushButton("■ Stop")
-        stop_button.clicked.connect(self._preview.stop)
-        self._autoplay = QCheckBox("Auto-play on select")
+        # --- play / stop / auto-play live in the waveform panel's button row; the
+        # transport row went (2026-09-08, the user's steer) ---
+        self._play_button = self._waveform_panel.play_button
+        self._autoplay = self._waveform_panel.autoplay
         self._autoplay.setChecked(self._settings.value(SETTINGS_KEY_AUTOPLAY, True, type=bool))
         self._autoplay.toggled.connect(
             lambda on: self._settings.setValue(SETTINGS_KEY_AUTOPLAY, bool(on))
         )
-        self._now_playing = ElidedLabel("")
-        self._now_playing.setObjectName("nowPlaying")
-        self._anchor_label = ElidedLabel("no anchor")
-        self._anchor_label.setToolTip(
-            "The comparison reference (§9.2): press ⚓ at the start of a row to anchor that "
-            "sample and rank the list against it (or press A on the selected row)."
-        )
-        clear_anchor = QPushButton("✕")
-        clear_anchor.setToolTip("Clear the anchor — the list keeps its order")
-        clear_anchor.setFixedWidth(28)
-        clear_anchor.clicked.connect(self._clear_anchor)
-        transport = QHBoxLayout()
-        transport.addWidget(self._play_button)
-        transport.addWidget(stop_button)
-        transport.addWidget(self._autoplay)
-        transport.addWidget(self._now_playing, stretch=2)
-        transport.addWidget(QLabel("⚓"))
-        transport.addWidget(self._anchor_label, stretch=1)
-        transport.addWidget(clear_anchor)
-        self._drag_handle = DragHandle(lambda: self._current)
-        transport.addWidget(self._drag_handle)
+        self._waveform_panel.play_requested.connect(self._play_current)
+        self._waveform_panel.stop_requested.connect(self._preview.stop)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self._toggle_play)
         QShortcut(QKeySequence(Qt.Key.Key_A), self, activated=self._anchor_current)
 
@@ -403,7 +339,6 @@ class MainWindow(QMainWindow):
         self._search_panel.search_requested.connect(self._search)
         self._search_panel.search_cleared.connect(self._clear_search)
         self._search_panel.criteria_changed.connect(self._proxy.set_criteria)
-        self._attributes.search_requested.connect(self._search_panel.search_for)   # a chip → the Search tab's box
         self._tag_bars.tag_clicked.connect(self._search_panel.search_for)         # a bar in the header too
         self._waveform_panel.caption_requested.connect(self._caption_current)   # the caption line's button
         self._recompute = RecomputePanel(
@@ -457,7 +392,6 @@ class MainWindow(QMainWindow):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(2)
         preview_layout.addWidget(self._waveform_panel, stretch=1)
-        preview_layout.addLayout(transport)
         panes = QSplitter(Qt.Orientation.Vertical)
         panes.addWidget(preview)
         panes.addWidget(tabs)
@@ -624,7 +558,6 @@ class MainWindow(QMainWindow):
         segments = load_segments(self._conn, row.id)
         self._segment_rows = segments
         tags = load_tags(self._conn, row.id)
-        self._attributes.show_tags(tags)
         self._tag_bars.show_tags(tags)
         self._waveform_panel.set_caption(load_caption(self._conn, row.id))
         attack_ms, decay_ms = self._envelope_marks(row.id)
@@ -643,13 +576,11 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"hit cannot be rendered: {exc}")
                 return
             self._current_item = (KIND_SEGMENT, hit.segment_id)
-            self._now_playing.setText(
-                f"{hit_label(hit.start_ms, hit.end_ms, hit.window)} in {row.filename}"
-            )
+            self._current_label = f"{hit_label(hit.start_ms, hit.end_ms, hit.window)} in {row.filename}"
         else:
             self._current = Path(row.filepath)
             self._current_item = (KIND_SAMPLE, row.id)
-            self._now_playing.setText(row.filename)
+            self._current_label = row.filename
         self._update_difference()
         self._show_vector()
         if self._autoplay.isChecked() and not self._quiet_select:
@@ -669,7 +600,7 @@ class MainWindow(QMainWindow):
             return
         self._current_item = (KIND_SEGMENT, seg.id)
         self._current_offset_ms = seg.start_ms
-        self._now_playing.setText(hit_label(seg.start_ms, seg.end_ms))
+        self._current_label = hit_label(seg.start_ms, seg.end_ms)
         self._waveform.set_selected_segment(seg.id)
         self._update_difference()
         self._show_vector()
@@ -703,7 +634,7 @@ class MainWindow(QMainWindow):
 
     def _update_difference(self) -> None:
         """The selected item's per-axis distance from the anchor (§9.5)."""
-        anchor_label = None if self._anchor is None else self._anchor_label.text().lstrip("⚓ ")
+        anchor_label = self._anchor_name
         if self._anchor is None or self._axis is None or self._current_item is None:
             self._attributes.show_difference(anchor_label, None, None)
             return
@@ -711,20 +642,18 @@ class MainWindow(QMainWindow):
         kind, item_id = self._current_item
         row = features.row_of(kind, item_id)
         if row is None:
-            self._attributes.show_difference(anchor_label, self._now_playing.text(), None)
+            self._attributes.show_difference(anchor_label, self._current_label, None)
             return
         distances = {axis: float(self._axis[row, j]) for j, axis in enumerate(AXES)}
-        self._attributes.show_difference(anchor_label, self._now_playing.text(), distances)
+        self._attributes.show_difference(anchor_label, self._current_label, distances)
 
     def _show_vector(self) -> None:
         """The selected item's CLAP vector as stripes, the anchor's beneath it."""
         if self._current_item is None:
-            self._attributes.show_vector(None, None)
             self._header_strip.show_vectors(None, None)
             return
         kind, item_id = self._current_item
         vector = load_vector(self._conn, kind, item_id)
-        self._attributes.show_vector(vector, self._anchor_vector)
         self._header_strip.show_vectors(vector, self._anchor_vector)
 
     def _seek(self, position_ms: int) -> None:
@@ -830,14 +759,17 @@ class MainWindow(QMainWindow):
         self._anchor_and_rank(*self._current_item)
 
     def _on_anchor_clicked(self, index) -> None:
-        """The ⚓ at the start of a row (§9.2): that sample — or that hit — becomes
-        the anchor and the list is ranked against it, at once."""
+        """The circle at the start of a row (§9.2): that sample — or that hit —
+        becomes the anchor and the list is ranked against it, at once. A click
+        on the filled circle clears the anchor (the list keeps its order, as
+        the ✕ did)."""
         source = self._proxy.mapToSource(index)
         hit = self._samples.hit_at(source)
-        if hit is not None:
-            self._anchor_and_rank(KIND_SEGMENT, hit.segment_id)
+        item = (KIND_SEGMENT, hit.segment_id) if hit is not None else (KIND_SAMPLE, self._samples.row_at(source).id)
+        if item == self._anchor:
+            self._clear_anchor()
         else:
-            self._anchor_and_rank(KIND_SAMPLE, self._samples.row_at(source).id)
+            self._anchor_and_rank(*item)
 
     def _anchor_and_rank(self, kind: str, item_id: int) -> None:
         """Anchor, then rank the scope against the anchor with the weight bars
@@ -873,7 +805,7 @@ class MainWindow(QMainWindow):
         self._axis_by_sample = features.axis_distances_by_sample(self._axis)
         self._settings.setValue(SETTINGS_KEY_ANCHOR_KIND, kind)
         self._settings.setValue(SETTINGS_KEY_ANCHOR_ID, int(item_id))
-        self._anchor_label.setText(label)
+        self._anchor_name = label
         self._samples.set_anchor((kind, item_id))
         self._proxy.set_axis_lookup(self._axis_by_sample.get)
         self._anchor_parent = self._anchor_sample_id()
@@ -894,7 +826,7 @@ class MainWindow(QMainWindow):
         self._axis_by_sample = {}
         self._settings.remove(SETTINGS_KEY_ANCHOR_KIND)
         self._settings.remove(SETTINGS_KEY_ANCHOR_ID)
-        self._anchor_label.setText("no anchor")
+        self._anchor_name = None
         self._samples.set_anchor(None)
         self._proxy.set_axis_lookup(lambda _sample_id: None)
         self._search_panel.set_anchor_state(False)
@@ -921,7 +853,7 @@ class MainWindow(QMainWindow):
         the weight bars (§5.1) and fold the sub-hits (§9.4). Runs on a ⚓
         click, on a weight bar's release, and after every reload."""
         if self._anchor is None or self._axis is None:
-            self.statusBar().showMessage("ranking needs an anchor (⚓)")
+            self.statusBar().showMessage("ranking needs an anchor (the circle at the start of a row)")
             return
         weights = self._search_panel.weights()
         if not any(weights.values()):
@@ -947,7 +879,7 @@ class MainWindow(QMainWindow):
         if not self._samples.has_match:
             self._map.set_scores(scores.sample, "similarity to the anchor")
         self.statusBar().showMessage(
-            f"ranked {len(scores.sample)} samples against ⚓ {self._anchor_label.text()} "
+            f"ranked {len(scores.sample)} samples against {self._anchor_name} "
             f"({len(scores.hits)} hits inside longer samples)"
         )
 
@@ -1115,7 +1047,7 @@ class MainWindow(QMainWindow):
         True when a job started."""
         if mode == "anchored":
             if self._anchor is None:
-                self.statusBar().showMessage("anchored-only layout needs an anchor (⚓)")
+                self.statusBar().showMessage("anchored-only layout needs an anchor (the circle at the start of a row)")
                 return False
             kind, item_id = self._anchor
             self._recompute.start_job(

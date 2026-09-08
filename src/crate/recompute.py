@@ -528,7 +528,7 @@ class RecomputePanel(QWidget):
                 fallback.setChecked(True)
         self._anchor_note.setText(
             f"anchor: {anchor_label}" if available
-            else "\"anchor only\" needs an anchor: press ⚓ at the start of a row in the list."
+            else "\"anchor only\" needs an anchor: click the circle at the start of a row in the list."
         )
 
     def log_text(self) -> str:

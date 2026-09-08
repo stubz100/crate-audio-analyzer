@@ -45,10 +45,10 @@ import numpy as np
 import soundfile as sf
 from PySide6.QtCore import QCoreApplication, QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QWheelEvent
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QScrollBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QPushButton, QScrollBar, QVBoxLayout, QWidget
 
 from .catalog import SegmentRow
-from .theme import ACCENT, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel
+from .theme import ACCENT, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel, SqueezableWidget
 
 log = logging.getLogger(__name__)
 
@@ -791,13 +791,16 @@ def _band_path(xs: np.ndarray, top: np.ndarray, bottom: np.ndarray) -> QPainterP
 class WaveformPanel(QWidget):
     """The bottom panel: the caption line on top (the selected sample's
     Qwen2-Audio sentence, "—" without one, and its Caption / Recaption
-    button), the view, its pan scrollbar, and the segment buttons (§9.2).
+    button), the view, its pan scrollbar, and the button row: play, stop,
+    the segment buttons, auto-play (§9.2).
     *Save segment* writes the staged markers, *Discard* drops them, *Delete
     segment* removes the selected one; the window does the writing."""
 
     save_requested = Signal()
     delete_requested = Signal(int)     # the selected segment's id
     caption_requested = Signal()
+    play_requested = Signal()
+    stop_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -830,6 +833,15 @@ class WaveformPanel(QWidget):
         self._scroll.valueChanged.connect(self._on_scroll)
         self.view.view_changed.connect(self._sync_scroll)
 
+        # play / stop / auto-play, here since 2026-09-08 (the user's steer: the transport row went)
+        self.play_button = QPushButton("▶")
+        self.play_button.setObjectName("play")
+        self.play_button.setToolTip("Play the selected sample or hit (Space)")
+        self.play_button.clicked.connect(self.play_requested)
+        self.stop_button = QPushButton("■")
+        self.stop_button.setToolTip("Stop")
+        self.stop_button.clicked.connect(self.stop_requested)
+        self.autoplay = QCheckBox("Auto-play on select")
         self._save = QPushButton("Save segment")
         self._save.setToolTip(
             "Write the moved or drawn markers to the index as manual segments (§6.3): exempt "
@@ -839,25 +851,28 @@ class WaveformPanel(QWidget):
         self._discard.setToolTip("Drop the unsaved markers (Esc).")
         self._delete = QPushButton("Delete segment")
         self._delete.setToolTip("Remove the selected segment, automatic or manual, from the index (Del).")
-        hint = ElidedLabel(
-            "drag a marker to move it  ·  drag on the waveform to draw a segment  ·  "
-            "nothing is written until Save  ·  wheel zooms, Shift+wheel pans, right-click fits"
+        self.view.setToolTip(
+            "Drag a marker to move it; drag on the waveform to draw a segment — nothing is written "
+            "until Save. Wheel zooms, Shift+wheel pans, right-click fits."
         )
-        hint.setObjectName("caption")
-        row = QHBoxLayout()
+        buttons = SqueezableWidget()                 # the row squeezes with the pane; it never pushes the splitter
+        row = QHBoxLayout(buttons)
         row.setContentsMargins(4, 0, 4, 2)
         row.setSpacing(6)
+        row.addWidget(self.play_button)
+        row.addWidget(self.stop_button)
         row.addWidget(self._save)
         row.addWidget(self._discard)
         row.addWidget(self._delete)
-        row.addWidget(hint, stretch=1)
+        row.addStretch(1)
+        row.addWidget(self.autoplay)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         layout.addLayout(caption_row)
         layout.addWidget(self.view, stretch=1)
         layout.addWidget(self._scroll)
-        layout.addLayout(row)
+        layout.addWidget(buttons)
         self._save.clicked.connect(self.save_requested)
         self._discard.clicked.connect(self.view.discard)
         self._delete.clicked.connect(self._emit_delete)

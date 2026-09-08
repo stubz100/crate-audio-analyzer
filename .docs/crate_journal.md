@@ -1164,3 +1164,28 @@ The user: the list/map where the tabs are, the waveform where the list/map is, t
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-08 — Attributes down to the difference bars; the anchor a circle; the transport row gone
+
+**Phase:** 7 polish (the window) · `TRIM_HASH`
+
+The user: the tags, CLAP scores and CLAP embedding groups leave the Attributes tab (they are in the header); the anchor icon looks awful — a radio-button-like circle instead; play and stop as plain icons in front of *Save segment*; *Auto-play on select* in place of the hint; everything else in the row below (the anchor label, *Drag into Bitwig*) out.
+
+**Done**
+
+- `attributes.py` keeps the difference group only; the chips, bars, strip and their methods are gone with them (`TagBars` and the header strip carry the tags and the embedding; `CLASS_HELP` / `_prompts_text` stay for the Search tab).
+- `listmodel.py`: `_paint_anchor` draws a ring, filled on the anchored row; the window's `_on_anchor_clicked` clears the anchor when the filled circle is clicked (the ranking stays, as with ✕). Every "press ⚓" text says "the circle at the start of a row" now.
+- `waveform.py`: the button row is ▶ ■ *Save segment* *Discard* *Delete segment* … *Auto-play on select*; the hint became the plot's tooltip. `main.py`: the transport row, `DragHandle`, the now-playing and anchor labels are gone — `_current_label` and `_anchor_name` carry their text to the difference readout and the status bar; the window's `_autoplay` / `_play_button` are the panel's widgets.
+
+**Decided**
+
+- Dragging a segment that is not a hit is not possible for now: the drag handle went with the row, as asked. A list row still drags its sample or hit.
+
+**Verified**
+
+- `uv run pytest tests -q` → **200 passed, 3 skipped**; pyflakes clean. New: a second click on the filled circle clears the anchor and keeps the Similarity column, a click on an empty one anchors that row; the long-names test elides the caption line instead of the gone labels; the first GUI test reads the header's bars and strip.
+- Offscreen on the user's index: the ring on every row and the dot on the anchored one; the button row under the waveform; the Attributes tab with the difference bars alone.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
