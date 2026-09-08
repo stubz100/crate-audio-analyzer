@@ -857,7 +857,7 @@ The user's decision on the scope question: the library root and the scope list b
 
 ## 2026-09-08 — ⚓ on every row: anchoring is ranking; the CLAP columns leave the list; UMAP's seed warning
 
-**Phase:** 7 / 9 (anchor and ranking, reshaped) · ANCHOR_HASH
+**Phase:** 7 / 9 (anchor and ranking, reshaped) · `acc3a44`
 
 The user reported UMAP's "n_jobs value 1 overridden to 1 by setting random_state" at the end of a recompute cycle, and found the anchor-then-rank ceremony overdone: take the CLAP columns out of the list, put a button at the start of each row that anchors and ranks at once, let the anchored sample jump to the top, un-anchoring changing nothing, a new anchor superseding a running one — with lazy loading, parallelism or a per-sample cache if the computation needs it.
 
