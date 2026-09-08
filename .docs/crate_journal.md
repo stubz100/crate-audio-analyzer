@@ -799,7 +799,7 @@ The user asked what a model that takes 10 s makes of a 1-s one-shot and of a 16-
 
 ## 2026-09-08 — CLAP windows as searchable hits; where the 10k samples came from
 
-**Phase:** feedback on the milestone build · WINDOWS_HASH
+**Phase:** feedback on the milestone build · `75fb01e`
 
 The user first asked why the status bar counted over 10k samples when the folder just scanned holds about 1.6k, then picked up the per-window idea left open yesterday: "I like this idea, can you get back to this?"
 
