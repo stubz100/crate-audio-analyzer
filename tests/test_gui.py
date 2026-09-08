@@ -31,7 +31,7 @@ from crate.db import open_db
 from crate.embedding import embed_pending
 from crate.layout import PcaReducer
 from crate.library import add_library, normalize
-from crate.listmodel import ListProxy, SampleTreeModel, SegmentTableModel
+from crate.listmodel import ColumnFilter, ListProxy, SampleTreeModel, SegmentTableModel
 from crate.recompute import RunPlan
 from crate.render import render_segment
 from crate.scanner import scan_library
@@ -202,8 +202,8 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_pa
         assert window._waveform._selected_segment == first               # mirrored on the waveform
         assert window._current_offset_ms == window._segments.row_at(window._segments.index(0, 0)).start_ms
 
-        window._filter.setText("hit")
-        assert window._proxy.rowCount() == 1
+        window._on_column_filter(0, ColumnFilter(text="hit"))         # the File header's filter
+        assert window._proxy.rowCount() == 1 and 0 in window._header.filters
     finally:
         window.close()
 
@@ -346,20 +346,23 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
         panel = window._search_panel
         assert window._proxy.rowCount() == 2
 
-        panel._type_boxes["one-shot"].setChecked(False)
+        # Type, length and tempo filter from the list's own header (2026-09-08):
+        # a checklist of the values present, and min/max ranges on the raw value.
+        window._on_column_filter(3, ColumnFilter(values=frozenset({"loop"})))
         assert window._proxy.rowCount() == 1 and window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"
-        panel._type_boxes["one-shot"].setChecked(True)
+        window._on_column_filter(3, None)
 
-        panel._duration_min.setValue(1.0)
+        window._on_column_filter(2, ColumnFilter(low=1.0))
         assert window._proxy.rowCount() == 1
-        panel._duration_min.setValue(0.0)
+        window._on_column_filter(2, None)
 
-        panel._tempo_min.setValue(100)                      # the loop is 120 BPM; the hit has none
+        window._on_column_filter(4, ColumnFilter(low=100.0))            # the loop is 120 BPM; the hit has none
         assert window._proxy.rowCount() == 1 and window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"
-        panel._tempo_min.setValue(200)
+        window._on_column_filter(4, ColumnFilter(low=200.0))
         assert window._proxy.rowCount() == 0
-        panel._tempo_min.setValue(0)
+        window._on_column_filter(4, None)
         assert window._proxy.rowCount() == 2
+        assert not panel.criteria().clap_min                            # the Search tab keeps only its own filters
 
         # CLAP's numbers, not a label: the tag scores as bars on Attributes, the
         # four prompt-set numbers only as a minimum-score filter (2026-09-08).
@@ -627,9 +630,9 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         assert "3 samples placed" in panel.log_text()
         assert (tmp_path / "layouts" / "layout_1.pkl").exists()   # next to the segment cache
 
-        window._filter.setText("hit")                             # one shared filtered set
+        window._on_column_filter(0, ColumnFilter(text="hit"))     # one shared filtered set
         assert window._map.visible_count == 1
-        window._filter.setText("")
+        window._on_column_filter(0, None)
         assert window._map.visible_count == 3
 
         window._map.sample_clicked.emit(loop_id)                  # map → list → preview target

@@ -1079,3 +1079,29 @@ The user: the waveform needs a zoom for precision; some GPU support for a less c
 **Next**
 
 - The header across the window with the List / Map buttons stacked, the tag-score bars and the CLAP strip; per-column filters in the list's header; the segments table out of Attributes and the weights on the Search tab (the rest of the user's list).
+
+## 2026-09-08 — The header across the window; filters in the column headers
+
+**Phase:** 7 / 9 polish (the list and the header) · `HEADER_HASH`
+
+The user: the quick filter should live at each column header — a text field for the name, a pulldown of the types, and so on; the quick filter bar goes; the header should span the window with the List / Map buttons stacked (room for a third), the CLAP tag scores as clickable vertical bars, and the CLAP "DNA" stretched underneath; the three groups stay on the Attributes tab for now.
+
+**Done**
+
+- **Column filters** (`headerfilter.py`): `FilterHeader` replaces the list's header (`install_on`, since a view resets clickability when it adopts a header); a click on a section opens `FilterPopup` under it — *Sort ascending* / *Sort descending*, the editor, *Clear*. `ColumnSpec` per column: text (File, Folder, Tags — "contains"), values (Type, Key — a checklist of the values present, `SampleTreeModel.distinct_values`, "(none)" for an empty cell), range (Length, BPM, Hits, Similarity, Match — min/max with "any" at 0; Similarity and Match shown in % of a raw 0..1, `scale`). `ColumnFilter` (`listmodel.py`) is the filter; `ListProxy.set_column_filter` applies it beside the Search tab's criteria; a filtered section carries a dot. The view's own sorting is off — a header click used to flip the indicator and sort; the header puts the indicator back and the popup's buttons sort. The window's `_on_column_filter` keeps the map in step.
+- **The header** (`main.py`): a full-width strip above the body splitter — the List / Map buttons stacked at the left with a stretch for a third, `TagBars` (`tagbars.py`: ten vertical bars, score on top, tag under, hover and a pointing cursor, a click → the Search tab's box) and a compact `VectorStrip` (no caption, thinner rows) underneath. The quick-filter box and `_on_filter_changed` are gone.
+- **The Search tab** keeps the search box, the CLAP minimum scores and the anchor-distance ranges; type, length and tempo left for the headers (a note says so). `Criteria` is unchanged — the panel simply no longer sets those.
+
+**Decided**
+
+- A header click opens the popup rather than sorting: one gesture per header, and the popup's first two buttons are the sort. The Similarity / Match columns' programmatic sorts (`sortByColumn`) are unaffected.
+- Type, length and tempo were removed from the Search tab rather than duplicated: two filters on the same thing that both apply is a puzzle.
+
+**Verified**
+
+- `uv run pytest tests -q` → **199 passed, 3 skipped**; pyflakes clean. New (`tests/test_headerfilter.py`): `ColumnFilter.accepts` per kind; the proxy with several filters and the model's distinct values; a real click on a header section (QTest) opens the checklist and leaves the sort indicator alone, unticking a value filters the list and marks the section, All restores, the popup's button sorts; the text, range and %-scaled editors; the tag bars' slots, hover tooltip, click and cap at ten. The GUI tests drive the header filters where they used the quick filter.
+- Offscreen on the user's index: the header with the stacked buttons, ten bars for a vowel (vocal 62 …), the strip; Type = one-shot and Tags ∋ "vocal" narrow the list; the Type popup lists loop / multi-hit / one-shot; a bar click fills the Search box.
+
+**Next**
+
+- The segments table out of the Attributes tab and the weights over to the Search tab (the last of the user's list).

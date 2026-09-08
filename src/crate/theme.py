@@ -164,6 +164,8 @@ QSplitter::handle:horizontal {{ width: 6px; }}
 QSplitter::handle:vertical {{ height: 6px; }}
 QStatusBar {{ background: {PANEL.name()}; color: {TEXT_DIM.name()}; border-top: 1px solid {BORDER.name()}; }}
 QLabel#caption {{ color: {TEXT_DIM.name()}; }}
+QWidget#header {{ background: {PANEL.name()}; border-bottom: 1px solid {BORDER.name()}; }}
+QFrame#filterPopup {{ background: {PANEL.name()}; border: 1px solid {BORDER.name()}; }}
 QLabel#nowPlaying {{ color: {TEXT.name()}; font-weight: 600; }}
 """
 

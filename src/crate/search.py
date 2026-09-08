@@ -1,20 +1,18 @@
 """The Search tab (2026-09-08, the user's steer: the Attributes tab was
 crammed, so everything that narrows or searches the list moved here).
 
-The CLAP text search box (§5.2) and the filters (§9.5): structural type,
-minimum CLAP scores, length and tempo, and — once there is an anchor — the
-per-axis distance ranges. The panel owns no data: it emits what the user
-asked for and the window applies it. Filters are view state, never
-persisted (§9.4).
+The CLAP text search box (§5.2) and the filters that have no column of
+their own (§9.5): minimum CLAP scores and — once there is an anchor — the
+per-axis distance ranges. Type, length and tempo are filtered from the
+list's own header since later that day (`headerfilter.py`). The panel owns
+no data: it emits what the user asked for and the window applies it.
+Filters are view state, never persisted (§9.4).
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QDoubleSpinBox,
-    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -33,18 +31,6 @@ from .catalog import Criteria
 from .embedding import CONTENT_CLASSES
 from .similarity import AXES, AXIS_LABELS
 from .theme import SqueezableWidget
-
-TYPE_HELP = (
-    "Facet B (spec §4), from the audio itself: one-shot = one dominant onset (up to the "
-    "one-shot max duration), loop = a whole number of beats at a detectable tempo, "
-    "multi-hit = everything else with several transients."
-)
-
-TYPE_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("One-shot", "one-shot"),
-    ("Multi-hit", "multi-hit"),
-    ("Loop", "loop"),
-)
 
 
 class SearchPanel(QWidget):
@@ -81,11 +67,14 @@ class SearchPanel(QWidget):
         search_row.addWidget(clear_button)
         search_layout.addLayout(search_row)
 
-        # (2) filters — they narrow whatever the list shows: plain, searched or ranked
+        # (2) filters without a column of their own — type, length and tempo
+        # are the list header's (2026-09-08)
         filters_group = QGroupBox("Filters")
         filters_layout = QVBoxLayout(filters_group)
-        self._type_boxes: dict[str, QCheckBox] = {}
-        filters_layout.addLayout(self._checkbox_grid("Type", TYPE_HELP, TYPE_OPTIONS, self._type_boxes))
+        note = QLabel("Type, length, tempo, key, tags and the scores filter from the list's column headers.")
+        note.setWordWrap(True)
+        note.setObjectName("caption")
+        filters_layout.addWidget(note)
         self._clap_min: dict[str, QSpinBox] = {}
         clap_row = QGridLayout()
         clap_label = QLabel("CLAP score at least:")
@@ -100,16 +89,6 @@ class SearchPanel(QWidget):
             self._clap_min[name] = box
         clap_row.setColumnStretch(4, 1)
         filters_layout.addLayout(clap_row)
-
-        absolute = QFormLayout()
-        absolute.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self._duration_min = self._seconds_box()
-        self._duration_max = self._seconds_box()
-        absolute.addRow("Length (s)", _pair(self._duration_min, self._duration_max))
-        self._tempo_min = self._bpm_box()
-        self._tempo_max = self._bpm_box()
-        absolute.addRow("Tempo (BPM)", _pair(self._tempo_min, self._tempo_max))
-        filters_layout.addLayout(absolute)
 
         self._ranges_group = QGroupBox("Distance from the anchor (% of spread)")
         ranges_layout = QGridLayout(self._ranges_group)
@@ -132,11 +111,11 @@ class SearchPanel(QWidget):
         filters_layout.addWidget(self._ranges_group)
 
         controls = SqueezableWidget()
-        controls_layout = QVBoxLayout(controls)
-        controls_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
-        controls_layout.addWidget(search_group)
-        controls_layout.addWidget(filters_group)
-        controls_layout.addStretch(1)
+        self._controls_layout = QVBoxLayout(controls)
+        self._controls_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self._controls_layout.addWidget(search_group)
+        self._controls_layout.addWidget(filters_group)
+        self._controls_layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -147,41 +126,6 @@ class SearchPanel(QWidget):
         layout.addWidget(scroll)
 
     # --- widgets ---
-
-    def _checkbox_grid(self, title: str, help_text: str, options, boxes: dict, per_row: int = 3) -> QGridLayout:
-        """A labelled row of checkboxes that wraps — a single row of five
-        was what pushed the panel past its pane (2026-09-07)."""
-        grid = QGridLayout()
-        label = QLabel(title + ":")
-        label.setToolTip(help_text)
-        grid.addWidget(label, 0, 0)
-        for n, (text, key) in enumerate(options):
-            box = QCheckBox(text)
-            box.setChecked(True)
-            box.setToolTip(help_text)
-            box.toggled.connect(self._emit_criteria)
-            grid.addWidget(box, n // per_row, 1 + n % per_row)
-            boxes[key] = box
-        grid.setColumnStretch(per_row + 1, 1)
-        return grid
-
-    def _seconds_box(self) -> QDoubleSpinBox:
-        box = QDoubleSpinBox()
-        box.setRange(0.0, 9_999.99)
-        box.setDecimals(2)
-        box.setSingleStep(0.1)
-        box.setSpecialValueText("any")
-        box.setMaximumWidth(84)
-        box.valueChanged.connect(self._emit_criteria)
-        return box
-
-    def _bpm_box(self) -> QSpinBox:
-        box = QSpinBox()
-        box.setRange(0, 1000)
-        box.setSpecialValueText("any")
-        box.setMaximumWidth(72)
-        box.valueChanged.connect(self._emit_criteria)
-        return box
 
     def _percent_box(self, value: int) -> QSpinBox:
         box = QSpinBox()
@@ -195,7 +139,6 @@ class SearchPanel(QWidget):
     # --- state out ---
 
     def criteria(self) -> Criteria:
-        types = frozenset(k for k, box in self._type_boxes.items() if box.isChecked())
         clap_min = tuple(
             (name, box.value() / 100.0) for name, box in self._clap_min.items() if box.value() > 0
         )
@@ -206,19 +149,7 @@ class SearchPanel(QWidget):
                 high = self._range_max[axis].value()
                 if (low, high) != (0, 100):
                     ranges.append((axis, low / 100.0, high / 100.0))
-        return Criteria(
-            types=None if len(types) == len(self._type_boxes) else types,
-            clap_min=clap_min,
-            duration_s=(
-                self._duration_min.value() or None,
-                self._duration_max.value() or None,
-            ),
-            tempo_bpm=(
-                float(self._tempo_min.value()) or None,
-                float(self._tempo_max.value()) or None,
-            ),
-            axis_ranges=tuple(ranges),
-        )
+        return Criteria(clap_min=clap_min, axis_ranges=tuple(ranges))
 
     def search_text(self) -> str:
         return self._search.text().strip()
@@ -230,8 +161,9 @@ class SearchPanel(QWidget):
         self._emit_criteria()
 
     def search_for(self, text: str) -> None:
-        """Put `text` in the box and search — a chip on the Attributes tab
-        comes through here, so the box shows what was searched."""
+        """Put `text` in the box and search — a chip on the Attributes tab or
+        a bar in the header comes through here, so the box shows what was
+        searched."""
         self._search.setText(text)
         self._emit_search()
 
@@ -248,14 +180,3 @@ class SearchPanel(QWidget):
 
     def _emit_criteria(self, *_args) -> None:
         self.criteria_changed.emit(self.criteria())
-
-
-def _pair(left: QWidget, right: QWidget) -> QWidget:
-    box = QWidget()
-    row = QHBoxLayout(box)
-    row.setContentsMargins(0, 0, 0, 0)
-    row.addWidget(left)
-    row.addWidget(QLabel("to"))
-    row.addWidget(right)
-    row.addStretch(1)
-    return box

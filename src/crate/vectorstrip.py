@@ -23,12 +23,16 @@ _HEADER = 16.0
 
 
 class VectorStrip(QWidget):
-    def __init__(self, parent=None) -> None:
+    """`compact` (the window's header, 2026-09-08): no caption, thinner rows."""
+
+    def __init__(self, parent=None, compact: bool = False) -> None:
         super().__init__(parent)
+        self._row = 10.0 if compact else _ROW
+        self._header = 0.0 if compact else _HEADER
         self._vector: np.ndarray | None = None
         self._anchor: np.ndarray | None = None
         self._caption = "select a sample or a hit to see its CLAP embedding"
-        self.setMinimumHeight(int(_HEADER + _ROW + 4))
+        self.setMinimumHeight(int(self._header + self._row + 4))
 
     def show_vectors(
         self,
@@ -39,7 +43,7 @@ class VectorStrip(QWidget):
         self._vector = None if vector is None else np.asarray(vector, dtype=np.float32).reshape(-1)
         self._anchor = None if anchor is None else np.asarray(anchor, dtype=np.float32).reshape(-1)
         rows = 1 + (1 if self._anchor is not None else 0)
-        self.setMinimumHeight(int(_HEADER + rows * _ROW + (rows - 1) * _GAP + 4))
+        self.setMinimumHeight(int(self._header + rows * self._row + (rows - 1) * _GAP + 4))
         if self._vector is None:
             self._caption = caption or "no CLAP embedding for this item yet"
         else:
@@ -64,23 +68,22 @@ class VectorStrip(QWidget):
             t = min(abs(float(value)) / scale, 1.0)
             colour = mix(FIELD, AMBER if value >= 0 else ACCENT, t)
             painter.setBrush(colour)
-            painter.drawRect(QRectF(4 + i * step, top, max(step, 1.0), _ROW))
+            painter.drawRect(QRectF(4 + i * step, top, max(step, 1.0), self._row))
         painter.setPen(QPen(BORDER, 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(QRectF(4, top, width, _ROW))
+        painter.drawRect(QRectF(4, top, width, self._row))
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.setPen(TEXT if self._vector is not None else TEXT_DIM)
-        painter.drawText(QRectF(4, 0, self.width() - 8, _HEADER), Qt.AlignmentFlag.AlignLeft, self._caption)
+        if self._header:
+            painter.setPen(TEXT if self._vector is not None else TEXT_DIM)
+            painter.drawText(QRectF(4, 0, self.width() - 8, self._header), Qt.AlignmentFlag.AlignLeft, self._caption)
         if self._vector is None:
             painter.end()
             return
-        top = _HEADER
+        top = self._header
         self._paint_row(painter, self._vector, top)
         if self._anchor is not None:
-            top += _ROW + _GAP
+            top += self._row + _GAP
             self._paint_row(painter, self._anchor, top)
-            painter.setPen(TEXT_DIM)
-            painter.drawText(QRectF(4, top + _ROW, self.width() - 8, 14), Qt.AlignmentFlag.AlignLeft, "")
         painter.end()

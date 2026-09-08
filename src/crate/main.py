@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -54,15 +53,18 @@ from .catalog import (
 from .db import default_db_path, open_db
 from .embedding import ClapEncoder, EmbedSettings
 from .layout import LayoutSettings, fit_layout, load_current_layout, place_anchor
+from .headerfilter import ColumnSpec, FilterHeader
 from .listmodel import AnchorDelegate, ListProxy, SampleTreeModel, SegmentTableModel
 from .mapview import MapView
 from .library import scope_paths
 from .recompute import EncoderFactory, RecomputePanel, RunPlan
 from .search import SearchPanel
+from .tagbars import TagBars
 from .segmentation import create_manual_segment, delete_segment, update_segment
 from .render import default_cache_dir, render_segment
 from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable, Scores
 from .theme import ElidedLabel, apply_theme
+from .vectorstrip import VectorStrip
 from .waveform import WaveformPanel
 
 log = logging.getLogger(__name__)
@@ -73,6 +75,19 @@ SETTINGS_KEY_AUTOPLAY = "preview/autoplay"
 SETTINGS_KEY_ANCHOR_KIND = "anchor/kind"
 SETTINGS_KEY_ANCHOR_ID = "anchor/id"
 SETTINGS_KEY_SPLITTER = "window/splitter"   # list | right panel, as dragged
+# What each list column's header popup edits (2026-09-08, `headerfilter.py`).
+COLUMN_SPECS = {
+    0: ColumnSpec("text"),
+    1: ColumnSpec("text"),
+    2: ColumnSpec("range", "s", decimals=2, maximum=99_999),
+    3: ColumnSpec("values"),
+    4: ColumnSpec("range", "BPM", maximum=999),
+    5: ColumnSpec("values"),
+    6: ColumnSpec("text"),
+    7: ColumnSpec("range", maximum=9_999),
+    SampleTreeModel.COL_SIMILARITY: ColumnSpec("range", "%", maximum=100, scale=100.0),
+    SampleTreeModel.COL_MATCH: ColumnSpec("range", "%", maximum=100, scale=100.0),
+}
 SETTINGS_KEY_PANES = "window/panes"         # list | waveform, as dragged
 HALO_NEIGHBOURS = 20               # §9.3: nearest neighbours highlighted after a ranking
 # The model stack logs every HTTP request at INFO; that is noise on a
@@ -244,7 +259,9 @@ class MainWindow(QMainWindow):
         self._rows_by_id: dict[int, object] = {}
         self._source_row_of: dict[int, int] = {}
 
-        # --- view switch (§9.2) + quick filter ---
+        # --- the header across the window (2026-09-08, the user's steer): the
+        # view switch stacked at the left with room for a third button, the
+        # selected sample's tag-score bars, its CLAP strip underneath ---
         self._list_button = QPushButton("List")
         self._map_button = QPushButton("Map")
         for button in (self._list_button, self._map_button):
@@ -252,10 +269,9 @@ class MainWindow(QMainWindow):
             button.setAutoExclusive(True)
         self._list_button.setChecked(True)
         self._last_similarity: Scores | None = None
-        self._filter = QLineEdit()
-        self._filter.setPlaceholderText("Quick filter (file, folder, type, tags…)")
-        self._filter.setClearButtonEnabled(True)
-        self._filter.textChanged.connect(self._on_filter_changed)
+        self._tag_bars = TagBars()
+        self._header_strip = VectorStrip(compact=True)
+        self._header_strip.setToolTip("The selected item's CLAP embedding, 512 stripes; the anchor's underneath.")
 
         # --- the list (samples, with sub-hit rows: §6.4, §9.4) ---
         self._samples = SampleTreeModel(self._render)
@@ -263,7 +279,11 @@ class MainWindow(QMainWindow):
         self._proxy.setSourceModel(self._samples)
         self._table = QTreeView()
         self._table.setModel(self._proxy)
-        self._table.setSortingEnabled(True)
+        self._table.setSortingEnabled(False)       # a header click opens its filter popup; the popup's buttons sort
+        self._header = FilterHeader(COLUMN_SPECS, self._table)
+        self._header.install_on(self._table)
+        self._header.sort_requested.connect(self._table.sortByColumn)
+        self._header.filter_changed.connect(self._on_column_filter)
         self._table.setUniformRowHeights(True)
         self._table.setRootIsDecorated(True)
         self._table.setExpandsOnDoubleClick(False)
@@ -351,11 +371,6 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(4, 4, 4, 4)
-        top = QHBoxLayout()
-        top.addWidget(self._list_button)
-        top.addWidget(self._map_button)
-        top.addWidget(self._filter, stretch=1)
-        left_layout.addLayout(top)
         left_layout.addWidget(tables, stretch=1)
         left_layout.addLayout(transport)
 
@@ -367,6 +382,7 @@ class MainWindow(QMainWindow):
         self._search_panel.search_cleared.connect(self._clear_search)
         self._search_panel.criteria_changed.connect(self._proxy.set_criteria)
         self._attributes.search_requested.connect(self._search_panel.search_for)   # a chip → the Search tab's box
+        self._tag_bars.tag_clicked.connect(self._search_panel.search_for)         # a bar in the header too
         self._waveform_panel.caption_requested.connect(self._caption_current)   # the caption line's button
         self._recompute = RecomputePanel(
             self._db_path, self._settings, encoder_factory, captioner_factory, parent=self
@@ -404,7 +420,31 @@ class MainWindow(QMainWindow):
             state = self._settings.value(key, None)
             if state:
                 splitter.restoreState(state)
-        self.setCentralWidget(body)
+        header_widget = QWidget()
+        header_widget.setObjectName("header")
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(6, 4, 6, 2)
+        header_layout.setSpacing(8)
+        switch = QVBoxLayout()
+        switch.setSpacing(2)
+        switch.addWidget(self._list_button)
+        switch.addWidget(self._map_button)
+        switch.addStretch(1)                         # room for a third button
+        bars_column = QVBoxLayout()
+        bars_column.setSpacing(2)
+        bars_column.addWidget(self._tag_bars, stretch=1)
+        bars_column.addWidget(self._header_strip)
+        header_layout.addLayout(switch)
+        header_layout.addLayout(bars_column, stretch=1)
+        header_widget.setFixedHeight(max(112, 3 * self._list_button.sizeHint().height() + 2 * 2 + 6 + 8))   # three buttons, or room for the bars
+        self._header_widget = header_widget
+        central = QWidget()
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(header_widget)
+        root.addWidget(body, stretch=1)
+        self.setCentralWidget(central)
 
         self.reload()
         self._restore_anchor()
@@ -546,7 +586,9 @@ class MainWindow(QMainWindow):
         segments = load_segments(self._conn, row.id)
         self._segments.set_rows(segments)
         self._segment_table.resizeColumnsToContents()
-        self._attributes.show_tags(load_tags(self._conn, row.id))
+        tags = load_tags(self._conn, row.id)
+        self._attributes.show_tags(tags)
+        self._tag_bars.show_tags(tags)
         self._waveform_panel.set_caption(load_caption(self._conn, row.id))
         attack_ms, decay_ms = self._envelope_marks(row.id)
         # The CLAP windows of a long file (§6.4) are drawn on the waveform as a
@@ -604,8 +646,11 @@ class MainWindow(QMainWindow):
         else:
             self._play_current()
 
-    def _on_filter_changed(self, text: str) -> None:
-        self._proxy.setFilterFixedString(text)
+    def _on_column_filter(self, column: int, column_filter) -> None:
+        """A filter from the list header's popup (2026-09-08): the list and
+        the map follow it."""
+        self._proxy.set_column_filter(column, column_filter)
+        self._header.set_filter(column, column_filter)
         self._sync_map_visibility()
 
     # --- the waveform panel and the difference readout (2026-09-07 steer) ---
@@ -635,9 +680,12 @@ class MainWindow(QMainWindow):
         """The selected item's CLAP vector as stripes, the anchor's beneath it."""
         if self._current_item is None:
             self._attributes.show_vector(None, None)
+            self._header_strip.show_vectors(None, None)
             return
         kind, item_id = self._current_item
-        self._attributes.show_vector(load_vector(self._conn, kind, item_id), self._anchor_vector)
+        vector = load_vector(self._conn, kind, item_id)
+        self._attributes.show_vector(vector, self._anchor_vector)
+        self._header_strip.show_vectors(vector, self._anchor_vector)
 
     def _select_segment_row(self, segment_id: int) -> None:
         """A click inside a segment on the waveform selects it in the table."""
