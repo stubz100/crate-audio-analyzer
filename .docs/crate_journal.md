@@ -978,3 +978,23 @@ The user: captioning is laborious — do it in parts, and for a single sample; a
 **Next**
 
 - Captions as a search channel (CLAP's text encoder against the sentences — measured complementary to the audio vectors); anchored-only Recompute attributes; Phase 9's marker editing.
+
+## 2026-09-08 — The CLAP box shows the tag scores
+
+**Phase:** 7 (Attributes tab) · TAGBARS_HASH
+
+The user: use the chips' scores in the CLAP scores box instead of the four calculated ones.
+
+**Done**
+
+- `EmbedSettings.top_k_tags` defaults to 0 = every tag: `classify` keeps all 32 cosines, best first, and `_write_tags` stores them; `load_tags` takes a `limit`. The user's index reclassified from the stored vectors (`crate-embed --reclassify`): 32 rows per sample.
+- The Attributes tab's box is *CLAP tag scores of the selected sample*: ten bars, tag and cosine ×100, best first, the prompt in the tooltip; the chips above stay the top five, clickable. The four prompt-set percentages are no longer displayed; they still feed the Search tab's *CLAP score at least* filter, whose tooltip says so.
+
+**Verified**
+
+- `uv run pytest tests -q` → **185 passed, 3 skipped**; pyflakes clean (the GUI test reads the bars: at most ten, sorted, 0–100).
+- The user's index: 4,568 samples × 32 tags; the box checked offscreen.
+
+**Next**
+
+- Captions as a search channel; anchored-only Recompute attributes; Phase 9's marker editing.

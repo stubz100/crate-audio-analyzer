@@ -198,17 +198,17 @@ def hit_label(start_ms: int, end_ms: int, window: bool = False) -> str:
     return f"hit @ {clock(start_ms)} ({length_ms} ms)"
 
 
-def load_tags(conn: sqlite3.Connection, sample_id: int) -> list[tuple[str, float]]:
-    """One sample's zero-shot chips, best first — the Attributes tab's
-    auto-tag chips (§5.2 "auto-suggested"); editing them is Phase 11."""
-    return [
-        (row[0], float(row[1]))
-        for row in conn.execute(
-            "SELECT tag_or_caption, score FROM text_tags "
-            "WHERE sample_id = ? AND source_model = 'clap-zeroshot' ORDER BY score DESC",
-            (sample_id,),
-        )
-    ]
+def load_tags(conn: sqlite3.Connection, sample_id: int, limit: int | None = None) -> list[tuple[str, float]]:
+    """One sample's zero-shot tags with their cosines, best first — the
+    Attributes tab's chips and its score bars (§5.2 "auto-suggested");
+    editing them is Phase 11. All 32 are stored since 2026-09-08."""
+    sql = (
+        "SELECT tag_or_caption, score FROM text_tags "
+        "WHERE sample_id = ? AND source_model = 'clap-zeroshot' ORDER BY score DESC"
+    )
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    return [(row[0], float(row[1])) for row in conn.execute(sql, (sample_id,))]
 
 
 def load_caption(conn: sqlite3.Connection, sample_id: int) -> str | None:

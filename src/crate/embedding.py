@@ -123,7 +123,7 @@ class EmbedSettings:
     embed_segments: bool = True             # §9.6 "Embed segments" (default On)
     min_segment_length_ms: int = 200        # §9.6 "Min length for segment embedding"
     confidence_threshold: float = 0.5       # node E: flag below this (4 classes → 0.25 is chance)
-    top_k_tags: int = 5
+    top_k_tags: int = 0                     # zero-shot tags stored per sample; 0 = all 32 (2026-09-08)
     checkpoint: str = DEFAULT_CHECKPOINT
     batch_size: int = 8
 
@@ -399,9 +399,9 @@ def classify(
     assigned = best if confidence >= settings.confidence_threshold else None
 
     tags: list[tuple[str, float]] = []
-    if prompts.tag_vectors.size and settings.top_k_tags:
+    if prompts.tag_vectors.size:
         sims = prompts.tag_vectors @ audio_vec
-        top = np.argsort(-sims)[: settings.top_k_tags]
+        top = np.argsort(-sims)[: settings.top_k_tags or None]   # every tag, best first, unless capped
         tags = [(prompts.tag_names[int(i)], float(sims[int(i)])) for i in top]
     return ZeroShot(
         assigned, best, confidence,

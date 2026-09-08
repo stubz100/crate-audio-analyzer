@@ -360,13 +360,13 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
         panel._tempo_min.setValue(0)
         assert window._proxy.rowCount() == 2
 
-        # CLAP's numbers, not a label: bars and a minimum-score filter (the list
-        # itself no longer carries them, 2026-09-08).
+        # CLAP's numbers, not a label: the tag scores as bars on Attributes, the
+        # four prompt-set numbers only as a minimum-score filter (2026-09-08).
         window._autoplay.setChecked(False)
         window._table.setCurrentIndex(window._proxy.index(0, 0))
-        values = window._attributes.clap_values()
-        assert all(values[name] is not None for name in ("rhythmic", "melodic", "vocal", "other"))
-        assert sum(values.values()) == pytest.approx(100, abs=3)
+        values = window._attributes.tag_values()                          # the tags' cosines, best first
+        assert 0 < len(values) <= 10 and list(values.values()) == sorted(values.values(), reverse=True)
+        assert all(0 <= v <= 100 for v in values.values())
         assert "Rhythmic" not in SampleTreeModel.COLUMNS
         panel._clap_min["rhythmic"].setValue(100)
         assert window._proxy.rowCount() == 0

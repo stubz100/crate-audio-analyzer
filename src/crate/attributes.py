@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .embedding import CLASS_PROMPTS, CONTENT_CLASSES, TAG_PROMPT
+from .embedding import CLASS_PROMPTS, TAG_PROMPT
 from .similarity import AXES, AXIS_LABELS
 from .theme import SqueezableWidget
 from .vectorstrip import VectorStrip
@@ -52,15 +52,17 @@ AXIS_HELP: dict[str, str] = {
                   "disagree. Also the space text search runs in.",
 }
 CLASS_HELP = (
-    "CLAP compares the sample's embedding (its first 10 s) with four sets of twelve "
-    "text prompts. Each set scores as its best-matching prompt; the four scores are "
-    "scaled by the model's logit scale and softmaxed into percentages that sum to 100. "
-    "Spec §4 called the largest of them the sample's class; these are the numbers behind it."
+    "CLAP compares the sample's embedding with four sets of twelve text prompts. Each set "
+    "scores as its best-matching prompt; the four scores are scaled by the model's logit "
+    "scale and softmaxed into percentages that sum to 100. Spec §4 called the largest of "
+    "them the sample's class; since 2026-09-08 the numbers feed only this filter."
 )
-CLAP_CAPTION = (
-    "Softmax over each prompt set's best prompt, in % (the four sum to 100). The chips "
-    f"above are raw cosines ×100 against “{TAG_PROMPT.format('…')}”."
+TAG_CAPTION = (
+    f"Cosine ×100 of the sample's CLAP embedding against each tag prompt “{TAG_PROMPT.format('…')}”, "
+    "best first — the numbers behind the chips above, ten of the thirty-two."
 )
+CHIP_COUNT = 5        # chips shown (click to search)
+TAG_BAR_COUNT = 10    # tag scores shown as bars
 
 
 def _prompts_text(name: str) -> str:
@@ -131,27 +133,26 @@ class AttributesPanel(QWidget):
         caption_row.addWidget(self._caption_button, alignment=Qt.AlignmentFlag.AlignTop)
         search_layout.addLayout(caption_row)
 
-        # (2b) CLAP's numbers for the selected sample — the four prompt sets
-        clap_group = QGroupBox("CLAP scores of the selected sample")
+        # (2b) CLAP's tag scores for the selected sample — the numbers behind the
+        # chips (2026-09-08, the user's steer: these instead of the four class numbers)
+        clap_group = QGroupBox("CLAP tag scores of the selected sample")
         clap_layout = QGridLayout(clap_group)
-        clap_caption = QLabel(CLAP_CAPTION)
+        clap_caption = QLabel(TAG_CAPTION)
         clap_caption.setWordWrap(True)
-        clap_caption.setToolTip(CLASS_HELP)
         clap_layout.addWidget(clap_caption, 0, 0, 1, 2)
-        self._clap_bars: dict[str, QProgressBar] = {}
-        for row, name in enumerate(CONTENT_CLASSES, start=1):
-            label = QLabel(name.capitalize())
-            label.setToolTip(_prompts_text(name))
+        self._tag_rows: list[tuple[QLabel, QProgressBar]] = []
+        for row in range(1, TAG_BAR_COUNT + 1):
+            label = QLabel("")
             bar = QProgressBar()
             bar.setRange(0, 100)
             bar.setTextVisible(True)
             bar.setMinimumWidth(60)
             bar.setFormat("n/a")
-            bar.setToolTip(_prompts_text(name))
             clap_layout.addWidget(label, row, 0)
             clap_layout.addWidget(bar, row, 1)
-            self._clap_bars[name] = bar
+            self._tag_rows.append((label, bar))
         clap_layout.setColumnStretch(1, 1)
+        self._show_tag_scores([])
 
         # (2c) the embedding itself: 512 numbers as colour stripes
         strip_group = QGroupBox("CLAP embedding — the 512 numbers")
@@ -264,27 +265,39 @@ class AttributesPanel(QWidget):
                 bar.setValue(int(round(min(max(value, 0.0), 1.0) * 100)))
                 bar.setFormat("%v %")
 
-    def show_clap(self, scores: Mapping[str, float]) -> None:
-        """The selected sample's four CLAP probabilities, as bars."""
-        for name, bar in self._clap_bars.items():
-            value = scores.get(name)
-            if value is None:
+    def _show_tag_scores(self, tags: list[tuple[str, float]]) -> None:
+        """The selected sample's best tag cosines, as bars (×100, best first)."""
+        for n, (label, bar) in enumerate(self._tag_rows):
+            if n < len(tags):
+                tag, score = tags[n]
+                label.setText(tag)
+                label.setToolTip(f"“{TAG_PROMPT.format(tag)}”: cosine {score:.3f}")
+                bar.setValue(int(round(min(max(score, 0.0), 1.0) * 100)))
+                bar.setFormat("%v")
+                label.show()
+                bar.show()
+            else:
+                label.setText("")
                 bar.setValue(0)
                 bar.setFormat("n/a")
-            else:
-                bar.setValue(int(round(min(max(value, 0.0), 1.0) * 100)))
-                bar.setFormat("%v %")
+                label.setVisible(n == 0)
+                bar.setVisible(n == 0)
 
     def show_vector(self, vector, anchor=None) -> None:
         self._strip.show_vectors(vector, anchor)
 
-    def clap_values(self) -> dict[str, int | None]:
+    def tag_values(self) -> dict[str, int]:
+        """What the tag bars show (tests read this): tag → cosine ×100."""
         return {
-            name: (None if bar.format() == "n/a" else bar.value())
-            for name, bar in self._clap_bars.items()
+            label.text(): bar.value()
+            for label, bar in self._tag_rows if label.text() and bar.format() != "n/a"
         }
 
     def show_tags(self, tags: list[tuple[str, float]]) -> None:
+        """All of a sample's tags, best first: the first few as chips, the
+        first ten as bars."""
+        self._show_tag_scores(tags[:TAG_BAR_COUNT])
+        tags = tags[:CHIP_COUNT]
         for button in self._tag_buttons:
             self._tags_grid.removeWidget(button)
             button.hide()                  # gone now, not at the next event-loop turn

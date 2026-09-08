@@ -519,7 +519,6 @@ class MainWindow(QMainWindow):
         self._segments.set_rows(segments)
         self._segment_table.resizeColumnsToContents()
         self._attributes.show_tags(load_tags(self._conn, row.id))
-        self._attributes.show_clap(row.clap_scores)
         self._attributes.show_caption(load_caption(self._conn, row.id))
         attack_ms, decay_ms = self._envelope_marks(row.id)
         # The CLAP windows of a long file (§6.4) are drawn on the waveform as a
