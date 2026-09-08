@@ -317,8 +317,8 @@ class RecomputePanel(QWidget):
         ))
         steps.addLayout(_step(
             self._step_ranking,
-            "the Similarity column: every sample's distance to the anchor, blended by the "
-            "weight bars — cheap, needs an anchor",
+            "rank the list against the anchor again with the weight bars as they are now — "
+            "pressing ⚓ on a row already ranks at once; this is for after moving the bars",
             [self._rank_whole, self._rank_visible],
         ))
         steps.addWidget(self._rank_note)

@@ -375,7 +375,7 @@ Two established interaction patterns — Atlas 2's spatial map, Sononym's sortab
 
 - **View switch** (`Map`/`List`), always visible.
 - **Preview**: whatever's selected loads here — waveform, play/stop.
-- **⚓ Anchor**: pins the current sample/segment as the comparison reference — unlocks the Attributes tab's per-axis ranges (§9.5) and is a prerequisite for Recompute ranking (§9.6).
+- **⚓ Anchor**: pins the current sample/segment as the comparison reference — unlocks the Attributes tab's per-axis ranges (§9.5) and is a prerequisite for Recompute ranking (§9.6). *(Since 2026-09-08, on the user's steer — "the whole idea of ranking and anchoring feels overdone": the anchor is a ⚓ at the start of every list row, sub-hit rows included. One click anchors that sample or hit **and ranks the list against it at once**, with the weight bars as they are; the anchor sorts to the top, the Similarity column appears, the map colours by it. There is no separate Anchor button any more (the A key anchors the selected row); ✕ clears the anchor and changes nothing else — the ranked order stays. Ranking is one vectorised pass over the feature table — measured 25 ms for 4.5k samples + 29k segments — so it needs neither incremental loading nor a cache; only the table's first load after a recompute takes a moment (0.6 s here, seconds at library scale) and runs on a thread, the newest click winning. This is within §9.6's policy: an explicit click, and cheap.)*
 - **Drag ↗**: native OS drag onto Bitwig; a not-yet-cached segment transparently triggers lazy render first.
 - **Manual markers**: draggable in/out points on the loaded waveform. Staged on drag, committed only via **Save segment** (never live), exempt from all automatic constraints (§6.3). **Delete segment** removes one — automatic or manual — deliberately, at any time.
 
@@ -390,6 +390,8 @@ One point per **sample** in scope (§9.6; segments never get their own point), p
 ### 9.4 List view
 
 Sortable/filterable table of the samples in scope (§9.6: the folders ticked on the Recompute tab; dormant folders' rows stay in the index unseen). Once anchored **and** ranked (§9.6), a **Similarity** column appears (stable until the next explicit recompute). Ranking results are **view state, not persisted** — they're cheap to regenerate and meaningless without their anchor. What *does* persist across restarts is the anchor itself and the weight settings, so a fresh session is one click from reproducing the same ranking rather than needing it stored. **Nested sub-hit rows**: a segment that's the actual best match appears as an indented "hit within `<parent>`" row under its parent — the concrete mechanism keeping segments findable without cluttering the default view.
+
+*(2026-09-08: the four CLAP columns left the list — the numbers stay on the Attributes tab as bars and as a minimum-score filter — and a ⚓ opens every row (§9.2): anchoring is ranking, the anchored row is the top of the list.)*
 
 *(Implemented 2026-09-07, Phase 7: a two-level list — samples, and under a sample at most one "↳ hit @ …" row ("↳ window @ …" when the best part of a long file is one of its CLAP windows, §6.4) when its best segment beats it for the current search or ranking; the parent inherits that score so it sorts by its best hit. A **Similarity** column appears once anchored and ranked, a **Match** column once searched; both are view state. Selecting or dragging a sub-hit previews / hands out the rendered segment. The anchor and the weights persist across restarts as specified; the anchor itself is a minimal ⚓ button in the transport row until Phase 9's header lands.)*
 
@@ -409,7 +411,7 @@ Policy: **no map layout, ranking, or attribute recomputation ever runs automatic
 
 | Action | What it does | Scope | Needs an anchor? |
 |---|---|---|---|
-| **Recompute ranking** | Re-sorts List's Similarity column by distance to the anchor | Library scope, or visible/filtered set only — no "anchored only" option, since ranking is *already* anchor-relative by construction; there's nothing to rank against just the anchor itself | Yes |
+| **Recompute ranking** | Re-sorts List's Similarity column by distance to the anchor *(since 2026-09-08 the ⚓ on a row ranks at once; this step re-ranks after the weight bars move)* | Library scope, or visible/filtered set only — no "anchored only" option, since ranking is *already* anchor-relative by construction; there's nothing to rank against just the anchor itself | Yes |
 | **Recompute map layout** | Re-projects to 2D | Anchored-only = cheap UMAP transform of just the anchor into the existing layout; library scope = full re-fit, expensive | No |
 | **Recompute attributes** | Re-runs analysis/embedding/classification/segmentation | Anchored-only, or library scope (sub-toggle: new/changed only, or force full re-index) | No |
 | **Rescan library** | Runs the file scanner (`A`) only: finds new/changed/removed files and flags derived rows that are now stale (`content_changed_at`, §8). Cheap — no decode, no model. "New/changed only" above consumes exactly this flag; nothing is recomputed until you press it | Always the whole root (the scanner never scopes, see below) | No |

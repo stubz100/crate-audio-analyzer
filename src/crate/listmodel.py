@@ -23,19 +23,28 @@ from pathlib import Path
 from PySide6.QtCore import (
     QAbstractItemModel,
     QAbstractTableModel,
+    QEvent,
     QMimeData,
     QModelIndex,
+    QPointF,
+    QRectF,
     QSortFilterProxyModel,
     Qt,
     QUrl,
+    Signal,
 )
+from PySide6.QtGui import QPainter, QPen
+from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from .catalog import Criteria, SampleRow, SegmentRow, hit_label
 from .similarity import Hit, Scores
+from .theme import ACCENT, TEXT, TEXT_DIM
 
 log = logging.getLogger(__name__)
 
 SORT_ROLE = Qt.ItemDataRole.UserRole  # raw values, so the proxy sorts numbers as numbers
+ANCHOR_ROLE = Qt.ItemDataRole.UserRole + 1   # True for the row that carries the ⚓
+ANCHOR_GLYPH_WIDTH = 24                       # the click zone at the start of every row
 _TOP = 0  # internalId of a top-level index; a sub-hit carries its parent's row + 1
 
 
@@ -55,13 +64,11 @@ def _score_cell(scores: Scores | None, kind: str, item_id: int, display: bool):
 class SampleTreeModel(QAbstractItemModel):
     """Samples, each with at most one sub-hit row underneath (§9.4)."""
 
-    COLUMNS = (
-        "File", "Folder", "Length", "Type", "Rhythmic", "Melodic", "Vocal", "Other",
-        "BPM", "Key", "Tags", "Hits", "Similarity", "Match",
-    )
-    CLAP_COLUMNS = {4: "rhythmic", 5: "melodic", 6: "vocal", 7: "other"}   # CLAP's numbers, not a label
-    COL_SIMILARITY = 12
-    COL_MATCH = 13
+    # The four CLAP columns left the list on 2026-09-08 (the user's steer): the
+    # numbers stay on the Attributes tab, as bars and as a filter.
+    COLUMNS = ("File", "Folder", "Length", "Type", "BPM", "Key", "Tags", "Hits", "Similarity", "Match")
+    COL_SIMILARITY = 8
+    COL_MATCH = 9
 
     def __init__(
         self,
@@ -75,6 +82,7 @@ class SampleTreeModel(QAbstractItemModel):
         self._similarity: Scores | None = None
         self._match: Scores | None = None
         self._hits: dict[int, Hit] = {}
+        self._anchor: tuple[str, int] | None = None     # (kind, id): the ⚓ row (§9.2)
 
     # --- data in ---
 
@@ -162,11 +170,10 @@ class SampleTreeModel(QAbstractItemModel):
             return None
         if role == Qt.ItemDataRole.DisplayRole:
             return self.COLUMNS[section]
-        if role == Qt.ItemDataRole.ToolTipRole and section in self.CLAP_COLUMNS:
+        if role == Qt.ItemDataRole.ToolTipRole and section == 0:
             return (
-                f"CLAP: how well the sample matches the “{self.CLAP_COLUMNS[section]}” prompt set, "
-                "as a softmax percentage over the four sets (they sum to 100). The prompts are "
-                "listed on the Attributes tab."
+                "⚓ at the start of a row anchors that sample (or hit) and ranks every "
+                "sample against it, with the weight bars as they are (§9.2)"
             )
         return None
 
@@ -182,6 +189,8 @@ class SampleTreeModel(QAbstractItemModel):
                 return None
             if role == Qt.ItemDataRole.ToolTipRole:
                 return f"{r.filepath} @ {hit.start_ms} ms"
+            if role == ANCHOR_ROLE:
+                return self._anchor == ("segment", hit.segment_id)
             if role not in (Qt.ItemDataRole.DisplayRole, SORT_ROLE):
                 return None
             length_s = (hit.end_ms - hit.start_ms) / 1000
@@ -192,13 +201,15 @@ class SampleTreeModel(QAbstractItemModel):
             if col == 3:
                 return "window" if hit.window else "hit"
             if col == self.COL_SIMILARITY:
-                return _score_cell(self._similarity, "segment", hit.segment_id, display)
+                return self._similarity_cell("segment", hit.segment_id, display)
             if col == self.COL_MATCH:
                 return _score_cell(self._match, "segment", hit.segment_id, display)
             return "" if display else None
         r = self._rows[index.row()]
         if role == Qt.ItemDataRole.ToolTipRole:
             return r.filepath
+        if role == ANCHOR_ROLE:
+            return self._anchor == ("sample", r.id)
         if role not in (Qt.ItemDataRole.DisplayRole, SORT_ROLE):
             return None
         if col == 0:
@@ -209,30 +220,48 @@ class SampleTreeModel(QAbstractItemModel):
             return _fmt_seconds(r.duration_s) if display else (r.duration_s if r.duration_s is not None else -1.0)
         if col == 3:
             return r.structural_type or ""
-        if col in self.CLAP_COLUMNS:
-            value = r.clap_scores.get(self.CLAP_COLUMNS[col])
-            if display:
-                return "" if value is None else f"{value * 100:.0f}"
-            return -1.0 if value is None else value
-        if col == 8:
+        if col == 4:
             if display:
                 return "" if r.tempo_bpm is None else f"{r.tempo_bpm:.0f}"
             return r.tempo_bpm if r.tempo_bpm is not None else -1.0
-        if col == 9:
+        if col == 5:
             return r.key or ""
-        if col == 10:
+        if col == 6:
             return r.tags
-        if col == 11:
+        if col == 7:
             if display:
                 if not r.segment_count:
                     return ""
                 return f"{r.segment_count}!" if r.flagged_segments else str(r.segment_count)
             return r.segment_count
         if col == self.COL_SIMILARITY:
-            return _score_cell(self._similarity, "sample", r.id, display)
+            return self._similarity_cell("sample", r.id, display)
         if col == self.COL_MATCH:
             return _score_cell(self._match, "sample", r.id, display)
         return None
+
+    def _similarity_cell(self, kind: str, item_id: int, display: bool):
+        """The anchor sorts above everything, even a sample identical to it
+        (both score 100): the ⚓ row is the top of the ranked list (§9.2)."""
+        cell = _score_cell(self._similarity, kind, item_id, display)
+        if not display and self._anchor == (kind, item_id) and cell >= 0:
+            return cell + 1.0
+        return cell
+
+    def set_anchor(self, item: tuple[str, int] | None) -> None:
+        """Which sample or hit carries the ⚓ (the delegate paints it)."""
+        if item == self._anchor:
+            return
+        self._anchor = item
+        if self._rows:
+            self.dataChanged.emit(
+                self.index(0, 0), self.index(len(self._rows) - 1, self.COL_SIMILARITY),
+                [ANCHOR_ROLE, SORT_ROLE],
+            )
+
+    @property
+    def anchor(self) -> tuple[str, int] | None:
+        return self._anchor
 
     def flags(self, index: QModelIndex):
         base = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
@@ -404,3 +433,63 @@ class SegmentTableModel(QAbstractTableModel):
         mime = QMimeData()
         mime.setUrls(urls)
         return mime
+
+
+def _paint_anchor(painter: QPainter, zone: QRectF, colour, bold: bool = False) -> None:
+    """A small anchor drawn with the pen — a text glyph would come out as a
+    colour emoji on Windows and ignore it: ring, stem, crossbar, flukes."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(colour, 2.0 if bold else 1.4)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    cx, cy = zone.center().x(), zone.center().y()
+    h = min(zone.height(), 18.0) - 5.0
+    top = cy - h / 2
+    r = h * 0.14
+    painter.drawEllipse(QPointF(cx, top + r), r, r)
+    painter.drawLine(QPointF(cx, top + 2 * r), QPointF(cx, top + h))
+    painter.drawLine(QPointF(cx - h * 0.3, top + h * 0.45), QPointF(cx + h * 0.3, top + h * 0.45))
+    painter.drawArc(QRectF(cx - h * 0.45, top + h * 0.3, h * 0.9, h * 0.7), 200 * 16, 140 * 16)
+    painter.restore()
+
+
+class AnchorDelegate(QStyledItemDelegate):
+    """The ⚓ at the start of every row of the list (2026-09-08, the user's
+    steer: anchoring and ranking should be one click on the row, not a
+    button, a tab and a step). Paints the File cell shifted right by a click
+    zone that shows the glyph — accent for the row that is the anchor, dim
+    otherwise, brighter under the mouse — and turns a click in that zone
+    into `anchor_clicked(index)`; the rest of the cell behaves as before."""
+
+    anchor_clicked = Signal(QModelIndex)
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802
+        zone = QRectF(option.rect.left(), option.rect.top(), ANCHOR_GLYPH_WIDTH, option.rect.height())
+        full = QStyleOptionViewItem(option)
+        self.initStyleOption(full, index)
+        full.text = ""
+        style = full.widget.style() if full.widget is not None else QStyle()
+        style.drawPrimitive(QStyle.PrimitiveElement.PE_PanelItemViewItem, full, painter, full.widget)
+        shifted = QStyleOptionViewItem(option)
+        shifted.rect = option.rect.adjusted(ANCHOR_GLYPH_WIDTH, 0, 0, 0)
+        super().paint(painter, shifted, index)
+        anchored = bool(index.data(ANCHOR_ROLE))
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        _paint_anchor(painter, zone, ACCENT if anchored else (TEXT if hovered else TEXT_DIM), bold=anchored)
+
+    def sizeHint(self, option, index):  # noqa: N802
+        size = super().sizeHint(option, index)
+        size.setWidth(size.width() + ANCHOR_GLYPH_WIDTH)
+        return size
+
+    def editorEvent(self, event, model, option, index) -> bool:  # noqa: N802
+        if (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+            and event.position().x() < option.rect.left() + ANCHOR_GLYPH_WIDTH
+        ):
+            self.anchor_clicked.emit(index)
+            return True
+        return super().editorEvent(event, model, option, index)

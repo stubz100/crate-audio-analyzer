@@ -52,7 +52,7 @@ from .catalog import (
 from .db import default_db_path, open_db
 from .embedding import ClapEncoder, EmbedSettings
 from .layout import LayoutSettings, fit_layout, load_current_layout, place_anchor
-from .listmodel import ListProxy, SampleTreeModel, SegmentTableModel
+from .listmodel import AnchorDelegate, ListProxy, SampleTreeModel, SegmentTableModel
 from .mapview import MapView
 from .library import scope_paths
 from .recompute import EncoderFactory, RecomputePanel, RunPlan
@@ -125,6 +125,32 @@ class Preview:
         return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
 
 
+class _FeatureThread(QThread):
+    """Builds the feature table (`similarity.FeatureTable.load`) on its own
+    connection, off the GUI thread; carries the reload generation it was
+    started under so a stale table is recognised."""
+
+    loaded = Signal(int, object)
+    failed = Signal(int, str)
+
+    def __init__(self, db_path: Path, generation: int, parent=None) -> None:
+        super().__init__(parent)
+        self._db_path = db_path
+        self._generation = generation
+
+    def run(self) -> None:  # worker thread
+        try:
+            conn = open_db(self._db_path)
+            try:
+                table = FeatureTable.load(conn)
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001 - shown in the status bar
+            self.failed.emit(self._generation, f"{type(exc).__name__}: {exc}")
+            return
+        self.loaded.emit(self._generation, table)
+
+
 class _EmbedTextThread(QThread):
     """Embeds one search query off the GUI thread. The first call loads
     CLAP — measured at 20 s on a cold start — and even a warm query is a
@@ -191,6 +217,9 @@ class MainWindow(QMainWindow):
         self._axis_by_sample: dict[int, dict[str, float]] = {}
         self._close_pending = False
         self._plan_steps: list[tuple[str, str | None]] = []   # the Recompute tab's Run, step by step
+        self._feature_thread: _FeatureThread | None = None
+        self._feature_generation = 0                            # bumped by reload(): a table loaded before is stale
+        self._feature_waiters: list = []                        # callbacks for when the table lands
         self._layout_dir = Path(self._cache_dir).parent / "layouts"
         self._rows_by_id: dict[int, object] = {}
         self._source_row_of: dict[int, int] = {}
@@ -218,6 +247,10 @@ class MainWindow(QMainWindow):
         self._table.setUniformRowHeights(True)
         self._table.setRootIsDecorated(True)
         self._table.setExpandsOnDoubleClick(False)
+        self._table.setMouseTracking(True)              # the ⚓ brightens under the mouse
+        self._anchor_delegate = AnchorDelegate(self._table)
+        self._anchor_delegate.anchor_clicked.connect(self._on_anchor_clicked)
+        self._table.setItemDelegateForColumn(0, self._anchor_delegate)
         header = self._table.header()
         header.setResizeContentsPrecision(200)   # measure a sample of rows, not all of them
         header.moveSection(header.visualIndex(SampleTreeModel.COL_MATCH), 1)
@@ -269,16 +302,13 @@ class MainWindow(QMainWindow):
         )
         self._now_playing = QLabel("")
         self._now_playing.setObjectName("nowPlaying")
-        self._anchor_button = QPushButton("⚓ Anchor")
-        self._anchor_button.setObjectName("anchor")
-        self._anchor_button.setToolTip(
-            "Pin the selected sample or hit as the comparison reference (§9.2): "
-            "unlocks the Attributes tab's distance ranges and Recompute ranking."
-        )
-        self._anchor_button.clicked.connect(self._anchor_current)
         self._anchor_label = QLabel("no anchor")
+        self._anchor_label.setToolTip(
+            "The comparison reference (§9.2): press ⚓ at the start of a row to anchor that "
+            "sample and rank the list against it (or press A on the selected row)."
+        )
         clear_anchor = QPushButton("✕")
-        clear_anchor.setToolTip("Clear the anchor")
+        clear_anchor.setToolTip("Clear the anchor — the list keeps its order")
         clear_anchor.setFixedWidth(28)
         clear_anchor.clicked.connect(self._clear_anchor)
         transport = QHBoxLayout()
@@ -286,11 +316,12 @@ class MainWindow(QMainWindow):
         transport.addWidget(stop_button)
         transport.addWidget(self._autoplay)
         transport.addWidget(self._now_playing, stretch=1)
-        transport.addWidget(self._anchor_button)
+        transport.addWidget(QLabel("⚓"))
         transport.addWidget(self._anchor_label)
         transport.addWidget(clear_anchor)
         transport.addWidget(QLabel("Drag a row into Bitwig ↗"))
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self._toggle_play)
+        QShortcut(QKeySequence(Qt.Key.Key_A), self, activated=self._anchor_current)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -349,6 +380,10 @@ class MainWindow(QMainWindow):
         self._samples.set_match(None)
         self._segments.set_rows([])
         self._features = None
+        self._feature_generation += 1
+        self._axis = None                                # the anchor's distances are redone below
+        self._axis_by_sample = {}
+        self._proxy.set_axis_lookup(lambda _sample_id: None)
         self._update_score_columns()
         self._load_map()
         for column in range(len(SampleTreeModel.COLUMNS)):
@@ -363,13 +398,51 @@ class MainWindow(QMainWindow):
             f"{counts['segments']} segments · {counts['windows']} CLAP windows · "
             f"{counts['embedded']} embedded · index: {self._db_path}"
         )
-        if self._anchor is not None and not self._apply_anchor(*self._anchor, announce=False):
-            self._clear_anchor()
+        if self._anchor is not None:
+            self._anchor_and_rank(*self._anchor)         # an anchored list is a ranked list (§9.2)
 
     def _ensure_features(self) -> FeatureTable:
         if self._features is None:
             self._features = FeatureTable.load(self._conn)
         return self._features
+
+    def _with_features(self, callback) -> None:
+        """Run `callback(features)` once the feature table is loaded — at once
+        when it is, else after a worker thread has built it (0.6 s for 4.5k
+        samples, seconds at library scale: never on the GUI thread). Every
+        caller waits its turn; a reload in the meantime discards the table
+        being built and starts over."""
+        if self._features is not None:
+            callback(self._features)
+            return
+        self._feature_waiters.append(callback)
+        if self._feature_thread is None:
+            self._start_feature_load()
+
+    def _start_feature_load(self) -> None:
+        self.statusBar().showMessage("loading the feature table (once after each recompute)…")
+        thread = _FeatureThread(self._db_path, self._feature_generation, self)
+        thread.loaded.connect(self._on_features_loaded)
+        thread.failed.connect(self._on_features_failed)
+        thread.finished.connect(thread.deleteLater)
+        self._feature_thread = thread
+        thread.start()
+
+    def _on_features_loaded(self, generation: int, table) -> None:
+        self._feature_thread = None
+        if generation != self._feature_generation:      # stale: built before a reload
+            if self._feature_waiters:
+                self._start_feature_load()
+            return
+        self._features = table
+        waiters, self._feature_waiters = self._feature_waiters, []
+        for callback in waiters:
+            callback(table)
+
+    def _on_features_failed(self, generation: int, error: str) -> None:
+        self._feature_thread = None
+        self._feature_waiters = []
+        self.statusBar().showMessage(f"feature table unavailable: {error}")
 
     def _render(self, segment_id: int) -> Path:
         return render_segment(self._conn, segment_id, self._cache_dir)
@@ -528,7 +601,35 @@ class MainWindow(QMainWindow):
         if self._current_item is None:
             self.statusBar().showMessage("select a sample or a hit first, then anchor it")
             return
-        self._apply_anchor(*self._current_item)
+        self._anchor_and_rank(*self._current_item)
+
+    def _on_anchor_clicked(self, index) -> None:
+        """The ⚓ at the start of a row (§9.2): that sample — or that hit — becomes
+        the anchor and the list is ranked against it, at once."""
+        source = self._proxy.mapToSource(index)
+        hit = self._samples.hit_at(source)
+        if hit is not None:
+            self._anchor_and_rank(KIND_SEGMENT, hit.segment_id)
+        else:
+            self._anchor_and_rank(KIND_SAMPLE, self._samples.row_at(source).id)
+
+    def _anchor_and_rank(self, kind: str, item_id: int) -> None:
+        """Anchor, then rank the scope against the anchor with the weight bars
+        as they are — one pass over the feature table (measured 2026-09-08:
+        25 ms for 4.5k samples + 29k segments), so nothing needs to be
+        incremental; only the table's first load waits on a thread. A newer
+        click while that load runs simply wins."""
+        self._feature_waiters = [w for w in self._feature_waiters if getattr(w, "anchor", False) is False]
+
+        def go(features) -> None:
+            if self._apply_anchor(kind, item_id, announce=False):
+                self._rank("whole")
+                self._table.scrollToTop()
+            elif self._anchor == (kind, item_id):
+                self._clear_anchor()
+
+        go.anchor = True
+        self._with_features(go)
 
     def _apply_anchor(self, kind: str, item_id: int, announce: bool = True) -> bool:
         """Pin `item` and compute every sample's and segment's per-axis
@@ -546,7 +647,8 @@ class MainWindow(QMainWindow):
         self._axis_by_sample = features.axis_distances_by_sample(self._axis)
         self._settings.setValue(SETTINGS_KEY_ANCHOR_KIND, kind)
         self._settings.setValue(SETTINGS_KEY_ANCHOR_ID, int(item_id))
-        self._anchor_label.setText(f"⚓ {label}")
+        self._anchor_label.setText(label)
+        self._samples.set_anchor((kind, item_id))
         self._proxy.set_axis_lookup(self._axis_by_sample.get)
         self._attributes.set_anchor_state(True)
         self._recompute.set_ranking_available(True, label)
@@ -555,9 +657,7 @@ class MainWindow(QMainWindow):
         self._update_difference()
         self._show_vector()
         if announce:
-            self.statusBar().showMessage(
-                f"anchored on {label} — distances ready; Recompute ranking (Recompute tab) to rank"
-            )
+            self.statusBar().showMessage(f"anchored on {label}")
         return True
 
     def _clear_anchor(self) -> None:
@@ -567,14 +667,13 @@ class MainWindow(QMainWindow):
         self._settings.remove(SETTINGS_KEY_ANCHOR_KIND)
         self._settings.remove(SETTINGS_KEY_ANCHOR_ID)
         self._anchor_label.setText("no anchor")
+        self._samples.set_anchor(None)
         self._proxy.set_axis_lookup(lambda _sample_id: None)
         self._attributes.set_anchor_state(False)
         self._recompute.set_ranking_available(False)
-        self._samples.set_similarity(None)
-        self._update_score_columns()
+        # The list keeps its order, its Similarity column and the map its halo
+        # (2026-09-08, the user's steer): un-anchoring changes nothing but the anchor.
         self._map.set_anchor(None)
-        self._map.set_halo(set())
-        self._update_badges()
         self._anchor_vector = None
         self._update_difference()
         self._show_vector()
@@ -585,8 +684,9 @@ class MainWindow(QMainWindow):
     def _restore_anchor(self) -> None:
         kind = self._settings.value(SETTINGS_KEY_ANCHOR_KIND, "", type=str)
         item_id = self._settings.value(SETTINGS_KEY_ANCHOR_ID, 0, type=int)
-        if kind and item_id and not self._apply_anchor(kind, item_id, announce=False):
-            self._clear_anchor()
+        if kind and item_id:
+            self._anchor = (kind, item_id)
+            self._anchor_and_rank(kind, item_id)     # the table loads on a thread; the list ranks when it lands
 
     def _rank(self, scope: str) -> None:
         """§9.6 *Recompute ranking*: blend the anchor distances with the
@@ -618,7 +718,7 @@ class MainWindow(QMainWindow):
         if not self._samples.has_match:
             self._map.set_scores(scores.sample, "similarity to the anchor")
         self.statusBar().showMessage(
-            f"ranked {len(scores.sample)} samples against {self._anchor_label.text()} "
+            f"ranked {len(scores.sample)} samples against ⚓ {self._anchor_label.text()} "
             f"({len(scores.hits)} hits inside longer samples)"
         )
 
@@ -658,7 +758,10 @@ class MainWindow(QMainWindow):
             self._search(pending)
 
     def _apply_search(self, text: str, query) -> None:
-        scores = self._ensure_features().search(query, set(self._rows_by_id))   # the scope (§9.6)
+        self._with_features(lambda features: self._score_search(text, query, features))
+
+    def _score_search(self, text: str, query, features: FeatureTable) -> None:
+        scores = features.search(query, set(self._rows_by_id))   # the scope (§9.6)
         self._samples.set_match(scores)
         self._update_score_columns()
         self._table.sortByColumn(SampleTreeModel.COL_MATCH, Qt.SortOrder.DescendingOrder)
@@ -768,7 +871,7 @@ class MainWindow(QMainWindow):
                 self._plan_steps = []
                 return
             if step == "ranking":
-                self._rank(option or "whole")               # on this thread: no job to wait for
+                self._with_features(lambda _t, o=option: self._rank(o or "whole"))   # after the reload's table
 
     def _run_layout(self, mode: str) -> bool:
         """§9.6 the *Map layout* step: a full re-fit over the folders in
@@ -826,6 +929,8 @@ class MainWindow(QMainWindow):
         self._waveform.wait_for_load()
         if self._search_thread is not None:
             self._search_thread.wait()           # a model load cannot be interrupted
+        if self._feature_thread is not None:
+            self._feature_thread.wait()
         self._recompute.index_changed.disconnect(self.reload)
         self._recompute.save_settings()
         self._recompute.shutdown()

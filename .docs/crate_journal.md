@@ -854,3 +854,34 @@ The user's decision on the scope question: the library root and the scope list b
 **Next**
 
 - Anchored-only Recompute attributes (the rest of Phase 8); Phase 5; Phase 9.
+
+## 2026-09-08 — ⚓ on every row: anchoring is ranking; the CLAP columns leave the list; UMAP's seed warning
+
+**Phase:** 7 / 9 (anchor and ranking, reshaped) · ANCHOR_HASH
+
+The user reported UMAP's "n_jobs value 1 overridden to 1 by setting random_state" at the end of a recompute cycle, and found the anchor-then-rank ceremony overdone: take the CLAP columns out of the list, put a button at the start of each row that anchors and ranks at once, let the anchored sample jump to the top, un-anchoring changing nothing, a new anchor superseding a running one — with lazy loading, parallelism or a per-sample cache if the computation needs it.
+
+**Done**
+
+- **Measured first.** On the user's index (4,568 samples + 28,664 segments, 3,874 of them CLAP windows): the feature table loads in 0.6 s, the anchor's per-axis distances take 13 ms and a full ranking with the fold 12 ms. Ranking is one vectorised pass; nothing about it needs to be incremental, parallel or cached — only the table's first load after a recompute is worth a thread (it scales linearly: seconds at 110k files).
+- **The ⚓ column** (`listmodel.AnchorDelegate`): the File cell is painted shifted right by a 24-px click zone showing ⚓ — accent on the anchored row, dim otherwise, brighter under the mouse — for sample rows and sub-hit rows alike; a click there emits `anchor_clicked`. `ANCHOR_ROLE` tells the delegate which row carries it; the anchor's Similarity sort value is bumped so it sits above even an identical sample. The A key anchors the selected row; the transport's Anchor button is gone, its label and ✕ remain.
+- **Anchor = rank** (`main.py`): `_anchor_and_rank` applies the anchor, ranks the scope with the bars as they are, scrolls to the top; the restored anchor at start-up ranks the list the same way, and so does the reload after a job. `_with_features` queues callbacks until the table lands from `_FeatureThread` (own connection, off the GUI thread); `reload` bumps a generation so a table built before it is discarded; a newer ⚓ click drops an older pending one. Text search and the Recompute tab's Ranking step go through the same queue, so nothing blocks the window on a table load.
+- **✕ changes nothing but the anchor**: the Similarity column, its order and the map's halo stay; only the anchor mark, the ranges and the difference bars go.
+- **The list**: Rhythmic / Melodic / Vocal / Other columns removed (the bars and the "CLAP score at least" filter on the Attributes tab keep the numbers); `COL_SIMILARITY` 8, `COL_MATCH` 9.
+- **UMAP**: `n_jobs=1` passed explicitly with the seed — a seeded fit is single-threaded by UMAP's design and it warns when `n_jobs` is left at its default of −1 (its message prints the value after overriding it); the seed stays because it is what makes "layout #N" reproducible.
+- The Recompute tab's Ranking step is now described as what it is for: re-ranking after the weight bars move.
+
+**Decided**
+
+- No incremental ranking, no per-sample cache: at 25 ms there is nothing to hide, and a cache of anchor-specific distances (every sample × every item) would be far larger than the table it is derived from. If the first load ever matters at library scale, the table itself is what to cache (a `.npz` next to the layouts), not the rankings.
+- Anchoring ranks with the bars as they are; moving a bar does not re-rank live (the §9.6 policy: no work on a slider drag) — the Ranking step, or another ⚓ click, does.
+- The reload after a job re-anchors and re-ranks: an anchored list is a ranked list, before and after a recompute.
+
+**Verified**
+
+- `uv run pytest tests -q` → **180 passed, 2 skipped**; pyflakes clean. The anchor test now: zero weights → anchored but told there is nothing to blend; bars up → ranked with the anchor first at 100; ⚓ on another row → anchored and on top in one click; ✕ → the order and the column stay; ⚓ again → back on top; a restarted window comes up ranked against the restored anchor. The map and Run tests wait for the threaded table load.
+- The user's index, offscreen: ⚓ on a row of the 4,568 in scope — anchored, ranked, on top — the glyph column drawn.
+
+**Next**
+
+- Anchored-only Recompute attributes; Phase 5; Phase 9's marker editing.

@@ -88,6 +88,13 @@ def _proxy_row_named(window, name: str) -> int:
     )
 
 
+def _anchor_current(app, window) -> None:
+    """Anchor the selected row (the A shortcut / a click on its ⚓) and wait for
+    the feature table's first load, which happens on a thread."""
+    window._anchor_current()
+    _wait_until(app, lambda: window._feature_thread is None and not window._feature_waiters)
+
+
 def _run_ranking(window) -> None:
     """Press Run on the Recompute tab with only the Ranking step ticked —
     ranking runs on the GUI thread, so it is done when this returns."""
@@ -211,7 +218,7 @@ def test_text_search_scores_the_list_and_nests_a_sub_hit(app, index, tmp_path):
         window._autoplay.setChecked(False)
         window._attributes.search_for("kick drum")
         assert window._search_thread is not None                # embedding runs off the GUI thread
-        _wait_until(app, lambda: window._search_thread is None)
+        _wait_until(app, lambda: window._search_thread is None and window._samples.has_match)
 
         assert not window._table.isColumnHidden(SampleTreeModel.COL_MATCH)
         assert "kick drum" in window.statusBar().currentMessage()
@@ -262,18 +269,18 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         assert not window._attributes._ranges_group.isEnabled()
         assert not window._recompute._step_ranking.isEnabled()
 
+        for slider in window._attributes._weight_sliders.values():
+            slider.setValue(0)
         window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
-        window._anchor_current()
+        _anchor_current(app, window)                               # anchors, then ranks at once…
 
         assert window._anchor_label.text().endswith("loop.wav")
+        assert window._samples.anchor == ("sample", window._rows_by_id and next(
+            r.id for r in window._rows_by_id.values() if r.filename == "loop.wav"))
         assert window._attributes._ranges_group.isEnabled()
         assert window._recompute._step_ranking.isEnabled()
         assert "loop.wav" in window._recompute._rank_note.text()
-
-        for slider in window._attributes._weight_sliders.values():
-            slider.setValue(0)
-        _run_ranking(window)                                       # nothing to blend: told, not silent
-        assert "weight" in window.statusBar().currentMessage()
+        assert "weight" in window.statusBar().currentMessage()        # … but nothing to blend: told
         assert window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
         for slider in window._attributes._weight_sliders.values():
             slider.setValue(100)
@@ -283,6 +290,18 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         assert window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"   # the anchor itself first
         assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_SIMILARITY)) == "100"
         assert "ranked 2 samples" in window.statusBar().currentMessage()
+
+        # ⚓ on another row: anchored and ranked in one click, that row on top;
+        # ✕ leaves the ranked list as it is.
+        window._anchor_delegate.anchor_clicked.emit(window._proxy.index(_proxy_row_named(window, "hit.wav"), 0))
+        assert window._anchor_label.text().endswith("hit.wav")
+        assert window._proxy.data(window._proxy.index(0, 0)) == "hit.wav"
+        assert "ranked 2 samples" in window.statusBar().currentMessage()
+        window._clear_anchor()
+        assert window._anchor is None and not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
+        assert window._proxy.data(window._proxy.index(0, 0)) == "hit.wav"
+        window._anchor_delegate.anchor_clicked.emit(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
+        assert window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"
 
         values = window._attributes.difference_values()                 # the anchor vs itself
         assert values["amplitude"] == 0 and values["pitch"] is None      # ... and clicks have no pitch
@@ -310,11 +329,13 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
     finally:
         window.close()
 
-    # The anchor survives a restart (§9.4).
+    # The anchor survives a restart (§9.4) — and the list comes up ranked against it.
     again = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
     try:
+        _wait_until(app, lambda: again._feature_thread is None and not again._feature_waiters)
         assert again._anchor is not None and again._anchor_label.text().endswith("loop.wav")
         assert again._attributes._ranges_group.isEnabled()
+        assert not again._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
         again._clear_anchor()
         assert again._anchor is None and not again._attributes._ranges_group.isEnabled()
     finally:
@@ -345,13 +366,14 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
         panel._tempo_min.setValue(0)
         assert window._proxy.rowCount() == 2
 
-        # CLAP's numbers, not a label: four sortable columns, bars, a minimum-score filter.
+        # CLAP's numbers, not a label: bars and a minimum-score filter (the list
+        # itself no longer carries them, 2026-09-08).
         window._autoplay.setChecked(False)
         window._table.setCurrentIndex(window._proxy.index(0, 0))
         values = panel.clap_values()
         assert all(values[name] is not None for name in ("rhythmic", "melodic", "vocal", "other"))
         assert sum(values.values()) == pytest.approx(100, abs=3)
-        assert window._proxy.data(window._proxy.index(0, 4)).isdigit()
+        assert "Rhythmic" not in SampleTreeModel.COLUMNS
         panel._clap_min["rhythmic"].setValue(100)
         assert window._proxy.rowCount() == 0
         panel._clap_min["rhythmic"].setValue(0)
@@ -480,7 +502,7 @@ def test_run_executes_the_ticked_steps_in_order(app, tmp_path):
         assert window._map.point_count == 3 and not window._plan_steps
 
         window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
-        window._anchor_current()
+        _anchor_current(app, window)
         assert panel._step_ranking.isEnabled()
         panel._layout_anchored.setChecked(True)
         assert panel.plan() == RunPlan(attributes=True, layout="anchored", ranking="whole")
@@ -614,13 +636,12 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         assert window._map._selected == loop_id
 
         window._attributes.search_for("kick drum")               # the loop's hit is a segment
-        _wait_until(app, lambda: window._search_thread is None)
+        _wait_until(app, lambda: window._search_thread is None and window._samples.has_match)
         assert loop_id in window._map._badges
         window._attributes._clear_search()
         assert loop_id not in window._map._badges
 
-        window._anchor_current()                                  # the loop is current
-        _run_ranking(window)
+        _anchor_current(app, window)                              # the loop is current: anchored + ranked
         assert window._map._anchor == loop_id
         assert window._map._halo and loop_id not in window._map._halo
         assert "fit under other weights" not in window._map._caption

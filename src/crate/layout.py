@@ -139,6 +139,8 @@ def make_reducer(settings: LayoutSettings, n_samples: int) -> tuple[object, str]
             n_neighbors=n_neighbors,
             min_dist=settings.min_dist,
             random_state=settings.random_seed,
+            n_jobs=1,   # a seeded fit is single-threaded by UMAP's design (it warns otherwise);
+                        # the seed is what makes "layout #N" reproducible (map_layout.random_seed)
         ),
         "umap",
     )
