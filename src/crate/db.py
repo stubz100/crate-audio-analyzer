@@ -21,7 +21,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # The third kind of segment (spec §6.4): one of the 10-s CLAP windows a file
 # longer than the model's input is embedded through, kept with its vector so a
@@ -43,6 +43,10 @@ WINDOW_METHOD = "window"
 #      rebuild of `segments`, since the value lives in a CHECK constraint
 # v9 = `libraries` (spec §9.6): the folders the index knows, with their root and
 #      in-scope flags — the Library panel's list, seeded from the index + settings
+# v10 = `samples.id` and `segments.id` AUTOINCREMENT (2026-09-08): a redone or
+#      re-scanned row never takes an id a deleted row had — the anchor, the
+#      settings and `map_position` hold ids across recomputes. A rebuild of
+#      both tables, since a PRIMARY KEY cannot be altered in place
 
 
 def scope_clause(
@@ -70,6 +74,20 @@ def scope_clause(
     return f" AND ({clause})", params
 
 
+def ids_clause(ids: Iterable[int] | None, column: str = "s.id") -> tuple[str, list[int]]:
+    """SQL restricting `column` to the given ids — the §9.6 *⚓ anchored
+    sample only* scope and *Caption this sample*: these and nothing else.
+    None means no restriction and returns `("", [])`; an empty sequence
+    matches nothing (` AND 0`), so "these" never silently widens.
+    """
+    if ids is None:
+        return "", []
+    values = [int(i) for i in ids]
+    if not values:
+        return " AND 0", []
+    return f" AND {column} IN ({','.join('?' for _ in values)})", values
+
+
 def now_iso() -> str:
     """Current UTC time as ISO-8601 with microseconds — the shared timestamp
     format for every table, so string comparison orders correctly."""
@@ -90,7 +108,7 @@ def default_db_path() -> Path:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (              -- audio files only (spec §8)
-    id                       INTEGER PRIMARY KEY,
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,  -- never reused (v10)
     filepath                 TEXT NOT NULL UNIQUE, -- absolute path, native separators
     filename                 TEXT NOT NULL,
     folder                   TEXT NOT NULL DEFAULT '',
@@ -175,7 +193,7 @@ CREATE TABLE IF NOT EXISTS classification (        -- samples only (spec §8), P
 -- pair — never a row in `samples`. Every sample-facing query (map, list,
 -- filters) can ignore these tables entirely (§6.4).
 CREATE TABLE IF NOT EXISTS segments (
-    id                INTEGER PRIMARY KEY,
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,  -- never reused (v10)
     sample_id         INTEGER NOT NULL
                       REFERENCES samples(id) ON DELETE CASCADE,
     start_ms          INTEGER NOT NULL,
@@ -362,14 +380,21 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
     _add_column(conn, "segments", "needs_review", "INTEGER NOT NULL DEFAULT 0")
 
 
-def _segments_ddl(table: str) -> str:
-    """SCHEMA's `segments` definition under another table name — the one
-    source of truth for the table's shape, so a rebuild cannot drift."""
-    start = SCHEMA.index("CREATE TABLE IF NOT EXISTS segments (")
+def _table_ddl(name: str, new_name: str) -> str:
+    """SCHEMA's definition of `name` under another table name — the one
+    source of truth for a table's shape, so a rebuild cannot drift."""
+    head = f"CREATE TABLE IF NOT EXISTS {name} ("
+    start = SCHEMA.index(head)
     end = SCHEMA.index("\n);", start) + 3
-    return SCHEMA[start:end].replace(
-        "CREATE TABLE IF NOT EXISTS segments (", f"CREATE TABLE {table} (", 1
-    )
+    return SCHEMA[start:end].replace(head, f"CREATE TABLE {new_name} (", 1)
+
+
+def ids_autoincrement(conn: sqlite3.Connection, table: str) -> bool:
+    """Whether `table`'s ids are AUTOINCREMENT (v10) — read from the stored DDL."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return row is not None and re.search(r"PRIMARY\s+KEY\s+AUTOINCREMENT", row[0], re.IGNORECASE) is not None
 
 
 def segments_accept_windows(conn: sqlite3.Connection) -> bool:
@@ -384,38 +409,63 @@ def segments_accept_windows(conn: sqlite3.Connection) -> bool:
     return match is not None and "'window'" in match.group(1)
 
 
-def _migrate_v8(conn: sqlite3.Connection) -> None:
-    """`segments.detection_method` gains 'window' (spec §6.4). The allowed
-    values are a CHECK constraint, which SQLite cannot alter in place, so the
-    table is rebuilt the documented way — create the new shape, copy, drop
-    the old, rename — with foreign keys OFF for the duration: with them on,
-    DROP TABLE would cascade through every segment_analysis /
-    segment_embedding / segment_classification / map_position row."""
-    if not _columns(conn, "segments") or segments_accept_windows(conn):
-        return
+def _rebuild_table(conn: sqlite3.Connection, table: str, indexes: tuple[str, ...] = ()) -> None:
+    """Rebuild `table` to SCHEMA's current shape the documented way — create
+    the new shape, copy every column both have (ids included), drop the old,
+    rename — for what SQLite cannot alter in place (a CHECK constraint, a
+    PRIMARY KEY). Foreign keys are OFF for the duration: with them on, DROP
+    TABLE would cascade through every dependent row. `indexes`: the CREATE
+    INDEX statements SCHEMA has for the table (SCHEMA ran before this)."""
     conn.commit()                                   # a PRAGMA inside a transaction is ignored
     conn.execute("PRAGMA foreign_keys = OFF")
     if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 0:
-        raise RuntimeError("could not switch foreign keys off for the segments rebuild")
+        raise RuntimeError(f"could not switch foreign keys off for the {table} rebuild")
     try:
         conn.execute("BEGIN")
-        conn.execute(_segments_ddl("segments_new"))
-        new_columns = [r[1] for r in conn.execute("PRAGMA table_info(segments_new)")]
-        old_columns = _columns(conn, "segments")
+        conn.execute(_table_ddl(table, f"{table}_new"))
+        new_columns = [r[1] for r in conn.execute(f"PRAGMA table_info({table}_new)")]
+        old_columns = _columns(conn, table)
         columns = ", ".join(c for c in new_columns if c in old_columns)
-        conn.execute(f"INSERT INTO segments_new ({columns}) SELECT {columns} FROM segments")
-        conn.execute("DROP TABLE segments")
-        conn.execute("ALTER TABLE segments_new RENAME TO segments")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_segments_sample ON segments(sample_id)")
+        conn.execute(f"INSERT INTO {table}_new ({columns}) SELECT {columns} FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+        for statement in indexes:
+            conn.execute(statement)
         dangling = conn.execute("PRAGMA foreign_key_check").fetchall()
         if dangling:
-            raise RuntimeError(f"segments rebuild left {len(dangling)} dangling foreign keys")
+            raise RuntimeError(f"{table} rebuild left {len(dangling)} dangling foreign keys")
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
+
+
+_SEGMENTS_INDEXES = ("CREATE INDEX IF NOT EXISTS idx_segments_sample ON segments(sample_id)",)
+
+
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """`segments.detection_method` gains 'window' (spec §6.4). The allowed
+    values are a CHECK constraint, which SQLite cannot alter in place, so the
+    table is rebuilt."""
+    if not _columns(conn, "segments") or segments_accept_windows(conn):
+        return
+    _rebuild_table(conn, "segments", _SEGMENTS_INDEXES)
+
+
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """`samples.id` and `segments.id` become AUTOINCREMENT (2026-09-08). A
+    plain INTEGER PRIMARY KEY hands a new row the largest id in use plus one,
+    so a re-detected segment — or a folder scanned in after another was
+    removed — could take an id a deleted row had, and the persisted anchor,
+    the settings or a `map_position` would silently point at something else
+    (seen the day ⚓ anchored-only Recompute attributes was built: the anchored
+    hit was redone and its id came back on a different span). A PRIMARY KEY
+    cannot be altered in place: both tables are rebuilt, ids kept."""
+    for table, indexes in (("samples", ()), ("segments", _SEGMENTS_INDEXES)):
+        if _columns(conn, table) and not ids_autoincrement(conn, table):
+            _rebuild_table(conn, table, indexes)
 
 
 _MIGRATIONS: dict[int, list] = {
@@ -427,6 +477,7 @@ _MIGRATIONS: dict[int, list] = {
     7: [],              # v6 -> v7: map_layout + map_position; CREATE IF NOT EXISTS covers it
     8: [_migrate_v8],   # v7 -> v8: segments.detection_method accepts 'window' (table rebuild)
     9: [],              # v8 -> v9: libraries; CREATE IF NOT EXISTS covers it, the panel seeds it
+    10: [_migrate_v10], # v9 -> v10: samples.id / segments.id AUTOINCREMENT (table rebuilds)
 }
 
 

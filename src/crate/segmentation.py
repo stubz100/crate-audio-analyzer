@@ -58,7 +58,7 @@ from .analysis import (
     describe_buffer,
     load_audio,
 )
-from .db import now_iso, scope_clause
+from .db import ids_clause, now_iso, scope_clause
 
 log = logging.getLogger(__name__)
 
@@ -639,6 +639,7 @@ def segment_pending(
     scope: Sequence[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
     workers: int = 1,
+    sample_ids: Sequence[int] | None = None,
 ) -> SegmentationSummary:
     """Run nodes `S` + `T` over samples that need it.
 
@@ -651,7 +652,8 @@ def segment_pending(
     `scope` (folders, §9.6) limits the visit to files under them; None is
     everything. `should_stop` is polled before each sample. `workers` above 1
     fans the decode + detection out to worker processes (`parallel.py`);
-    the index is still written here.
+    the index is still written here. `sample_ids`: these samples and
+    nothing else (§9.6 anchored only); None = no restriction.
     """
     settings = settings or SegmentationSettings()
     summary = SegmentationSummary()
@@ -671,7 +673,9 @@ def segment_pending(
             "      OR s.segments_detected_at < s.content_changed_at)"
         )
     scope_sql, params = scope_clause(scope)
-    sql += scope_sql + " ORDER BY s.id"
+    ids_sql, ids_params = ids_clause(sample_ids)
+    sql += scope_sql + ids_sql + " ORDER BY s.id"
+    params += ids_params
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     worklist = conn.execute(sql, params).fetchall()

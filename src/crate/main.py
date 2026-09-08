@@ -217,6 +217,7 @@ class MainWindow(QMainWindow):
         self._current: Path | None = None
         self._current_item: tuple[str, int] | None = None
         self._anchor: tuple[str, int] | None = None
+        self._anchor_parent: int | None = None    # the anchor's sample (a hit's parent)
         self._anchor_vector = None
         self._axis = None
         self._axis_by_sample: dict[int, dict[str, float]] = {}
@@ -437,6 +438,15 @@ class MainWindow(QMainWindow):
                 finally:
                     self._quiet_select = False
         if self._anchor is not None:
+            kind, item_id = self._anchor
+            if (
+                kind == KIND_SEGMENT and self._parent_of_segment(item_id) is None
+                and self._anchor_parent in self._rows_by_id
+            ):
+                # The anchored hit was an automatic segment the recompute replaced
+                # (re-detection writes new rows, §6.2): its parent takes the anchor.
+                self._anchor = (KIND_SAMPLE, self._anchor_parent)
+                self._recompute.note("the anchored hit was redone: anchored on its parent instead")
             self._anchor_and_rank(*self._anchor)         # an anchored list is a ranked list (§9.2)
 
     def _ensure_features(self) -> FeatureTable:
@@ -709,9 +719,10 @@ class MainWindow(QMainWindow):
         self._anchor_label.setText(label)
         self._samples.set_anchor((kind, item_id))
         self._proxy.set_axis_lookup(self._axis_by_sample.get)
+        self._anchor_parent = self._anchor_sample_id()
         self._search_panel.set_anchor_state(True)
-        self._recompute.set_anchor_available(True, label)
-        self._map.set_anchor(self._anchor_sample_id())
+        self._recompute.set_anchor_available(True, label, self._anchor_parent)
+        self._map.set_anchor(self._anchor_parent)
         self._anchor_vector = load_vector(self._conn, kind, item_id)
         self._update_difference()
         self._show_vector()
@@ -721,6 +732,7 @@ class MainWindow(QMainWindow):
 
     def _clear_anchor(self) -> None:
         self._anchor = None
+        self._anchor_parent = None
         self._axis = None
         self._axis_by_sample = {}
         self._settings.remove(SETTINGS_KEY_ANCHOR_KIND)

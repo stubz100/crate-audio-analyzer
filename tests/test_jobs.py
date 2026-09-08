@@ -15,6 +15,7 @@ from test_embedding import FakeEncoder
 from crate.db import open_db
 from crate.jobs import RecomputeSettings, recompute_attributes
 from crate.scanner import scan_library
+from crate.segmentation import SegmentationSettings
 
 SR = 22050
 
@@ -176,3 +177,38 @@ def test_a_failing_model_load_keeps_the_earlier_stages_in_the_report(library):
     assert any("embedding stage failed" in note and "OSError" in note for note in report.notes)
     assert "[analysis]" in report.format() and "[embedding] not run" in report.format()
 
+
+
+def _auto_segments(conn) -> dict[int, int]:
+    return dict(conn.execute(
+        "SELECT sample_id, COUNT(*) FROM segments WHERE detection_method = 'auto' GROUP BY sample_id"
+    ).fetchall())
+
+
+def test_anchored_only_redoes_one_sample_and_nothing_else(library):
+    """§9.6 *⚓ anchored sample only*: no folder scope needed, every stage
+    again for that sample under the settings as they are (a changed cap shows
+    at once), the other samples untouched, one worker."""
+    conn, lib = library
+    recompute_attributes(conn, RecomputeSettings(scope=(str(lib),)), encoder=FakeEncoder())
+    loop_id = conn.execute("SELECT id FROM samples WHERE filename = 'loop.wav'").fetchone()[0]
+    stamps = dict(conn.execute("SELECT sample_id, analyzed_at FROM analysis").fetchall())
+    before = _auto_segments(conn)
+    assert before.get(loop_id, 0) > 1
+
+    report = recompute_attributes(
+        conn,
+        RecomputeSettings(                                     # no scope: the anchor is the scope
+            sample_ids=(loop_id,), segmentation=SegmentationSettings(max_segments=1), workers=4,
+        ),
+        encoder=FakeEncoder(),
+    )
+    assert report.analysis.analyzed == 1 and report.segmentation.samples_segmented == 1
+    assert report.embedding.samples_embedded == 1 and not report.stopped
+
+    after = _auto_segments(conn)
+    assert after[loop_id] == 1
+    assert {k: v for k, v in after.items() if k != loop_id} == {k: v for k, v in before.items() if k != loop_id}
+    now = dict(conn.execute("SELECT sample_id, analyzed_at FROM analysis").fetchall())
+    assert now[loop_id] != stamps[loop_id]
+    assert all(now[k] == stamps[k] for k in stamps if k != loop_id)

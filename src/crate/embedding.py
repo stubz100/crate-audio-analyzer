@@ -44,7 +44,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .db import WINDOW_METHOD, now_iso, scope_clause
+from .db import WINDOW_METHOD, ids_clause, now_iso, scope_clause
 
 log = logging.getLogger(__name__)
 
@@ -612,6 +612,7 @@ def embed_pending(
     progress_every: int = 50,
     scope: Sequence[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    sample_ids: Sequence[int] | None = None,
 ) -> EmbedSummary:
     """Nodes D, C2, X, E over samples that need them.
 
@@ -626,7 +627,8 @@ def embed_pending(
     third does after computing the windows.
 
     `scope` (folders, §9.6) limits the visit to files under them; None is
-    everything. `should_stop` is polled before each sample.
+    everything. `should_stop` is polled before each sample. `sample_ids`:
+    these samples and nothing else (§9.6 anchored only); None = no restriction.
     """
     settings = settings or EmbedSettings()
     encoder = encoder or ClapEncoder(settings.checkpoint, settings.batch_size)
@@ -662,8 +664,9 @@ def embed_pending(
             params += [WINDOW_METHOD, settings.min_segment_length_ms, MODEL_NAME]
         sql += " AND (" + " OR ".join(conditions) + ")"
     scope_sql, scope_params = scope_clause(scope)
-    sql += scope_sql + " ORDER BY s.id"
-    params += scope_params
+    ids_sql, ids_params = ids_clause(sample_ids)
+    sql += scope_sql + ids_sql + " ORDER BY s.id"
+    params += scope_params + ids_params
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     worklist = conn.execute(sql, params).fetchall()

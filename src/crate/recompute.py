@@ -13,8 +13,9 @@ Recompute; off = dormant, rows kept). *Add folder* scans a folder in,
 walks the folders in scope.
 
 **Recompute** — the things worth a job, as ticked steps run in order by one
-*Run*: **Attributes** (analysis, segmentation, CLAP embedding — the
-expensive stage, with its settings below), **Map layout** (the projection,
+*Run*: **Attributes** (analysis, segmentation, CLAP embedding of the files
+in scope — or of the anchor alone, §9.6's fast loop — the expensive stage,
+with its settings below), **Map layout** (the projection,
 whole scope or the anchor alone) and **Captions** (one Qwen2-Audio sentence
 per sample in scope that has none — ~10 s a file, so it runs in parts: at
 most N files per Run, the next Run continues; the Attributes tab's *Caption
@@ -42,6 +43,7 @@ from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -68,7 +70,7 @@ from PySide6.QtWidgets import (
 from .analysis import ONE_SHOT_MAX_DURATION_S
 from .config import DEFAULT_LIBRARY_PATH
 from .db import open_db
-from .embedding import EmbedSettings, Encoder
+from .embedding import ClapEncoder, EmbedSettings, Encoder
 from .jobs import RecomputeSettings, recompute_attributes
 from .qwen_audio import Captioner, QwenAudio, caption_pending
 from .library import (
@@ -221,6 +223,8 @@ class RecomputePanel(QWidget):
         self._encoder_factory = encoder_factory
         self._captioner_factory = captioner_factory
         self._captioner_instance: Captioner | None = None   # loaded once, kept: 16 GB memory-mapped
+        self._encoder_instance: Encoder | None = None       # CLAP, loaded once, kept (see _encoder)
+        self._encoder_key: tuple[str, int] | None = None
         self._thread: JobThread | None = None
         self._anchor_available = False
         self._refreshing = False
@@ -292,14 +296,32 @@ class RecomputePanel(QWidget):
         self._step_attributes = QCheckBox("Attributes")
         self._step_attributes.setChecked(v(_KEY + "step_attributes", True, type=bool))
         self._changed_only = QRadioButton("new/changed only")
+        self._changed_only.setToolTip("The files in scope the scanner flagged new or changed since their last run.")
         self._force_full = QRadioButton("everything again")
-        (self._force_full if v(_KEY + "force_full", False, type=bool) else self._changed_only).setChecked(True)
+        self._force_full.setToolTip("Every file in scope again, under the settings below.")
+        self._attributes_anchored = QRadioButton("anchor only")
+        self._attributes_anchored.setToolTip(
+            "The anchored sample alone (a hit's parent): every stage again under the settings "
+            "below — seconds, not hours. Change a setting, run, look at the waveform, again."
+        )
+        self._anchor_sample_id: int | None = None
+        mode = v(_KEY + "attributes_mode", "full" if v(_KEY + "force_full", False, type=bool) else "changed", type=str)
+        {"full": self._force_full, "anchored": self._attributes_anchored}.get(mode, self._changed_only).setChecked(True)
         self._step_layout = QCheckBox("Map layout")
         self._step_layout.setChecked(v(_KEY + "step_layout", False, type=bool))
         self._layout_library = QRadioButton("whole scope (re-fit)")
         self._layout_anchored = QRadioButton("anchor only (place it)")
         (self._layout_anchored if v(_KEY + "layout_mode", "library", type=str) == "anchored"
          else self._layout_library).setChecked(True)
+        # Each step's radios are an exclusive group of their own: under one parent
+        # widget Qt makes every radio one group, and "anchor only" on the layout
+        # unticked "everything again" on Attributes (found 2026-09-08).
+        self._attributes_modes = QButtonGroup(self)
+        for button in (self._changed_only, self._force_full, self._attributes_anchored):
+            self._attributes_modes.addButton(button)
+        self._layout_modes = QButtonGroup(self)
+        for button in (self._layout_library, self._layout_anchored):
+            self._layout_modes.addButton(button)
         self._anchor_note = QLabel("")
         self._anchor_note.setObjectName("caption")
         self._anchor_note.setWordWrap(True)
@@ -319,9 +341,10 @@ class RecomputePanel(QWidget):
         steps.setSpacing(2)
         steps.addLayout(_step(
             self._step_attributes,
-            "analysis, segmentation and CLAP embedding of the files in scope — the expensive "
-            "stage; its settings are below",
-            [self._changed_only, self._force_full],
+            "analysis, segmentation and CLAP embedding of the files in scope, or of the anchor "
+            "alone (the fast loop: change a setting, run, look, again) — the expensive stage; "
+            "its settings are below",
+            [self._changed_only, self._force_full, self._attributes_anchored],
         ))
         steps.addLayout(_step(
             self._step_layout,
@@ -486,15 +509,23 @@ class RecomputePanel(QWidget):
     def folder_paths(self) -> list[str]:
         return [lib.path for lib in list_libraries(self._conn)]
 
-    def set_anchor_available(self, available: bool, anchor_label: str = "") -> None:
+    def set_anchor_available(
+        self, available: bool, anchor_label: str = "", sample_id: int | None = None
+    ) -> None:
         """The window tells the tab whether there is an anchor — what the
-        Map layout step's "anchor only" option needs. (Ranking itself left
-        this tab on 2026-09-08: ⚓ on a row ranks at once, the weight bars
-        re-rank on release.)"""
+        "anchor only" options of the Attributes and Map layout steps need —
+        and which sample it is (a hit's parent): the one the anchored-only
+        Attributes run redoes. (Ranking itself left this tab on 2026-09-08:
+        ⚓ on a row ranks at once, the weight bars re-rank on release.)"""
         self._anchor_available = available
-        self._layout_anchored.setEnabled(available)
-        if not available and self._layout_anchored.isChecked():
-            self._layout_library.setChecked(True)
+        self._anchor_sample_id = sample_id if available else None
+        for anchored, fallback in (
+            (self._layout_anchored, self._layout_library),
+            (self._attributes_anchored, self._changed_only),
+        ):
+            anchored.setEnabled(available)
+            if not available and anchored.isChecked():
+                fallback.setChecked(True)
         self._anchor_note.setText(
             f"anchor: {anchor_label}" if available
             else "\"anchor only\" needs an anchor: press ⚓ at the start of a row in the list."
@@ -502,6 +533,10 @@ class RecomputePanel(QWidget):
 
     def log_text(self) -> str:
         return self._log.toPlainText()
+
+    def note(self, text: str) -> None:
+        """A line in the log from outside a job (the window's notes)."""
+        self._append_log(text)
 
     def plan(self) -> RunPlan:
         """The ticked steps as the window will run them."""
@@ -532,6 +567,10 @@ class RecomputePanel(QWidget):
         return RecomputeSettings(
             scope=tuple(self.scope_folders()),
             force_full=self._force_full.isChecked(),
+            sample_ids=(
+                (self._anchor_sample_id,)
+                if self._attributes_anchored.isChecked() and self._anchor_sample_id is not None else ()
+            ),
             one_shot_max_duration_s=cap,
             workers=self._workers.value(),
             segmentation=segmentation,
@@ -543,7 +582,10 @@ class RecomputePanel(QWidget):
         s(_KEY + "step_attributes", self._step_attributes.isChecked())
         s(_KEY + "step_layout", self._step_layout.isChecked())
         s(_KEY + "layout_mode", "anchored" if self._layout_anchored.isChecked() else "library")
-        s(_KEY + "force_full", self._force_full.isChecked())
+        s(_KEY + "attributes_mode", (
+            "anchored" if self._attributes_anchored.isChecked()
+            else "full" if self._force_full.isChecked() else "changed"
+        ))
         s(_KEY + "embed_segments", self._embed_segments.isChecked())
         s(_KEY + "min_segment_length_ms", self._min_embed_ms.value())
         s(_KEY + "confidence_threshold", self._confidence.value())
@@ -685,27 +727,42 @@ class RecomputePanel(QWidget):
 
     def run_attributes(self) -> bool:
         """The Attributes step: analysis, segmentation, embedding over the
-        scope. False (with a log line) if nothing started."""
+        scope — or over the anchor alone. False (with a log line) if nothing
+        started."""
         try:
             settings = self.collect_settings()
         except ValueError as exc:
             self._append_log(f"settings: {exc}")
             return False
-        if not settings.scope:
+        if not settings.scope and not settings.sample_ids:
             self._append_log(
                 "nothing in scope: tick a folder (or add one) before recomputing — "
                 "nothing is implicit (§9.6)"
             )
             return False
         self.save_settings()
-        encoder = self._encoder_factory(settings.embedding) if self._encoder_factory else None
+        encoder = self._encoder(settings.embedding)
         self._start(
-            "recompute attributes",
+            "recompute attributes (anchor only)" if settings.sample_ids else "recompute attributes",
             lambda conn, stop: recompute_attributes(
                 conn, settings, should_stop=stop, encoder=encoder
             ),
         )
         return True
+
+    def _encoder(self, settings: EmbedSettings) -> Encoder:
+        """The CLAP encoder for a job. A test's factory makes one per run;
+        otherwise one instance is kept across runs, keyed on its settings —
+        it loads lazily on the job thread, and loading it was most of an
+        anchored-only run (2026-09-08: 3.5 s of 3.8 for one file, every
+        run, until it was kept)."""
+        if self._encoder_factory:
+            return self._encoder_factory(settings)
+        key = (settings.checkpoint, settings.batch_size)
+        if self._encoder_instance is None or self._encoder_key != key:
+            self._encoder_instance = ClapEncoder(settings.checkpoint, settings.batch_size)
+            self._encoder_key = key
+        return self._encoder_instance
 
     def _captioner(self) -> Captioner:
         if self._captioner_instance is None:

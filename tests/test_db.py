@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from crate.db import SCHEMA, SCHEMA_VERSION, open_db, segments_accept_windows
+from crate.db import SCHEMA, SCHEMA_VERSION, ids_autoincrement, ids_clause, open_db, segments_accept_windows
 
 
 def test_open_db_creates_samples_table(tmp_path):
@@ -239,7 +239,7 @@ def test_v7_index_gains_the_window_kind_without_losing_a_row(tmp_path):
 
     conn = open_db(db_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
         assert _columns(conn, "libraries") >= {"path", "is_root", "in_scope"}       # v9 came along
         assert segments_accept_windows(conn)
         rows = conn.execute(
@@ -268,3 +268,74 @@ def test_v7_index_gains_the_window_kind_without_losing_a_row(tmp_path):
     finally:
         conn.close()
     open_db(db_path).close()                                                 # re-opening is a no-op
+
+
+def test_ids_clause_restricts_to_these_and_nothing_else():
+    """§9.6 anchored only / Caption this sample: None = no restriction, an
+    empty list = nothing (never silently everything)."""
+    assert ids_clause(None) == ("", [])
+    assert ids_clause([]) == (" AND 0", [])
+    assert ids_clause((3, "5")) == (" AND s.id IN (?,?)", [3, 5])
+    assert ids_clause([7], column="g.sample_id") == (" AND g.sample_id IN (?)", [7])
+
+
+# --- Migration v10 (2026-09-08): samples.id / segments.id never reused ---
+
+
+def test_v9_index_gets_autoincrement_ids_and_keeps_every_row(tmp_path):
+    """A plain INTEGER PRIMARY KEY reuses the largest deleted id; v10 rebuilds
+    `samples` and `segments` with AUTOINCREMENT so a redone segment (or a
+    folder scanned in after a removal) never takes an id something else
+    held — the anchor and `map_position` keep ids across recomputes."""
+    db_path = tmp_path / "v9.db"
+    raw = sqlite3.connect(db_path)
+    raw.executescript(SCHEMA.replace(" AUTOINCREMENT", "") + "PRAGMA user_version = 9;")
+    assert not ids_autoincrement(raw, "samples") and not ids_autoincrement(raw, "segments")
+    raw.execute(
+        "INSERT INTO samples (id, filepath, filename, added_at, last_scanned_at, file_size, file_mtime) "
+        "VALUES (1, 'x.wav', 'x.wav', 't', 't', 1, 1.0)"
+    )
+    raw.execute("INSERT INTO analysis (sample_id, analyzed_at) VALUES (1, 't')")
+    raw.execute(
+        "INSERT INTO segments (id, sample_id, start_ms, end_ms, detection_method, strength) "
+        "VALUES (1, 1, 0, 500, 'auto', 0.75)"
+    )
+    raw.execute(
+        "INSERT INTO segments (id, sample_id, start_ms, end_ms, detection_method, is_user_confirmed) "
+        "VALUES (2, 1, 100, 200, 'manual', 1)"
+    )
+    raw.execute("INSERT INTO segment_analysis (segment_id, rms_db) VALUES (2, -10.0)")
+    raw.execute("INSERT INTO libraries (path, is_root, in_scope, added_at) VALUES ('C:\\lib', 1, 1, 't')")
+    raw.commit()
+    raw.close()
+
+    conn = open_db(db_path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
+        assert ids_autoincrement(conn, "samples") and ids_autoincrement(conn, "segments")
+        assert [tuple(r) for r in conn.execute("SELECT id, filepath FROM samples")] == [(1, "x.wav")]
+        assert [tuple(r) for r in conn.execute(
+            "SELECT id, sample_id, start_ms, end_ms, detection_method, is_user_confirmed FROM segments ORDER BY id"
+        )] == [(1, 1, 0, 500, "auto", 0), (2, 1, 100, 200, "manual", 1)]
+        assert conn.execute("SELECT rms_db FROM segment_analysis WHERE segment_id = 2").fetchone()[0] == -10.0
+        assert conn.execute("SELECT analyzed_at FROM analysis WHERE sample_id = 1").fetchone()[0] == "t"
+        assert conn.execute("SELECT COUNT(*) FROM libraries").fetchone()[0] == 1
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+        # The point of it: a re-detected segment does not get the deleted one's id.
+        conn.execute("DELETE FROM segments WHERE id = 2")
+        new_id = conn.execute(
+            "INSERT INTO segments (sample_id, start_ms, end_ms, detection_method) VALUES (1, 300, 400, 'auto')"
+        ).lastrowid
+        assert new_id == 3
+        conn.execute("DELETE FROM samples WHERE id = 1")                    # cascades through segments
+        assert conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0] == 0
+        assert conn.execute(
+            "INSERT INTO samples (filepath, filename, added_at, last_scanned_at, file_size, file_mtime) "
+            "VALUES ('y.wav', 'y.wav', 't', 't', 1, 1.0)"
+        ).lastrowid == 2
+        conn.commit()
+        open_db(db_path).close()                                            # re-opening is a no-op
+    finally:
+        conn.close()

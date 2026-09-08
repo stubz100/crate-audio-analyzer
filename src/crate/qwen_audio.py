@@ -33,7 +33,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .db import now_iso, scope_clause
+from .db import ids_clause, now_iso, scope_clause
 
 log = logging.getLogger(__name__)
 
@@ -295,13 +295,10 @@ def caption_pending(
     params: list = [SOURCE_CAPTION]
     if not recaption:
         sql += " AND (t.id IS NULL OR t.created_at IS NULL OR s.content_changed_at > t.created_at)"
-    if sample_ids is not None:                      # "Caption this sample": these and nothing else
-        ids = [int(i) for i in sample_ids]
-        sql += f" AND s.id IN ({','.join('?' for _ in ids) or 'NULL'})"
-        params += ids
+    ids_sql, ids_params = ids_clause(sample_ids)    # "Caption this sample": these and nothing else
     scope_sql, scope_params = scope_clause(scope)
-    sql += scope_sql + " GROUP BY s.id ORDER BY s.id"
-    params += scope_params
+    sql += ids_sql + scope_sql + " GROUP BY s.id ORDER BY s.id"
+    params += ids_params + scope_params
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     worklist = conn.execute(sql, params).fetchall()

@@ -69,7 +69,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .db import now_iso, scope_clause
+from .db import ids_clause, now_iso, scope_clause
 from .wavmeta import read_embedded_metadata
 
 log = logging.getLogger(__name__)
@@ -750,6 +750,7 @@ def analyze_pending(
     scope: Sequence[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
     workers: int = 1,
+    sample_ids: Sequence[int] | None = None,
 ) -> AnalysisSummary:
     """Analyze samples that are new (no `analysis` row) or stale (content
     changed since `analyzed_at`) — or every sample, if `reanalyze`.
@@ -760,6 +761,8 @@ def analyze_pending(
     `should_stop`: polled before each file (the GUI's Stop button).
     `workers`: above 1, the per-file computation fans out to that many Python
     worker processes (`parallel.py`); the index is still written here.
+    `sample_ids`: these samples and nothing else — the §9.6 anchored-only
+    scope (the anchor's parent); None = no restriction.
 
     Commits per file: analysis is the expensive stage (§3), so an interrupted
     run must keep everything it already computed.
@@ -776,7 +779,9 @@ def analyze_pending(
     if not reanalyze:
         sql += " AND (a.sample_id IS NULL OR s.content_changed_at > a.analyzed_at)"
     scope_sql, params = scope_clause(scope)
-    sql += scope_sql + " ORDER BY s.id"
+    ids_sql, ids_params = ids_clause(sample_ids)
+    sql += scope_sql + ids_sql + " ORDER BY s.id"
+    params += ids_params
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     worklist = conn.execute(sql, params).fetchall()

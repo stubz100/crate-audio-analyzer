@@ -812,3 +812,68 @@ def test_captions_step_runs_in_batches_and_the_button_does_one_sample(app, index
         ).fetchone()[0] == "stale words"                            # the other one untouched
     finally:
         window.close()
+
+
+# --- ⚓ anchored-only Recompute attributes (2026-09-08, the rest of Phase 8) ---
+
+
+def test_anchor_only_attributes_redo_the_anchor_alone(app, index, tmp_path):
+    """§9.6's fast loop: with an anchor, the Attributes step can run against it
+    alone — every stage again under the current settings, nothing else touched
+    — and an anchored hit that gets re-detected hands the anchor to its parent."""
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
+    try:
+        window._autoplay.setChecked(False)
+        panel = window._recompute
+        assert not panel._attributes_anchored.isEnabled()
+        panel._attributes_anchored.setChecked(True)                 # no anchor: not a choice
+        assert panel.collect_settings().sample_ids == ()
+
+        loop_id = conn.execute("SELECT id FROM samples WHERE filename = 'loop.wav'").fetchone()[0]
+        hit_id = conn.execute("SELECT id FROM samples WHERE filename = 'hit.wav'").fetchone()[0]
+        seg_id = conn.execute(
+            "SELECT id FROM segments WHERE sample_id = ? AND detection_method = 'auto' ORDER BY start_ms",
+            (loop_id,),
+        ).fetchone()[0]
+        auto = lambda sid: conn.execute(  # noqa: E731
+            "SELECT COUNT(*) FROM segments WHERE sample_id = ? AND detection_method = 'auto'", (sid,)
+        ).fetchone()[0]
+        assert auto(loop_id) > 1
+        stamps = dict(conn.execute("SELECT sample_id, analyzed_at FROM analysis").fetchall())
+
+        window._anchor_and_rank("segment", seg_id)                  # a hit of loop.wav is the anchor
+        _wait_until(app, lambda: window._feature_thread is None and not window._feature_waiters)
+        assert window._anchor == ("segment", seg_id)
+        assert panel._attributes_anchored.isEnabled() and panel._layout_anchored.isEnabled()
+        panel._layout_anchored.setChecked(True)
+        panel._attributes_anchored.setChecked(True)
+        assert panel._layout_anchored.isChecked()                   # its own group: the layout's choice stays
+        panel._max_segments.setValue(1)
+        panel._step_attributes.setChecked(True)
+        panel._step_layout.setChecked(False)
+        panel._step_captions.setChecked(False)
+        assert panel.collect_settings().sample_ids == (loop_id,)   # the hit's parent
+        assert panel.plan() == RunPlan(attributes=True)
+
+        panel.run()
+        _wait_until(
+            app,
+            lambda: not panel.running and window._feature_thread is None and not window._feature_waiters,
+            timeout_s=180,
+        )
+        log = panel.log_text()
+        assert "— recompute attributes (anchor only) —" in log and "loop.wav" in log
+        assert auto(loop_id) == 1                                   # the cap applied to the anchor…
+        now = dict(conn.execute("SELECT sample_id, analyzed_at FROM analysis").fetchall())
+        assert now[loop_id] != stamps[loop_id] and now[hit_id] == stamps[hit_id]   # … and to nothing else
+        assert window._anchor == ("sample", loop_id)                # the hit is gone: its parent is the anchor
+        assert window._anchor_label.text().endswith("loop.wav")
+        assert "anchored on its parent" in log
+
+        window._clear_anchor()
+        assert not panel._attributes_anchored.isEnabled() and panel._changed_only.isChecked()
+    finally:
+        window.close()

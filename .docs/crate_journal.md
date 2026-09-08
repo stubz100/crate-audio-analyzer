@@ -23,7 +23,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ✅ done — `32ef47b` (`.docs/phase5_spike.md`: 102 files, 16 groups; captioning 6–20 s/file on this CPU, built as the opt-in Recompute stage + `crate-caption`; the latent axis a no-go across 13 poolings — no vocal-semantic axis) |
 | 6 | Map View | ✅ done — `72ad400` (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
-| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); Recompute map layout (both scopes) added with Phase 6 (`72ad400`); reshaped 2026-09-08 into a Library panel (folders in the index, Root / In scope ticks, Add / Remove / Rescan) and one Recompute panel (three ticked steps, one Run) `b04ab9c`; anchored-only Recompute *attributes* remains |
+| 8 | Recompute Tab | ✅ done — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; ranking with Phase 7 (`4756a35`), map layout (both scopes) with Phase 6 (`72ad400`); reshaped into a Library panel + one Recompute panel `b04ab9c`; ⚓ anchored-only Recompute *attributes*, the last piece, `ANCHORED_HASH` (2026-09-08; schema v10 with it) |
 | 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`), the waveform panel with segment markers, envelope and playhead since `5acfcd4`; marker editing (drag, Save / Delete segment) not started |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
@@ -998,3 +998,31 @@ The user: use the chips' scores in the CLAP scores box instead of the four calcu
 **Next**
 
 - Captions as a search channel; anchored-only Recompute attributes; Phase 9's marker editing.
+
+## 2026-09-08 — ⚓ Anchored-only Recompute attributes: Phase 8 complete
+
+**Phase:** 8 (the last piece) · `ANCHORED_HASH`
+
+The user: finish what is left of Phase 8 first.
+
+**Done**
+
+- **Anchor only** as the third choice under the Attributes step (`recompute.py`), greyed until there is an anchor, next to *new/changed only* and *everything again*: every stage — analysis, segmentation, CLAP embedding — again for the anchored sample (a hit's parent) under the settings as they are; no folder in scope needed; one worker. `RecomputeSettings.sample_ids`; `recompute_attributes` skips the folder scope and forces the full mode for those ids; the three stages take `sample_ids` through `db.ids_clause` (which `caption_pending` now shares). The window hands the panel the anchor's sample with its label (`set_anchor_available(…, sample_id)`).
+- **One CLAP encoder across runs** (`RecomputePanel._encoder`, keyed on checkpoint + batch size, loaded lazily on the job thread): loading it was most of an anchored-only run.
+- **A redone anchor**: an anchored hit whose parent is redone loses its row (re-detection writes new rows); after the reload the anchor moves to the parent, with a line in the log.
+- **Schema v10**: `samples.id` and `segments.id` are AUTOINCREMENT. Found on the way: a plain INTEGER PRIMARY KEY hands a new row the largest id in use plus one, so the re-detected segment took the deleted anchor's id and the anchor silently pointed at a different span; a folder scanned in after another was removed could do the same to a sample. Both tables are rebuilt through the v8 rebuild, generalised (`_rebuild_table`, `_table_ddl`), ids kept.
+- **Fixed on the way**: the Recompute panel's radios were one exclusive group (one parent widget), so *anchor only* under Map layout unticked *everything again* under Attributes; each step's radios are a `QButtonGroup` now.
+
+**Decided**
+
+- Anchored-only always redoes the sample: the sub-toggle (new/changed, everything) belongs to the library scope, as §9.6's table has it. The anchored path exists to see a changed setting on the one file in front of you.
+- The mode persists as `recompute/attributes_mode` (changed | full | anchored); without an anchor at start-up it falls back to *new/changed only*, as the layout's choice does.
+
+**Verified**
+
+- `uv run pytest tests -q` → **189 passed, 3 skipped**; pyflakes clean. New: `ids_clause`; the engine redoes one sample and nothing else under a changed cap, with no scope, on one worker; the GUI: the radio is greyed without an anchor, the layout's choice survives the attributes' (own groups), the run logs "anchor only", caps the anchor's segments, leaves the other sample's analysis stamp alone, the anchored hit falls back to its parent, clearing the anchor greys the radio again; v9 → v10 keeps every row and id and a segment inserted after a delete gets a fresh id.
+- The user's index (a copy, via the backup API): the v10 rebuild of 4,568 samples + 31,532 segments in 0.38 s — counts, max ids and foreign keys unchanged, integrity ok; the real index rebuilds itself the same way at the next launch. Anchored-only on a 5-s vocal, offscreen: 24.5 s the first run (the model load), 3.8 s wall the second, reload and re-rank of 4,568 samples included. Screenshot checked: three radios, the anchor named, the waveform down to the capped two segments.
+
+**Next**
+
+- Phase 9's marker editing (drag, Save / Delete segment); captions as a search channel.
