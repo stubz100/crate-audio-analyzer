@@ -23,7 +23,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
 | 6 | Map View | ✅ done — `72ad400` (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
-| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); Recompute map layout (both scopes) added with Phase 6 (`72ad400`); reshaped 2026-09-08 into a Library panel (folders in the index, Root / In scope ticks, Add / Remove / Rescan) and one Recompute panel (three ticked steps, one Run) SCOPE_HASH; anchored-only Recompute *attributes* remains |
+| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); Recompute map layout (both scopes) added with Phase 6 (`72ad400`); reshaped 2026-09-08 into a Library panel (folders in the index, Root / In scope ticks, Add / Remove / Rescan) and one Recompute panel (three ticked steps, one Run) `b04ab9c`; anchored-only Recompute *attributes* remains |
 | 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`), the waveform panel with segment markers, envelope and playhead since `5acfcd4`; marker editing (drag, Save / Delete segment) not started |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
@@ -828,7 +828,7 @@ The user first asked why the status bar counted over 10k samples when the folder
 
 ## 2026-09-08 — One Library panel, one Recompute panel; the view follows the scope
 
-**Phase:** 8 (Recompute tab, reshaped) · SCOPE_HASH
+**Phase:** 8 (Recompute tab, reshaped) · `b04ab9c`
 
 The user's decision on the scope question: the library root and the scope list become one panel whose folders are the index's own; each folder has a Root tick and an In-scope tick; Add/Remove manage the database; the in-scope folders are what the list and map show; and the three Recompute buttons — whose difference was unclear — become one panel.
 
