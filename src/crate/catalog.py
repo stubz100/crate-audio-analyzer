@@ -33,6 +33,7 @@ class SampleRow:
     tags: str                 # top zero-shot chips, best first, comma-joined
     segment_count: int
     flagged_segments: int     # manual segments needing review (§6.3)
+    caption: str = ""         # the Qwen2-Audio sentence, when there is one (a list column since 2026-09-08)
     clap_scores: dict[str, float] = field(default_factory=dict)  # CLAP class probabilities, by name
 
 
@@ -113,6 +114,8 @@ SELECT s.id, s.filepath, s.filename, s.folder, s.duration_s,
        (SELECT COUNT(*) FROM segments g WHERE g.sample_id = s.id
         AND g.detection_method != '{WINDOW_METHOD}') AS segment_count,
        (SELECT COUNT(*) FROM segments g WHERE g.sample_id = s.id AND g.needs_review = 1) AS flagged,
+       COALESCE((SELECT tag_or_caption FROM text_tags t
+                 WHERE t.sample_id = s.id AND t.source_model = 'qwen2audio-caption' LIMIT 1), '') AS caption,
        COALESCE((SELECT group_concat(tag_or_caption || '=' || score, ';') FROM text_tags t
                  WHERE t.sample_id = s.id AND t.source_model = 'clap-class'), '') AS clap
 FROM samples s
@@ -159,6 +162,36 @@ _SEGMENT_COLUMNS = (
     "SELECT id, sample_id, start_ms, end_ms, strength, detection_method, needs_review, cache_path "
     "FROM segments WHERE sample_id = ? AND detection_method "
 )
+
+
+@dataclass(frozen=True)
+class Section:
+    """A sample's section as the list shows it under the sample (2026-09-08,
+    the user's steer: every section sits under its sample) — a detected or
+    manual segment, or a CLAP window of a long file (§6.4), which only shows
+    while it carries a score."""
+
+    segment_id: int
+    start_ms: int
+    end_ms: int
+    window: bool = False
+    manual: bool = False
+
+
+def load_sections(conn: sqlite3.Connection, scope=None) -> dict[int, list[Section]]:
+    """Every sample's sections in scope, in time order, by sample id — the
+    list's child rows."""
+    clause, params = _scope(scope)
+    sections: dict[int, list[Section]] = {}
+    for seg_id, sample_id, start_ms, end_ms, method in conn.execute(
+        "SELECT g.id, g.sample_id, g.start_ms, g.end_ms, g.detection_method FROM segments g "
+        f"JOIN samples s ON s.id = g.sample_id WHERE 1=1{clause} ORDER BY g.sample_id, g.start_ms",
+        params,
+    ):
+        sections.setdefault(int(sample_id), []).append(Section(
+            int(seg_id), int(start_ms), int(end_ms), window=method == WINDOW_METHOD, manual=method == "manual",
+        ))
+    return sections
 
 
 def load_segments(conn: sqlite3.Connection, sample_id: int) -> list[SegmentRow]:

@@ -1189,3 +1189,28 @@ The user: the tags, CLAP scores and CLAP embedding groups leave the Attributes t
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-08 — Every section under its sample; Folder first, a Caption column; a bigger play icon
+
+**Phase:** 7 polish (the list) · `SECTIONS_HASH`
+
+The user: the play icon twice as big; a sample should keep all its sections underneath it, and a ranking should order them under the sample by descending similarity; the Folder column to the far left, the Qwen2-Audio caption in its old place.
+
+**Done**
+
+- **Sections as child rows** (`listmodel.py`): `SampleTreeModel.set_rows(rows, sections)` takes every sample's sections (`catalog.load_sections`, `Section`: id, bounds, window, manual) and shows them all under the sample — a CLAP window only while it carries a score — ordered by the current scoring (match while a search is active, else the ranking), best first, unscored last in time order; in time order when nothing is scored (`_rebuild_children` on every reset). The Type cell reads hit / manual / window. The winning-hit logic (`Scores.hits`) is unchanged and now drives two things: the map's badges and which samples the window opens — `_expand_hits` replaces `expandAll`, so the list shows the ranked section at the top of an opened sample and keeps the rest folded. `hit_at` returns the section a child row shows; the anchor circle repaints on the section rows that lost or gained it.
+- **Columns**: Folder, File, Caption, Length, Type, BPM, Key, Tags, Hits, Similarity, Match (`COL_*` constants; the score columns sit visually after File). `SampleRow.caption` comes from `text_tags` in the samples query; the header filters are keyed by the constants.
+- **The play icon** is 20 pt (twice the base size) with less padding.
+
+**Decided**
+
+- The section rows are loaded with the samples (one query, 27k rows in scope here). At the full library's scale (~110k files, several hundred thousand sections) the list would want a lazier model that fetches a sample's sections when it opens — a Phase 12 item, noted in §13's cost risk; the folder scope keeps it far from that today.
+
+**Verified**
+
+- `uv run pytest tests -q` → **201 passed, 3 skipped**; pyflakes clean. New: a sample's child count equals its segment count, folded and in time order with nothing scored; anchoring one of its sections re-orders them by similarity with the anchored one first and opens the sample; the search and window tests read the best section first and see the sample fold again when the search is cleared; the column tests moved to the constants.
+- The user's index (a copy): the window comes up with 4,568 samples and their 27,648 sections in 0.46 s; anchoring a vowel ranks, re-orders every sample's sections and opens the ones with a winning section in 2.2 s cold and 1.8 s warm — it was 2.9 s before three fixes: `index()` checks its bounds itself instead of through `hasIndex()` (600k calls a click), the score column gets a fixed width instead of being sized to its contents, `_expand_hits` no longer collapses first and `set_anchor` signals only the rows that lost or gained the circle (a whole-list signal made the proxy re-sort everything). What remains is the proxy walking 32k rows through Python on every reset. Screenshot checked: Folder first, the caption column, the sections under an opened sample by similarity.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.

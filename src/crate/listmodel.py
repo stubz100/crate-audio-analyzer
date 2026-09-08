@@ -37,7 +37,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
-from .catalog import Criteria, SampleRow, SegmentRow, hit_label
+from .catalog import Criteria, SampleRow, Section, SegmentRow, hit_label
 from .similarity import Hit, Scores
 from .theme import ACCENT, TEXT, TEXT_DIM
 
@@ -94,13 +94,17 @@ class ColumnFilter:
 
 
 class SampleTreeModel(QAbstractItemModel):
-    """Samples, each with at most one sub-hit row underneath (§9.4)."""
+    """Samples, each with every one of its sections underneath (§9.4; 2026-09-08,
+    the user's steer — a sample keeps all its sections under it, and a ranking
+    orders them by similarity). A CLAP window of a long file (§6.4) shows only
+    while it carries a score."""
 
-    # The four CLAP columns left the list on 2026-09-08 (the user's steer): the
-    # numbers stay on the Attributes tab, as bars and as a filter.
-    COLUMNS = ("File", "Folder", "Length", "Type", "BPM", "Key", "Tags", "Hits", "Similarity", "Match")
-    COL_SIMILARITY = 8
-    COL_MATCH = 9
+    # Folder first and the caption after the file (2026-09-08, the user's steer);
+    # the four CLAP columns left the list earlier that day.
+    COLUMNS = ("Folder", "File", "Caption", "Length", "Type", "BPM", "Key", "Tags", "Hits", "Similarity", "Match")
+    COL_FOLDER, COL_FILE, COL_CAPTION, COL_LENGTH, COL_TYPE, COL_BPM, COL_KEY, COL_TAGS, COL_HITS = range(9)
+    COL_SIMILARITY = 9
+    COL_MATCH = 10
 
     def __init__(
         self,
@@ -113,14 +117,19 @@ class SampleTreeModel(QAbstractItemModel):
         self._rows: list[SampleRow] = list(rows or [])
         self._similarity: Scores | None = None
         self._match: Scores | None = None
-        self._hits: dict[int, Hit] = {}
+        self._hits: dict[int, Hit] = {}                     # the winning hit per sample: badges, expansion
+        self._sections: dict[int, list[Section]] = {}       # every section, by sample, in time order
+        self._children: dict[int, list[Section]] = {}       # the child rows shown, in their order
+        self._parent_of: dict[int, int] = {}                # segment id → sample id, for the shown rows
         self._anchor: tuple[str, int] | None = None     # (kind, id): the ⚓ row (§9.2)
 
     # --- data in ---
 
-    def set_rows(self, rows: list[SampleRow]) -> None:
+    def set_rows(self, rows: list[SampleRow], sections: Mapping[int, list[Section]] | None = None) -> None:
         self.beginResetModel()
         self._rows = list(rows)
+        self._sections = {k: list(v) for k, v in (sections or {}).items()}
+        self._rebuild_children()
         self.endResetModel()
 
     def set_similarity(self, scores: Scores | None) -> None:
@@ -128,6 +137,7 @@ class SampleTreeModel(QAbstractItemModel):
         self.beginResetModel()
         self._similarity = scores
         self._hits = self._pick_hits()
+        self._rebuild_children()
         self.endResetModel()
 
     def set_match(self, scores: Scores | None) -> None:
@@ -135,6 +145,7 @@ class SampleTreeModel(QAbstractItemModel):
         self.beginResetModel()
         self._match = scores
         self._hits = self._pick_hits()
+        self._rebuild_children()
         self.endResetModel()
 
     def _pick_hits(self) -> dict[int, Hit]:
@@ -144,6 +155,33 @@ class SampleTreeModel(QAbstractItemModel):
         if self._similarity is not None:
             return dict(self._similarity.hits)
         return {}
+
+    def _rebuild_children(self) -> None:
+        """The child rows: every segment, plus the CLAP windows that carry a
+        score — by score, best first, unscored ones after in time order; in
+        time order when nothing is scored."""
+        scores = self._match if self._match is not None else self._similarity
+        self._children = {}
+        self._parent_of = {}
+        for r in self._rows:
+            sections = self._sections.get(r.id)
+            if not sections:
+                continue
+            shown = []
+            for section in sections:
+                score = None if scores is None else scores.segment.get(section.segment_id)
+                if section.window and score is None:
+                    continue
+                shown.append((-(score if score is not None else -1.0), section.start_ms, section))
+            if not shown:
+                continue
+            shown.sort(key=lambda t: (t[0], t[1]))
+            self._children[r.id] = [s for _, _, s in shown]
+            for section in self._children[r.id]:
+                self._parent_of[section.segment_id] = r.id
+
+    def children_of(self, sample_id: int) -> list[Section]:
+        return list(self._children.get(sample_id, ()))
 
     def hit_sample_ids(self) -> set[int]:
         """Samples whose current hit is one of their segments — the map's badges (§9.3)."""
@@ -168,18 +206,27 @@ class SampleTreeModel(QAbstractItemModel):
             return self._rows[int(index.internalId()) - 1]
         return self._rows[index.row()]
 
-    def hit_at(self, index: QModelIndex) -> Hit | None:
+    def hit_at(self, index: QModelIndex) -> Section | None:
+        """The section a child row shows (its parent's `row_at`)."""
         if not self.is_hit(index):
             return None
-        return self._hits.get(self.row_at(index).id)
+        children = self._children.get(self.row_at(index).id, ())
+        return children[index.row()] if index.row() < len(children) else None
 
     # --- QAbstractItemModel ---
 
     def index(self, row: int, column: int, parent=QModelIndex()) -> QModelIndex:
-        if not self.hasIndex(row, column, parent):
+        # Bounds checked here rather than through hasIndex(): the proxy's sort
+        # asks for every index of 30k rows and hasIndex() calls back into Python
+        # twice per call (2026-09-08, measured: 1.3 s of a 2.9 s anchor click).
+        if row < 0 or column < 0 or column >= len(self.COLUMNS):
             return QModelIndex()
         if not parent.isValid():
-            return self.createIndex(row, column, _TOP)
+            return self.createIndex(row, column, _TOP) if row < len(self._rows) else QModelIndex()
+        if parent.internalId() != _TOP or parent.row() >= len(self._rows):
+            return QModelIndex()
+        if row >= len(self._children.get(self._rows[parent.row()].id, ())):
+            return QModelIndex()
         return self.createIndex(row, column, parent.row() + 1)
 
     def parent(self, index: QModelIndex = QModelIndex()) -> QModelIndex:  # type: ignore[override]
@@ -191,8 +238,8 @@ class SampleTreeModel(QAbstractItemModel):
         if not parent.isValid():
             return len(self._rows)
         if parent.internalId() != _TOP:
-            return 0                                   # a sub-hit has no children
-        return 1 if self._rows[parent.row()].id in self._hits else 0
+            return 0                                   # a section has no children
+        return len(self._children.get(self._rows[parent.row()].id, ()))
 
     def columnCount(self, parent=QModelIndex()) -> int:  # noqa: N802
         return len(self.COLUMNS)
@@ -209,7 +256,7 @@ class SampleTreeModel(QAbstractItemModel):
                 "The circle at the start of a row anchors that sample (or hit) and ranks every "
                 "sample against it, with the weight bars as they are (§9.2); a click on the "
                 "filled circle clears the anchor. "
-                "Click the header to sort or filter by file name"
+                "Click the header to sort or filter by folder"
             )
         return None
 
@@ -220,26 +267,30 @@ class SampleTreeModel(QAbstractItemModel):
         display = role == Qt.ItemDataRole.DisplayRole
         if self.is_hit(index):
             r = self.row_at(index)
-            hit = self._hits.get(r.id)
-            if hit is None:
+            section = self.hit_at(index)
+            if section is None:
                 return None
             if role == Qt.ItemDataRole.ToolTipRole:
-                return f"{r.filepath} @ {hit.start_ms} ms"
+                return f"{r.filepath} @ {section.start_ms} ms"
             if role == ANCHOR_ROLE:
-                return self._anchor == ("segment", hit.segment_id)
+                return self._anchor == ("segment", section.segment_id)
             if role not in (Qt.ItemDataRole.DisplayRole, SORT_ROLE):
                 return None
-            length_s = (hit.end_ms - hit.start_ms) / 1000
-            if col == 0:
-                return "↳ " + hit_label(hit.start_ms, hit.end_ms, hit.window) if display else hit.start_ms
-            if col == 2:
+            length_s = (section.end_ms - section.start_ms) / 1000
+            if col == self.COL_FOLDER:                # the tree column: the section's label
+                if display:
+                    return "↳ " + hit_label(section.start_ms, section.end_ms, section.window)
+                return section.start_ms
+            if col == self.COL_FILE:
+                return "" if display else section.start_ms   # a name sort keeps sections in time order
+            if col == self.COL_LENGTH:
                 return _fmt_seconds(length_s) if display else length_s
-            if col == 3:
-                return "window" if hit.window else "hit"
+            if col == self.COL_TYPE:
+                return "window" if section.window else ("manual" if section.manual else "hit")
             if col == self.COL_SIMILARITY:
-                return self._similarity_cell("segment", hit.segment_id, display)
+                return self._similarity_cell("segment", section.segment_id, display)
             if col == self.COL_MATCH:
-                return _score_cell(self._match, "segment", hit.segment_id, display)
+                return _score_cell(self._match, "segment", section.segment_id, display)
             return "" if display else None
         r = self._rows[index.row()]
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -248,23 +299,25 @@ class SampleTreeModel(QAbstractItemModel):
             return self._anchor == ("sample", r.id)
         if role not in (Qt.ItemDataRole.DisplayRole, SORT_ROLE):
             return None
-        if col == 0:
-            return r.filename
-        if col == 1:
+        if col == self.COL_FOLDER:
             return r.folder
-        if col == 2:
+        if col == self.COL_FILE:
+            return r.filename
+        if col == self.COL_CAPTION:
+            return r.caption
+        if col == self.COL_LENGTH:
             return _fmt_seconds(r.duration_s) if display else (r.duration_s if r.duration_s is not None else -1.0)
-        if col == 3:
+        if col == self.COL_TYPE:
             return r.structural_type or ""
-        if col == 4:
+        if col == self.COL_BPM:
             if display:
                 return "" if r.tempo_bpm is None else f"{r.tempo_bpm:.0f}"
             return r.tempo_bpm if r.tempo_bpm is not None else -1.0
-        if col == 5:
+        if col == self.COL_KEY:
             return r.key or ""
-        if col == 6:
+        if col == self.COL_TAGS:
             return r.tags
-        if col == 7:
+        if col == self.COL_HITS:
             if display:
                 if not r.segment_count:
                     return ""
@@ -296,12 +349,25 @@ class SampleTreeModel(QAbstractItemModel):
         """Which sample or hit carries the ⚓ (the delegate paints it)."""
         if item == self._anchor:
             return
-        self._anchor = item
-        if self._rows:
-            self.dataChanged.emit(
-                self.index(0, 0), self.index(len(self._rows) - 1, self.COL_SIMILARITY),
-                [ANCHOR_ROLE, SORT_ROLE],
-            )
+        before, self._anchor = self._anchor, item
+        # Only the rows that lost or gained the circle change (and their sort
+        # key: the anchor sorts on top) — a change over the whole list made the
+        # proxy re-sort 30k rows (0.5 s, measured 2026-09-08).
+        roles = [ANCHOR_ROLE, SORT_ROLE]
+        for old in (before, item):
+            if old is None:
+                continue
+            kind, item_id = old
+            sample_id = item_id if kind == "sample" else self._parent_of.get(item_id)
+            source_row = next((i for i, r in enumerate(self._rows) if r.id == sample_id), None)
+            if source_row is None:
+                continue
+            self.dataChanged.emit(self.index(source_row, 0), self.index(source_row, self.COL_SIMILARITY), roles)
+            if kind == "segment":
+                parent = self.index(source_row, 0)
+                last = len(self._children.get(sample_id, ())) - 1
+                if last >= 0:
+                    self.dataChanged.emit(self.index(0, 0, parent), self.index(last, self.COL_SIMILARITY, parent), roles)
 
     @property
     def anchor(self) -> tuple[str, int] | None:

@@ -34,9 +34,9 @@ ROWS = [
 ]
 
 SPECS = {
-    0: ColumnSpec("text"), 2: ColumnSpec("range", "s", decimals=2, maximum=99_999), 3: ColumnSpec("values"),
-    4: ColumnSpec("range", "BPM", maximum=999), 5: ColumnSpec("values"), 6: ColumnSpec("text"),
-    7: ColumnSpec("range", maximum=9_999), SampleTreeModel.COL_SIMILARITY: ColumnSpec("range", "%", maximum=100, scale=100.0),
+    0: ColumnSpec("text"), 1: ColumnSpec("text"), 3: ColumnSpec("range", "s", decimals=2, maximum=99_999),
+    4: ColumnSpec("values"), 5: ColumnSpec("range", "BPM", maximum=999), 6: ColumnSpec("values"), 7: ColumnSpec("text"),
+    8: ColumnSpec("range", maximum=9_999), SampleTreeModel.COL_SIMILARITY: ColumnSpec("range", "%", maximum=100, scale=100.0),
 }
 
 
@@ -59,7 +59,7 @@ def _view(app):
 
 
 def _names(proxy) -> list[str]:
-    return [proxy.data(proxy.index(r, 0)) for r in range(proxy.rowCount())]
+    return [proxy.data(proxy.index(r, 1)) for r in range(proxy.rowCount())]
 
 
 def test_column_filter_accepts():
@@ -75,16 +75,16 @@ def test_column_filter_accepts():
 def test_proxy_applies_column_filters_and_the_model_lists_distinct_values(app):
     model, proxy, view, header = _view(app)
     try:
-        assert model.distinct_values(3) == ["loop", "multi-hit", "one-shot"]
-        assert model.distinct_values(5) == ["", "Am", "C"]
-        proxy.set_column_filter(6, ColumnFilter(text="percussion"))
-        assert _names(proxy) == ["kick.wav", "loop.wav"] and proxy.filtered_columns == {6}
-        proxy.set_column_filter(7, ColumnFilter(low=1))
+        assert model.distinct_values(4) == ["loop", "multi-hit", "one-shot"]
+        assert model.distinct_values(6) == ["", "Am", "C"]
+        proxy.set_column_filter(7, ColumnFilter(text="percussion"))
+        assert _names(proxy) == ["kick.wav", "loop.wav"] and proxy.filtered_columns == {7}
+        proxy.set_column_filter(8, ColumnFilter(low=1))
         assert _names(proxy) == ["loop.wav"]
-        proxy.set_column_filter(6, None)
-        proxy.set_column_filter(7, ColumnFilter())                       # inactive: clears
+        proxy.set_column_filter(7, None)
+        proxy.set_column_filter(8, ColumnFilter())                       # inactive: clears
         assert _names(proxy) == ["kick.wav", "loop.wav", "pad.wav"] and not proxy.filtered_columns
-        proxy.set_column_filter(4, ColumnFilter(low=100.0))              # no tempo: never in a range
+        proxy.set_column_filter(5, ColumnFilter(low=100.0))              # no tempo: never in a range
         assert _names(proxy) == ["loop.wav"]
     finally:
         view.close()
@@ -93,35 +93,35 @@ def test_proxy_applies_column_filters_and_the_model_lists_distinct_values(app):
 def test_popups_edit_each_kind_and_the_header_opens_them(app):
     model, proxy, view, header = _view(app)
     try:
-        view.sortByColumn(2, Qt.SortOrder.DescendingOrder)
-        assert header.sortIndicatorSection() == 2 and _names(proxy)[0] == "pad.wav"
+        view.sortByColumn(3, Qt.SortOrder.DescendingOrder)
+        assert header.sortIndicatorSection() == 3 and _names(proxy)[0] == "pad.wav"
 
         # a click on a section opens its popup and leaves the sort where it was
-        x = header.sectionViewportPosition(3) + 10
+        x = header.sectionViewportPosition(4) + 10
         QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x, 8))
         app.processEvents()
         popup = header.popup
         assert popup is not None and popup._list is not None and popup._list.count() == 3
-        assert (header.sortIndicatorSection(), header.sortIndicatorOrder()) == (2, Qt.SortOrder.DescendingOrder)
+        assert (header.sortIndicatorSection(), header.sortIndicatorOrder()) == (3, Qt.SortOrder.DescendingOrder)
         popup._list.item(0).setCheckState(Qt.CheckState.Unchecked)         # "loop" off
-        assert _names(proxy) == ["pad.wav", "kick.wav"] and 3 in header.filters
+        assert _names(proxy) == ["pad.wav", "kick.wav"] and 4 in header.filters
         assert not view.grab().isNull()                                     # the section paints its dot
         popup._check_all(True)
-        assert 3 not in header.filters and len(_names(proxy)) == 3
+        assert 4 not in header.filters and len(_names(proxy)) == 3
         popup.close()
 
         # the popup's buttons sort
-        header.open_filter(0)
+        header.open_filter(1)
         header.popup._sort(Qt.SortOrder.AscendingOrder)
-        assert _names(proxy) == ["kick.wav", "loop.wav", "pad.wav"] and header.sortIndicatorSection() == 0
+        assert _names(proxy) == ["kick.wav", "loop.wav", "pad.wav"] and header.sortIndicatorSection() == 1
 
         # text and range editors
-        text = FilterPopup(0, "File", SPECS[0], None)
+        text = FilterPopup(1, "File", SPECS[1], None)
         text._edit.setText("oop")
         assert text.current_filter() == ColumnFilter(text="oop")
         text._edit.clear()
         assert text.current_filter() is None
-        length = FilterPopup(2, "Length", SPECS[2], ColumnFilter(low=1.0))
+        length = FilterPopup(3, "Length", SPECS[3], ColumnFilter(low=1.0))
         assert length._low.value() == 1.0 and length._high.specialValueText() == "any"
         length._high.setValue(5.0)
         assert length.current_filter() == ColumnFilter(low=1.0, high=5.0)

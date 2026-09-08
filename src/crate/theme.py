@@ -106,7 +106,7 @@ QPushButton:checked {{ background: {ACCENT_DIM.name()}; border-color: {ACCENT.na
 QPushButton:disabled {{ color: {TEXT_DIM.name()}; background: {PANEL.name()}; }}
 QPushButton:flat {{ background: transparent; border: 1px solid {BORDER.name()}; border-radius: 11px; padding: 2px 9px; }}
 QPushButton:flat:hover {{ background: {RAISED.name()}; }}
-QPushButton#play {{ background: {ACCENT_DIM.name()}; border-color: {ACCENT.name()}; color: {WHITE.name()}; font-weight: 600; padding: 5px 18px; }}
+QPushButton#play {{ background: {ACCENT_DIM.name()}; border-color: {ACCENT.name()}; color: {WHITE.name()}; font-weight: 600; font-size: 20pt; padding: 0px 14px; }}
 QPushButton#play:hover {{ background: {ACCENT.name()}; }}
 QPushButton#anchor {{ border-color: {AMBER.name()}; color: {AMBER.name()}; }}
 QPushButton#anchor:hover {{ background: #3a3320; }}

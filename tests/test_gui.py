@@ -84,7 +84,7 @@ def _wait_until(app, condition, timeout_s: float = 120.0) -> None:
 def _proxy_row_named(window, name: str) -> int:
     return next(
         r for r in range(window._proxy.rowCount())
-        if window._proxy.data(window._proxy.index(r, 0)) == name
+        if window._proxy.data(window._proxy.index(r, SampleTreeModel.COL_FILE)) == name
     )
 
 
@@ -118,9 +118,9 @@ def test_sample_model_rows_and_drag_urls(app, index):
     model = SampleTreeModel(rows=load_samples(conn))
 
     assert model.rowCount() == 2 and model.columnCount() == len(SampleTreeModel.COLUMNS)
-    files = {model.data(model.index(r, 0)) for r in range(2)}
+    files = {model.data(model.index(r, SampleTreeModel.COL_FILE)) for r in range(2)}
     assert files == {"hit.wav", "loop.wav"}
-    assert model.headerData(2, Qt.Orientation.Horizontal) == "Length"
+    assert model.headerData(SampleTreeModel.COL_LENGTH, Qt.Orientation.Horizontal) == "Length"
     assert all(model.rowCount(model.index(r, 0)) == 0 for r in range(2))   # no scores: no sub-hits
 
     mime = model.mimeData([model.index(0, 0), model.index(0, 3), model.index(1, 0)])
@@ -137,12 +137,12 @@ def test_proxy_sorts_length_as_a_number_and_filters_across_columns(app, index):
     proxy.setSourceModel(model)
 
     proxy.sort(2, Qt.SortOrder.DescendingOrder)               # Length
-    assert proxy.data(proxy.index(0, 0)) == "loop.wav"        # 4.0 s before 0.4 s
+    assert proxy.data(proxy.index(0, SampleTreeModel.COL_FILE)) == "loop.wav"        # 4.0 s before 0.4 s
 
     proxy.setFilterFixedString("drums")                       # matches the Folder column
-    assert proxy.rowCount() == 1 and proxy.data(proxy.index(0, 0)) == "loop.wav"
+    assert proxy.rowCount() == 1 and proxy.data(proxy.index(0, SampleTreeModel.COL_FILE)) == "loop.wav"
     proxy.setFilterFixedString("one-shot")                    # matches the Type column
-    assert proxy.rowCount() == 1 and proxy.data(proxy.index(0, 0)) == "hit.wav"
+    assert proxy.rowCount() == 1 and proxy.data(proxy.index(0, SampleTreeModel.COL_FILE)) == "hit.wav"
     assert proxy.visible_sample_ids() == {model.row_at(model.index(1, 0)).id} or len(proxy.visible_sample_ids()) == 1
 
 
@@ -201,8 +201,8 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_pa
         assert window._waveform._selected_segment == first               # mirrored on the waveform
         assert window._current_offset_ms == window._segment_rows[0].start_ms
 
-        window._on_column_filter(0, ColumnFilter(text="hit"))         # the File header's filter
-        assert window._proxy.rowCount() == 1 and 0 in window._header.filters
+        window._on_column_filter(SampleTreeModel.COL_FILE, ColumnFilter(text="hit"))   # the File header's filter
+        assert window._proxy.rowCount() == 1 and SampleTreeModel.COL_FILE in window._header.filters
     finally:
         window.close()
 
@@ -228,10 +228,10 @@ def test_text_search_scores_the_list_and_nests_a_sub_hit(app, index, tmp_path):
         # The loop's segments are "kick drum" while the loop itself is a pad:
         # the segment shows as a sub-hit row under its parent (§9.4).
         loop = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
-        assert window._proxy.rowCount(loop) == 1
+        assert window._proxy.rowCount(loop) >= 1 and window._table.isExpanded(loop)   # its sections, the hit first
         sub_hit = window._proxy.index(0, 0, loop)
         assert window._proxy.data(sub_hit).startswith("↳ hit @")
-        assert window._proxy.data(window._proxy.index(0, 3, loop)) == "hit"
+        assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_TYPE, loop)) == "hit"
         assert window._proxy.rowCount(sub_hit) == 0
         del top
 
@@ -250,11 +250,13 @@ def test_text_search_scores_the_list_and_nests_a_sub_hit(app, index, tmp_path):
         window._search_panel.search_for("kick drum")             # a second query while one is in flight
         window._search_panel.search_for("a synth pad")            # ... is replaced by the newest
         _wait_until(app, lambda: window._search_thread is None and "synth pad" in window.statusBar().currentMessage())
-        assert window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"
+        assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_FILE)) == "loop.wav"
 
         window._search_panel._clear_search()
         assert window._table.isColumnHidden(SampleTreeModel.COL_MATCH)
-        assert window._proxy.rowCount(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)) == 0
+        loop = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
+        assert window._proxy.rowCount(loop) == len(window._segment_rows) > 0     # the sections stay under it…
+        assert not window._table.isExpanded(loop)                                # … folded, nothing scores now
     finally:
         window.close()
 
@@ -288,7 +290,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
 
         _rerank(app, window)                                       # the bars re-rank on release
         assert not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
-        assert window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"   # the anchor itself first
+        assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_FILE)) == "loop.wav"   # the anchor itself first
         assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_SIMILARITY)) == "100"
         assert "ranked 2 samples" in window.statusBar().currentMessage()
 
@@ -296,13 +298,13 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         # ✕ leaves the ranked list as it is.
         window._anchor_delegate.anchor_clicked.emit(window._proxy.index(_proxy_row_named(window, "hit.wav"), 0))
         assert window._anchor_name.endswith("hit.wav")
-        assert window._proxy.data(window._proxy.index(0, 0)) == "hit.wav"
+        assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_FILE)) == "hit.wav"
         assert "ranked 2 samples" in window.statusBar().currentMessage()
         window._clear_anchor()
         assert window._anchor is None and not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
-        assert window._proxy.data(window._proxy.index(0, 0)) == "hit.wav"
+        assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_FILE)) == "hit.wav"
         window._anchor_delegate.anchor_clicked.emit(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
-        assert window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"
+        assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_FILE)) == "loop.wav"
 
         values = window._attributes.difference_values()                 # the anchor vs itself
         assert values["amplitude"] == 0 and values["pitch"] is None      # ... and clicks have no pitch
@@ -347,19 +349,19 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
 
         # Type, length and tempo filter from the list's own header (2026-09-08):
         # a checklist of the values present, and min/max ranges on the raw value.
-        window._on_column_filter(3, ColumnFilter(values=frozenset({"loop"})))
-        assert window._proxy.rowCount() == 1 and window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"
-        window._on_column_filter(3, None)
+        window._on_column_filter(SampleTreeModel.COL_TYPE, ColumnFilter(values=frozenset({"loop"})))
+        assert window._proxy.rowCount() == 1 and window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_FILE)) == "loop.wav"
+        window._on_column_filter(SampleTreeModel.COL_TYPE, None)
 
-        window._on_column_filter(2, ColumnFilter(low=1.0))
+        window._on_column_filter(SampleTreeModel.COL_LENGTH, ColumnFilter(low=1.0))
         assert window._proxy.rowCount() == 1
-        window._on_column_filter(2, None)
+        window._on_column_filter(SampleTreeModel.COL_LENGTH, None)
 
-        window._on_column_filter(4, ColumnFilter(low=100.0))            # the loop is 120 BPM; the hit has none
-        assert window._proxy.rowCount() == 1 and window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"
-        window._on_column_filter(4, ColumnFilter(low=200.0))
+        window._on_column_filter(SampleTreeModel.COL_BPM, ColumnFilter(low=100.0))   # the loop is 120 BPM; the hit has none
+        assert window._proxy.rowCount() == 1 and window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_FILE)) == "loop.wav"
+        window._on_column_filter(SampleTreeModel.COL_BPM, ColumnFilter(low=200.0))
         assert window._proxy.rowCount() == 0
-        window._on_column_filter(4, None)
+        window._on_column_filter(SampleTreeModel.COL_BPM, None)
         assert window._proxy.rowCount() == 2
         assert not panel.criteria().clap_min                            # the Search tab keeps only its own filters
 
@@ -629,9 +631,9 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         assert "3 samples placed" in panel.log_text()
         assert (tmp_path / "layouts" / "layout_1.pkl").exists()   # next to the segment cache
 
-        window._on_column_filter(0, ColumnFilter(text="hit"))     # one shared filtered set
+        window._on_column_filter(SampleTreeModel.COL_FILE, ColumnFilter(text="hit"))   # one shared filtered set
         assert window._map.visible_count == 1
-        window._on_column_filter(0, None)
+        window._on_column_filter(SampleTreeModel.COL_FILE, None)
         assert window._map.visible_count == 3
 
         window._map.sample_clicked.emit(loop_id)                  # map → list → preview target
@@ -693,10 +695,10 @@ def test_a_search_can_land_on_a_window_inside_a_long_file(app, tmp_path):
         window._search_panel.search_for("a door slam")
         _wait_until(app, lambda: window._search_thread is None and "door slam" in window.statusBar().currentMessage())
         parent = window._proxy.index(_proxy_row_named(window, "ambience.wav"), 0)
-        assert window._proxy.rowCount(parent) == 1
-        sub_hit = window._proxy.index(0, 0, parent)
+        assert window._proxy.rowCount(parent) >= 1 and window._table.isExpanded(parent)
+        sub_hit = window._proxy.index(0, 0, parent)                    # the best-matching section first
         assert window._proxy.data(sub_hit) == "↳ window @ 20.000 s (5 s)"
-        assert window._proxy.data(window._proxy.index(0, 3, parent)) == "window"
+        assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_TYPE, parent)) == "window"
 
         window._table.setCurrentIndex(sub_hit)
         assert window._current_label == "window @ 20.000 s (5 s) in ambience.wav"
@@ -971,5 +973,43 @@ def test_a_second_click_on_the_anchor_circle_clears_the_anchor(app, index, tmp_p
         window._on_anchor_clicked(window._proxy.index(_proxy_row_named(window, "hit.wav"), 0))    # an empty one anchors
         _wait_until(app, lambda: window._anchor is not None and not window._feature_waiters)
         assert window._anchor_name.endswith("hit.wav")
+    finally:
+        window.close()
+
+
+# --- every section under its sample, ordered by similarity when ranked (2026-09-08) ---
+
+
+def test_every_section_sits_under_its_sample_ordered_by_similarity(app, index, tmp_path):
+    from crate.listmodel import SORT_ROLE
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
+    try:
+        window._autoplay.setChecked(False)
+        assert list(SampleTreeModel.COLUMNS[:3]) == ["Folder", "File", "Caption"]
+        header = window._table.header()
+        assert header.visualIndex(SampleTreeModel.COL_FOLDER) == 0 and header.visualIndex(SampleTreeModel.COL_FILE) == 1
+        loop_id = conn.execute("SELECT id FROM samples WHERE filename = 'loop.wav'").fetchone()[0]
+        expected = conn.execute(
+            "SELECT COUNT(*) FROM segments WHERE sample_id = ? AND detection_method != 'window'", (loop_id,)
+        ).fetchone()[0]
+        loop = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
+        n = window._proxy.rowCount(loop)
+        assert n == expected > 1 and not window._table.isExpanded(loop)         # all of them, folded
+        starts = [window._proxy.data(window._proxy.index(i, 0, loop), SORT_ROLE) for i in range(n)]
+        assert starts == sorted(starts)                                          # in time order, nothing scored
+        assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_CAPTION)) in ("", "a click loop")
+
+        window._table.setCurrentIndex(window._proxy.index(1, 0, loop))           # anchor the second section
+        _anchor_current(app, window)
+        assert window._anchor is not None and window._anchor[0] == "segment"
+        loop = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
+        assert window._proxy.rowCount(loop) == n and window._table.isExpanded(loop)
+        sims = [window._proxy.data(window._proxy.index(i, SampleTreeModel.COL_SIMILARITY, loop), SORT_ROLE) for i in range(n)]
+        assert sims == sorted(sims, reverse=True) and sims[0] > sims[-1]         # best first: the anchored one
+        assert window._samples.anchor == ("segment", window._samples.hit_at(
+            window._proxy.mapToSource(window._proxy.index(0, 0, loop))).segment_id)
     finally:
         window.close()

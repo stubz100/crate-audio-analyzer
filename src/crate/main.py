@@ -42,6 +42,7 @@ from .catalog import (
     index_summary,
     load_caption,
     load_samples,
+    load_sections,
     load_segments,
     load_tags,
     load_vector,
@@ -74,14 +75,15 @@ SETTINGS_KEY_ANCHOR_ID = "anchor/id"
 SETTINGS_KEY_SPLITTER = "window/splitter3"  # left column | list/map, as dragged (3: the 2026-09-08 arrangement)
 # What each list column's header popup edits (2026-09-08, `headerfilter.py`).
 COLUMN_SPECS = {
-    0: ColumnSpec("text"),
-    1: ColumnSpec("text"),
-    2: ColumnSpec("range", "s", decimals=2, maximum=99_999),
-    3: ColumnSpec("values"),
-    4: ColumnSpec("range", "BPM", maximum=999),
-    5: ColumnSpec("values"),
-    6: ColumnSpec("text"),
-    7: ColumnSpec("range", maximum=9_999),
+    SampleTreeModel.COL_FOLDER: ColumnSpec("text"),
+    SampleTreeModel.COL_FILE: ColumnSpec("text"),
+    SampleTreeModel.COL_CAPTION: ColumnSpec("text"),
+    SampleTreeModel.COL_LENGTH: ColumnSpec("range", "s", decimals=2, maximum=99_999),
+    SampleTreeModel.COL_TYPE: ColumnSpec("values"),
+    SampleTreeModel.COL_BPM: ColumnSpec("range", "BPM", maximum=999),
+    SampleTreeModel.COL_KEY: ColumnSpec("values"),
+    SampleTreeModel.COL_TAGS: ColumnSpec("text"),
+    SampleTreeModel.COL_HITS: ColumnSpec("range", maximum=9_999),
     SampleTreeModel.COL_SIMILARITY: ColumnSpec("range", "%", maximum=100, scale=100.0),
     SampleTreeModel.COL_MATCH: ColumnSpec("range", "%", maximum=100, scale=100.0),
 }
@@ -292,8 +294,8 @@ class MainWindow(QMainWindow):
         self._table.setItemDelegateForColumn(0, self._anchor_delegate)
         header = self._table.header()
         header.setResizeContentsPrecision(200)   # measure a sample of rows, not all of them
-        header.moveSection(header.visualIndex(SampleTreeModel.COL_MATCH), 1)
-        header.moveSection(header.visualIndex(SampleTreeModel.COL_SIMILARITY), 1)
+        header.moveSection(header.visualIndex(SampleTreeModel.COL_MATCH), 2)       # after Folder and File
+        header.moveSection(header.visualIndex(SampleTreeModel.COL_SIMILARITY), 2)
         self._configure_drag_view(self._table)
         self._table.selectionModel().currentRowChanged.connect(self._on_sample_selected)
         self._table.doubleClicked.connect(lambda _index: self._play_current())
@@ -434,7 +436,7 @@ class MainWindow(QMainWindow):
         rows = load_samples(self._conn, scope=scope)
         self._rows_by_id = {r.id: r for r in rows}
         self._source_row_of = {r.id: i for i, r in enumerate(rows)}
-        self._samples.set_rows(rows)
+        self._samples.set_rows(rows, load_sections(self._conn, scope))   # every section under its sample
         self._samples.set_similarity(None)
         self._samples.set_match(None)
         self._segment_rows = []
@@ -541,7 +543,9 @@ class MainWindow(QMainWindow):
         ):
             self._table.setColumnHidden(column, not present)
             if present:
-                self._table.resizeColumnToContents(column)   # measured while hidden = too narrow
+                # A fixed width: sizing to contents walks every row through Python
+                # (1.4 s with 30k section rows, measured 2026-09-08); a score is 0–100.
+                self._table.header().resizeSection(column, 76)
 
     # --- selection / preview ---
 
@@ -867,7 +871,7 @@ class MainWindow(QMainWindow):
         self._samples.set_similarity(scores)
         self._update_score_columns()
         self._table.sortByColumn(SampleTreeModel.COL_SIMILARITY, Qt.SortOrder.DescendingOrder)
-        self._table.expandAll()
+        self._expand_hits()
         anchor_sample = self._anchor_sample_id()
         ranked = [
             sid for sid in sorted(scores.sample, key=scores.sample.get, reverse=True)
@@ -926,7 +930,7 @@ class MainWindow(QMainWindow):
         self._samples.set_match(scores)
         self._update_score_columns()
         self._table.sortByColumn(SampleTreeModel.COL_MATCH, Qt.SortOrder.DescendingOrder)
-        self._table.expandAll()
+        self._expand_hits()
         self._update_badges()
         self._map.set_scores(scores.sample, f"match to “{text}”")
         self.statusBar().showMessage(
@@ -942,7 +946,7 @@ class MainWindow(QMainWindow):
         self._map.set_scores(similarity.sample if similarity else None, "similarity to the anchor")
         if self._samples.has_similarity:
             self._table.sortByColumn(SampleTreeModel.COL_SIMILARITY, Qt.SortOrder.DescendingOrder)
-            self._table.expandAll()
+            self._expand_hits()
 
     # --- the map (§9.3) and its layout (§9.6) ---
 
@@ -973,6 +977,21 @@ class MainWindow(QMainWindow):
 
     def _sync_map_visibility(self, *_args) -> None:
         self._map.set_visible(self._proxy.visible_sample_ids())
+
+    def _expand_hits(self) -> None:
+        """Open the samples whose winning hit is a section (so the ranked or
+        matched section shows, at the top of its sample's sections); every
+        other sample stays folded."""
+        # Called right after a model reset, which folds everything already: no
+        # collapseAll() first (it walked 3k open samples in 0.6 s, measured 2026-09-08).
+        self._table.setUpdatesEnabled(False)         # thousands of expands: one relayout, not one each
+        try:
+            for sample_id in self._samples.hit_sample_ids():
+                source_row = self._source_row_of.get(sample_id)
+                if source_row is not None:
+                    self._table.expand(self._proxy.mapFromSource(self._samples.index(source_row, 0)))
+        finally:
+            self._table.setUpdatesEnabled(True)
 
     def _update_badges(self) -> None:
         self._map.set_badges(self._samples.hit_sample_ids())
