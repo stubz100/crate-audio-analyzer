@@ -24,7 +24,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 6 | Map View | ✅ done — `72ad400` (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
 | 8 | Recompute Tab | ✅ done — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; ranking with Phase 7 (`4756a35`), map layout (both scopes) with Phase 6 (`72ad400`); reshaped into a Library panel + one Recompute panel `b04ab9c`; ⚓ anchored-only Recompute *attributes*, the last piece, `b1c037f` (2026-09-08; schema v10 with it) |
-| 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`), the waveform panel with segment markers, envelope and playhead since `5acfcd4`; marker editing (drag, Save / Delete segment) not started |
+| 9 | Header Interactions | ✅ done — preview + drag-out since 4.5, the ⚓ anchor since Phase 7 (`4756a35`; on every row since 2026-09-08), the waveform panel with segment markers, envelope and playhead `5acfcd4`; marker editing — drag, draw, Save / Discard / Delete segment — `MARKERS_HASH` (2026-09-08) |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
 | 12 | Scale & Polish Hardening | ⬜ not started |
@@ -1026,3 +1026,29 @@ The user: finish what is left of Phase 8 first.
 **Next**
 
 - Phase 9's marker editing (drag, Save / Delete segment); captions as a search channel.
+
+## 2026-09-08 — Manual markers on the waveform: Phase 9 complete
+
+**Phase:** 9 (the last piece) · `MARKERS_HASH`
+
+The user: complete Phase 9.
+
+**Done**
+
+- **Markers drag, segments draw** (`waveform.py`, `WaveformView`): a press within 6 px of a segment's begin or end marker grabs it (the cursor turns to a resize arrow over one); a drag elsewhere draws a new segment in either direction; a press that moves under 4 px is still the click it was (select the segment / seek). A marker never crosses its partner; bounds are clipped to the file. Every edit is **staged** — `stage_edit` / `add_draft` / `staged()` / `discard()` — and painted dashed with "unsaved" (a moved segment, green from then on) or "new" (a draft); the header counts them. Esc discards, Del asks to delete the selected segment; loading another sample drops the staging. A moved segment put back where it was leaves nothing to save.
+- **`WaveformPanel`**: the view with **Save segment** ("Save N segments"), **Discard** and **Delete segment** under it, enabled by the staging and the selection (a CLAP window is never deletable), and a one-line hint. The window keeps `_waveform` as the view; the panel sits in the bottom splitter pane.
+- **Save and Delete as jobs** (`main.py`, `_save_segments` / `_delete_segment`, through `RecomputePanel.start_job`, which now says whether it started): `update_segment` for a moved one — manual and confirmed, review flag cleared, render and vector dropped — and `create_manual_segment` for a drawn one, described on the spot; `delete_segment` after `_confirm` (a Yes/No box; tests replace it). The job's reload shows the result and keeps the selection; while a job runs the markers stay unsaved and the status bar says so.
+
+**Decided**
+
+- Jobs, not direct writes: a segment's descriptors decode the parent (a 16-minute ambience takes seconds), and a job shares the log, Stop and the reload the window already has. The price is that a save waits for a running recompute.
+- Staging is per sample and not persisted: an unsaved drag is cheap to redo; §6.3 is about what reaches the index, and nothing does until Save.
+
+**Verified**
+
+- `uv run pytest tests -q` → **192 passed, 3 skipped**; pyflakes clean. New: the view's drag, draw, clamp, click-without-movement, Esc, Del, the drop on load and the clipping; the panel's buttons; the window's save (a moved automatic segment manual + confirmed with its render gone, a drawn one created and described, the table showing both after the reload) and delete (refused, then confirmed, then gone).
+- The user's index (the copy): a 4-s vowel with four auto segments — one moved and one drawn, saved in 3.7 s including the reload of 4,568 rows; the drawn one selected in the table and deleted in 1.7 s. Screenshots checked: the dashed unsaved spans with the header's "2 unsaved" and the buttons, then the two green manual segments.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export — native drag-out is done); captions as a search channel; Phase 11's corrections.

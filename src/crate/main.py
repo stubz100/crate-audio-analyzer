@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -58,10 +59,11 @@ from .mapview import MapView
 from .library import scope_paths
 from .recompute import EncoderFactory, RecomputePanel, RunPlan
 from .search import SearchPanel
+from .segmentation import create_manual_segment, delete_segment, update_segment
 from .render import default_cache_dir, render_segment
 from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable, Scores
 from .theme import ElidedLabel, apply_theme
-from .waveform import WaveformView
+from .waveform import WaveformPanel
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +129,16 @@ class Preview:
         from PySide6.QtMultimedia import QMediaPlayer
 
         return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
+
+class _Outcome:
+    """A job's one-line result for the Recompute log (`JobThread` calls `.format()`)."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def format(self) -> str:
+        return self.text
 
 
 class _FeatureThread(QThread):
@@ -216,6 +228,7 @@ class MainWindow(QMainWindow):
         self._features: FeatureTable | None = None
         self._current: Path | None = None
         self._current_item: tuple[str, int] | None = None
+        self._current_sample: int | None = None     # the selected sample (a hit's parent): where markers are saved
         self._anchor: tuple[str, int] | None = None
         self._anchor_parent: int | None = None    # the anchor's sample (a hit's parent)
         self._anchor_vector = None
@@ -285,14 +298,18 @@ class MainWindow(QMainWindow):
         self._list_button.clicked.connect(lambda: self._views.setCurrentWidget(self._table))
         self._map_button.clicked.connect(lambda: self._views.setCurrentWidget(self._map))
 
-        # --- the waveform panel (§9.2's preview strip, at the bottom on the user's steer) ---
-        self._waveform = WaveformView()
+        # --- the waveform panel (§9.2's preview strip, at the bottom on the user's steer;
+        # its markers editable since 2026-09-08, Phase 9) ---
+        self._waveform_panel = WaveformPanel()
+        self._waveform = self._waveform_panel.view
         self._waveform.segment_clicked.connect(self._select_segment_row)
         self._waveform.position_clicked.connect(self._seek)
+        self._waveform_panel.save_requested.connect(self._save_segments)
+        self._waveform_panel.delete_requested.connect(self._delete_segment)
 
         tables = QSplitter(Qt.Orientation.Vertical)
         tables.addWidget(self._views)
-        tables.addWidget(self._waveform)
+        tables.addWidget(self._waveform_panel)
         tables.setStretchFactor(0, 4)
         tables.setStretchFactor(1, 1)
         self._panes = tables
@@ -522,6 +539,7 @@ class MainWindow(QMainWindow):
         source = self._proxy.mapToSource(current)
         row = self._samples.row_at(source)
         hit = self._samples.hit_at(source)
+        self._current_sample = row.id
         self._map.set_selected(row.id)
         # The drill-down and the chips are the sample's either way — a sub-hit
         # is a segment *of* that sample (2026-09-07 review).
@@ -642,6 +660,63 @@ class MainWindow(QMainWindow):
             return
         position = self._preview.position_ms
         self._waveform.set_position_ms(None if position is None else position + self._current_offset_ms)
+
+    # --- manual markers (§9.2, §6.3) ---
+
+    def _save_segments(self) -> None:
+        """*Save segment*: the markers moved or drawn on the waveform become
+        manual segments (§6.3) — a moved automatic one turns manual and
+        confirmed, its cached render and vector dropped. A job, since a
+        segment's descriptors decode the parent: it shares the log and the
+        reload that shows the result."""
+        staged = self._waveform.staged()
+        sample_id = self._current_sample
+        if not staged or sample_id is None:
+            return
+        row = self._rows_by_id.get(sample_id)
+        name = row.filename if row is not None else f"sample {sample_id}"
+
+        def job(conn, _stop) -> _Outcome:
+            created = moved = 0
+            for segment_id, start_ms, end_ms in staged:
+                if segment_id is None:
+                    create_manual_segment(conn, sample_id, start_ms, end_ms)
+                    created += 1
+                else:
+                    update_segment(conn, segment_id, start_ms, end_ms)
+                    moved += 1
+            return _Outcome(
+                f"saved {created} new and {moved} moved segment(s) of {name}: manual now, "
+                "exempt from the automatic rules and never overwritten (§6.3)"
+            )
+
+        if self._recompute.start_job(f"save {len(staged)} segment(s) of {name}", job):
+            self._waveform.discard()                    # written by the job; the reload shows them
+        else:
+            self.statusBar().showMessage("a job is running: the markers stay unsaved until it ends")
+
+    def _delete_segment(self, segment_id: int) -> None:
+        """*Delete segment*: automatic or manual, deliberately — asked first.
+        §6.3's protection is against silent automatic overwrite, not against
+        this."""
+        label = describe_item(self._conn, KIND_SEGMENT, segment_id) or f"segment {segment_id}"
+        if not self._confirm(
+            f"Delete {label}?\n\nIts descriptors, vector and cached render go with it; "
+            "a recompute does not bring a manual segment back."
+        ):
+            return
+        if not self._recompute.start_job(
+            f"delete {label}",
+            lambda conn, _stop: _Outcome("deleted" if delete_segment(conn, segment_id) else "already gone"),
+        ):
+            self.statusBar().showMessage("a job is running: try again when it ends")
+
+    def _confirm(self, question: str) -> bool:
+        answer = QMessageBox.question(
+            self, "Crate", question,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     # --- anchor (§9.2) and ranking (§9.6) ---
 

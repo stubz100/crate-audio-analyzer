@@ -877,3 +877,64 @@ def test_anchor_only_attributes_redo_the_anchor_alone(app, index, tmp_path):
         assert not panel._attributes_anchored.isEnabled() and panel._changed_only.isChecked()
     finally:
         window.close()
+
+
+# --- Phase 9 (2026-09-08): Save / Delete segment from the waveform panel ---
+
+
+def test_save_and_delete_segments_from_the_waveform(app, index, tmp_path):
+    """§9.2 / §6.3: staged markers are written only by Save — a moved automatic
+    segment becomes manual and confirmed with its render dropped, a drawn one
+    is created and described — and Delete removes one after asking."""
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
+    try:
+        window._autoplay.setChecked(False)
+        panel, view, jobs = window._waveform_panel, window._waveform, window._recompute
+        window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
+        loop_id = conn.execute("SELECT id FROM samples WHERE filename = 'loop.wav'").fetchone()[0]
+        first = load_segments(conn, loop_id)[0]
+        conn.execute("UPDATE segments SET cache_path = 'old.wav' WHERE id = ?", (first.id,))
+        conn.commit()
+        assert not panel._save.isEnabled() and not panel._delete.isEnabled()
+
+        view.stage_edit(first.id, first.start_ms + 20, first.end_ms + 40)
+        view.add_draft(3000, 3500)
+        assert panel._save.text() == "Save 2 segments"
+        panel._save.click()
+        assert not view.has_staged                                 # handed to the job
+
+        def saved():
+            return conn.execute(
+                "SELECT id FROM segments WHERE sample_id = ? AND start_ms = 3000 AND end_ms = 3500 "
+                "AND detection_method = 'manual' AND is_user_confirmed = 1", (loop_id,),
+            ).fetchone()
+        _wait_until(app, lambda: not jobs.running and saved() is not None)
+        new_id = saved()[0]
+        assert "saved 1 new and 1 moved" in jobs.log_text()
+        moved = conn.execute(
+            "SELECT start_ms, end_ms, detection_method, is_user_confirmed, needs_review, cache_path "
+            "FROM segments WHERE id = ?", (first.id,),
+        ).fetchone()
+        assert tuple(moved) == (first.start_ms + 20, first.end_ms + 40, "manual", 1, 0, None)
+        assert conn.execute("SELECT COUNT(*) FROM segment_analysis WHERE segment_id = ?", (new_id,)).fetchone()[0] == 1
+        _wait_until(app, lambda: window._segments.index_of(new_id) is not None)   # the reload shows it
+        assert window._current_sample == loop_id and "2 manual" in view._header_text()
+
+        window._segment_table.selectRow(window._segments.index_of(new_id))
+        assert view.selected_segment == new_id and panel._delete.isEnabled()
+        asked: list[str] = []
+        window._confirm = lambda question: asked.append(question) is None and False
+        panel._delete.click()                                      # refused: nothing happens
+        assert len(asked) == 1 and "3.000 s" in asked[0] and not jobs.running
+        assert conn.execute("SELECT COUNT(*) FROM segments WHERE id = ?", (new_id,)).fetchone()[0] == 1
+        window._confirm = lambda question: True
+        panel._delete.click()
+        _wait_until(app, lambda: not jobs.running
+                    and conn.execute("SELECT COUNT(*) FROM segments WHERE id = ?", (new_id,)).fetchone()[0] == 0)
+        _wait_until(app, lambda: window._segments.index_of(new_id) is None)
+        assert "deleted" in jobs.log_text() and window._current_sample == loop_id
+    finally:
+        window.close()

@@ -5,8 +5,15 @@ Shows the selected sample's waveform, every segment as a begin/end marker
 pair with its strength, the measured attack and decay (the envelope the
 Amplitude axis reads, §5.1 — the closest thing to an ADSR a recording has),
 and the preview's playhead. Clicking inside a segment selects it (which
-previews it); clicking elsewhere seeks. Display only for now: dragging
-markers and Save / Delete segment are Phase 9.
+previews it); clicking elsewhere seeks.
+
+Phase 9 (2026-09-08): the markers are editable. Drag a segment's begin or
+end marker to move it; drag on the waveform to draw a new segment. Every
+edit is *staged* — dashed, "unsaved" — and written only by *Save segment*
+(§6.3: staged on drag, committed only via Save), which the window does;
+*Discard* or Esc drops it, as does loading another sample. *Delete
+segment* (or Del) asks the window to remove the selected one. The panel
+class below holds the view and the buttons.
 
 The envelope is read in blocks (`soundfile`), so a 16-minute ambience costs
 one pass over the file and never more memory than one block.
@@ -21,11 +28,11 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 from PySide6.QtCore import QPointF, QRectF, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from .catalog import SegmentRow
-from .theme import ACCENT, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE
+from .theme import ACCENT, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +43,9 @@ _SIDE = 6.0
 _TICK_STEPS = (0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600)
 _DECAY_LEVEL = 0.1  # −20 dB, the level analysis.decay_ms is measured to
 INLINE_MAX_SECONDS = 30.0  # longer files read on a thread: a 16-minute ambience took 4.7 s
+MARKER_GRAB_PX = 6.0       # a press this close to a marker grabs it
+DRAG_THRESHOLD_PX = 4.0    # less movement than this is a click
+MIN_SEGMENT_MS = 1         # a marker never crosses its partner
 
 
 @dataclass
@@ -109,10 +119,15 @@ class _EnvelopeThread(QThread):
 class WaveformView(QWidget):
     segment_clicked = Signal(int)      # a click inside a segment's span
     position_clicked = Signal(int)     # a click elsewhere: milliseconds
+    staged_changed = Signal()          # unsaved markers came, went or moved
+    selection_changed = Signal(object) # the selected segment id, or None
+    delete_requested = Signal(int)     # Del on the selected segment
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setMinimumHeight(110)
+        self.setMouseTracking(True)                     # the cursor says when a marker is under it
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)  # Esc / Del after a click on the plot
         self._env: Envelope | None = None
         self._title = ""
         self._error: str | None = None
@@ -124,6 +139,9 @@ class WaveformView(QWidget):
         self._position_ms: int | None = None
         self._generation = 0
         self._thread: _EnvelopeThread | None = None
+        self._edits: dict[int, tuple[int, int]] = {}    # segment id → staged (start_ms, end_ms), unsaved
+        self._drafts: list[tuple[int, int]] = []         # segments drawn by hand, unsaved
+        self._drag: tuple | None = None                  # ("move", key, edge) | ("press", ms, x)
 
     # --- data in ---
 
@@ -143,6 +161,8 @@ class WaveformView(QWidget):
         self._decay_ms = decay_ms
         self._selected_segment = None
         self._position_ms = None
+        self._reset_staging()                       # another sample: an unsaved drag is dropped
+        self.selection_changed.emit(None)
         self._generation += 1
         try:
             seconds = sf.info(str(path)).duration
@@ -207,15 +227,20 @@ class WaveformView(QWidget):
         self._windows = []
         self._selected_segment = None
         self._position_ms = None
+        self._reset_staging()
+        self.selection_changed.emit(None)
         self.update()
 
     def set_segments(self, segments: list[SegmentRow]) -> None:
         self._segments = list(segments)
+        self._reset_staging()
+        self.selection_changed.emit(self._selected_segment)
         self.update()
 
     def set_selected_segment(self, segment_id: int | None) -> None:
         if segment_id != self._selected_segment:
             self._selected_segment = segment_id
+            self.selection_changed.emit(segment_id)
             self.update()
 
     def set_position_ms(self, position_ms: int | None) -> None:
@@ -309,6 +334,8 @@ class WaveformView(QWidget):
         if self._segments:
             manual = sum(1 for s in self._segments if s.detection_method == "manual")
             parts.append(f"{len(self._segments)} segments" + (f" ({manual} manual)" if manual else ""))
+        if self.has_staged:
+            parts.append(f"{len(self._edits) + len(self._drafts)} unsaved")
         if self._windows:
             parts.append(f"{len(self._windows)} CLAP windows")
         return "  ·  ".join(parts)
@@ -339,25 +366,43 @@ class WaveformView(QWidget):
             painter.drawRect(QRectF(x0 + 0.5, rect.bottom() - strip, max(x1 - x0 - 1.0, 1.0), strip))
 
     def _paint_segments(self, painter: QPainter, rect: QRectF) -> None:
+        """Every segment at its shown bounds — staged ones dashed and marked
+        "unsaved", drafts (drawn, not yet saved) green and marked "new"."""
         for seg in self._segments:
-            x0 = self._x_of(seg.start_ms / 1000, rect)
-            x1 = self._x_of(seg.end_ms / 1000, rect)
-            selected = seg.id == self._selected_segment
-            manual = seg.detection_method == "manual"
-            fill = _alpha(GREEN, 80 if selected else 40) if manual else _alpha(AMBER, 90 if selected else 45)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(fill)
-            painter.drawRect(QRectF(x0, rect.top(), max(x1 - x0, 1.0), rect.height()))
-            edge = GREEN if manual else AMBER
-            painter.setPen(QPen(edge, 2.0 if selected else 1.0))
-            painter.drawLine(QPointF(x0, rect.top()), QPointF(x0, rect.bottom()))
-            painter.drawLine(QPointF(x1, rect.top()), QPointF(x1, rect.bottom()))
+            start_ms, end_ms = self.bounds_of(seg.id)
+            staged = seg.id in self._edits
+            manual = seg.detection_method == "manual" or staged   # a moved marker makes it manual on save (§6.3)
             label = f"{seg.strength:.2f}" if seg.strength is not None else ("manual" if manual else "")
             if seg.needs_review:
                 label = "review!"
-            if label and x1 - x0 > 28:
-                painter.setPen(edge)
-                painter.drawText(QRectF(x0 + 2, rect.top() + 1, x1 - x0 - 4, 14), Qt.AlignmentFlag.AlignLeft, label)
+            if staged:
+                label = "unsaved"
+            self._paint_span(
+                painter, rect, start_ms, end_ms, GREEN if manual else AMBER,
+                selected=seg.id == self._selected_segment, dashed=staged, label=label,
+            )
+        for start_ms, end_ms in self._drafts:
+            self._paint_span(painter, rect, start_ms, end_ms, GREEN, selected=False, dashed=True, label="new")
+
+    def _paint_span(
+        self, painter: QPainter, rect: QRectF, start_ms: int, end_ms: int, colour: QColor,
+        selected: bool, dashed: bool, label: str,
+    ) -> None:
+        x0 = self._x_of(start_ms / 1000, rect)
+        x1 = self._x_of(end_ms / 1000, rect)
+        strong, weak = (80, 40) if colour is GREEN else (90, 45)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(_alpha(colour, strong if selected else weak))
+        painter.drawRect(QRectF(x0, rect.top(), max(x1 - x0, 1.0), rect.height()))
+        pen = QPen(colour, 2.0 if (selected or dashed) else 1.0)
+        if dashed:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(x0, rect.top()), QPointF(x0, rect.bottom()))
+        painter.drawLine(QPointF(x1, rect.top()), QPointF(x1, rect.bottom()))
+        if label and x1 - x0 > painter.fontMetrics().horizontalAdvance(label) + 6:   # only when it fits
+            painter.setPen(colour)
+            painter.drawText(QRectF(x0 + 2, rect.top() + 1, x1 - x0 - 4, 14), Qt.AlignmentFlag.AlignLeft, label)
 
     def _paint_envelope(self, painter: QPainter, rect: QRectF, mid: float, half: float) -> None:
         if self._env is None or self._attack_ms is None or self._env.columns == 0:
@@ -388,14 +433,223 @@ class WaveformView(QWidget):
             painter.drawText(QRectF(x - 30, rect.bottom() + 3, 60, 13), Qt.AlignmentFlag.AlignHCenter, label)
             t += step
 
+    # --- staged edits (§9.2: staged on drag, committed only via Save) ---
+
+    def bounds_of(self, key: int) -> tuple[int, int]:
+        """A segment's bounds as shown: staged if moved, else stored. Keys ≥ 1
+        are segment ids; negative keys are drafts (-1 = the first drawn)."""
+        if key < 0:
+            return self._drafts[-key - 1]
+        if key in self._edits:
+            return self._edits[key]
+        seg = next((s for s in self._segments if s.id == key), None)
+        if seg is None:
+            raise LookupError(f"no segment {key} on the waveform")
+        return seg.start_ms, seg.end_ms
+
+    def stage_edit(self, segment_id: int, start_ms: int, end_ms: int) -> None:
+        """Stage new bounds for a segment (nothing is written). Bounds back
+        where the stored ones are leave nothing to save."""
+        seg = next((s for s in self._segments if s.id == segment_id), None)
+        if seg is None:
+            raise LookupError(f"no segment {segment_id} on the waveform")
+        bounds = self._ordered(start_ms, end_ms)
+        if bounds == (seg.start_ms, seg.end_ms):
+            self._edits.pop(segment_id, None)
+        else:
+            self._edits[segment_id] = bounds
+        self.staged_changed.emit()
+        self.update()
+
+    def add_draft(self, start_ms: int, end_ms: int) -> int:
+        """Stage a new segment drawn by hand; returns its key (negative)."""
+        self._drafts.append(self._ordered(start_ms, end_ms))
+        self.staged_changed.emit()
+        self.update()
+        return -len(self._drafts)
+
+    def staged(self) -> list[tuple[int | None, int, int]]:
+        """What Save would write: (segment id or None for a new one, start_ms, end_ms)."""
+        return [(sid, s, e) for sid, (s, e) in self._edits.items()] + [(None, s, e) for s, e in self._drafts]
+
+    @property
+    def has_staged(self) -> bool:
+        return bool(self._edits or self._drafts)
+
+    def discard(self) -> None:
+        """Drop every unsaved marker (the Discard button, Esc)."""
+        if self._reset_staging():
+            self.update()
+
+    def _reset_staging(self) -> bool:
+        had = self.has_staged
+        self._edits.clear()
+        self._drafts.clear()
+        self._drag = None
+        if had:
+            self.staged_changed.emit()
+        return had
+
+    def _ordered(self, a: int, b: int) -> tuple[int, int]:
+        """Bounds in order, inside the file, at least MIN_SEGMENT_MS long."""
+        lo, hi = (int(a), int(b)) if a <= b else (int(b), int(a))
+        lo = max(0, lo)
+        hi = max(lo + MIN_SEGMENT_MS, hi)
+        if self._env is not None and self._env.duration_s > 0:
+            limit = int(round(self._env.duration_s * 1000))
+            hi = min(hi, max(limit, MIN_SEGMENT_MS))
+            lo = min(lo, hi - MIN_SEGMENT_MS)
+        return lo, hi
+
+    @property
+    def selected_segment(self) -> int | None:
+        return self._selected_segment
+
+    @property
+    def can_delete(self) -> bool:
+        """A segment is selected — a CLAP window (§6.4) is not deletable."""
+        return any(s.id == self._selected_segment for s in self._segments)
+
+    def marker_at(self, x: float) -> tuple[int, str] | None:
+        """The marker within MARKER_GRAB_PX of `x`, the nearest: (key,
+        "start" | "end"); None if none. Windows have no markers to move."""
+        if self._env is None:
+            return None
+        rect = self._plot_rect()
+        best: tuple[int, str] | None = None
+        best_d = MARKER_GRAB_PX + 1e-9
+        keys = [s.id for s in self._segments] + [-(i + 1) for i in range(len(self._drafts))]
+        for key in keys:
+            start_ms, end_ms = self.bounds_of(key)
+            for edge, ms in (("start", start_ms), ("end", end_ms)):
+                d = abs(x - self._x_of(ms / 1000, rect))
+                if d < best_d:
+                    best, best_d = (key, edge), d
+        return best
+
+    def _ms_at_x(self, x: float) -> int:
+        return int(round(self.time_at_x(x) * 1000))
+
+    def _move_marker(self, key: int, edge: str, ms: int) -> None:
+        start_ms, end_ms = self.bounds_of(key)
+        if edge == "start":
+            start_ms = min(ms, end_ms - MIN_SEGMENT_MS)
+        else:
+            end_ms = max(ms, start_ms + MIN_SEGMENT_MS)
+        if key < 0:
+            self._drafts[-key - 1] = self._ordered(start_ms, end_ms)
+            self.staged_changed.emit()
+            self.update()
+        else:
+            self.stage_edit(key, start_ms, end_ms)
+
     # --- interaction ---
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton or self._env is None:
             return
-        seconds = self.time_at_x(event.position().x())
-        segment = self.segment_at(seconds)
-        if segment is not None:
-            self.segment_clicked.emit(segment.id)
+        x = event.position().x()
+        marker = self.marker_at(x)
+        if marker is not None:
+            self._drag = ("move", *marker)
         else:
-            self.position_clicked.emit(int(seconds * 1000))
+            self._drag = ("press", self._ms_at_x(x), x)      # a click, unless it moves
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        x = event.position().x()
+        if self._drag is None:
+            self.setCursor(
+                Qt.CursorShape.SizeHorCursor if self.marker_at(x) is not None else Qt.CursorShape.ArrowCursor
+            )
+            return
+        if self._drag[0] == "press":
+            _, anchor_ms, press_x = self._drag
+            if abs(x - press_x) < DRAG_THRESHOLD_PX:
+                return
+            # Drawing a new segment from the press point, in either direction:
+            # the far edge follows the mouse from here on.
+            ms = self._ms_at_x(x)
+            key = self.add_draft(min(anchor_ms, ms), max(anchor_ms, ms))
+            self._drag = ("move", key, "start" if x < press_x else "end")
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            return
+        _, key, edge = self._drag
+        self._move_marker(key, edge, self._ms_at_x(x))
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton or self._drag is None:
+            return
+        drag, self._drag = self._drag, None
+        if drag[0] == "press":                              # it never moved: the click it was
+            ms = drag[1]
+            segment = self.segment_at(ms / 1000)
+            if segment is not None:
+                self.segment_clicked.emit(segment.id)
+            else:
+                self.position_clicked.emit(ms)
+        self.update()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape and self.has_staged:
+            self.discard()
+        elif event.key() == Qt.Key.Key_Delete and self.can_delete:
+            self.delete_requested.emit(self._selected_segment)
+        else:
+            super().keyPressEvent(event)
+
+
+class WaveformPanel(QWidget):
+    """The bottom panel: the view and its segment buttons (§9.2). *Save
+    segment* writes the staged markers, *Discard* drops them, *Delete
+    segment* removes the selected one; the window does the writing."""
+
+    save_requested = Signal()
+    delete_requested = Signal(int)     # the selected segment's id
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.view = WaveformView()
+        self._save = QPushButton("Save segment")
+        self._save.setToolTip(
+            "Write the moved or drawn markers to the index as manual segments (§6.3): exempt "
+            "from the automatic length and cap rules, never overwritten by a recompute."
+        )
+        self._discard = QPushButton("Discard")
+        self._discard.setToolTip("Drop the unsaved markers (Esc).")
+        self._delete = QPushButton("Delete segment")
+        self._delete.setToolTip("Remove the selected segment, automatic or manual, from the index (Del).")
+        hint = ElidedLabel(
+            "drag a marker to move it  ·  drag on the waveform to draw a segment  ·  "
+            "nothing is written until Save"
+        )
+        hint.setObjectName("caption")
+        row = QHBoxLayout()
+        row.setContentsMargins(4, 0, 4, 2)
+        row.setSpacing(6)
+        row.addWidget(self._save)
+        row.addWidget(self._discard)
+        row.addWidget(self._delete)
+        row.addWidget(hint, stretch=1)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(self.view, stretch=1)
+        layout.addLayout(row)
+        self._save.clicked.connect(self.save_requested)
+        self._discard.clicked.connect(self.view.discard)
+        self._delete.clicked.connect(self._emit_delete)
+        self.view.staged_changed.connect(self._refresh)
+        self.view.selection_changed.connect(self._refresh)
+        self.view.delete_requested.connect(self.delete_requested)
+        self._refresh()
+
+    def _emit_delete(self) -> None:
+        if self.view.can_delete:
+            self.delete_requested.emit(self.view.selected_segment)
+
+    def _refresh(self, *_args) -> None:
+        n = len(self.view.staged())
+        self._save.setEnabled(n > 0)
+        self._save.setText("Save segment" if n <= 1 else f"Save {n} segments")
+        self._discard.setEnabled(n > 0)
+        self._delete.setEnabled(self.view.can_delete)

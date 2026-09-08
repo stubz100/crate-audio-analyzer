@@ -821,17 +821,18 @@ class RecomputePanel(QWidget):
             logging.getLogger("crate").removeHandler(self._handler)
         self._conn.close()
 
-    def start_job(self, name: str, job: Job) -> None:
+    def start_job(self, name: str, job: Job) -> bool:
         """Run `job(conn, should_stop)` on the worker — the window's map-layout
-        step comes through here so every job shares the log, Stop and reload."""
-        self._start(name, job)
+        step and its segment saves come through here so every job shares the
+        log, Stop and reload. False if one is already running."""
+        return self._start(name, job)
 
     # --- plumbing ---
 
-    def _start(self, name: str, job: Job) -> None:
+    def _start(self, name: str, job: Job) -> bool:
         if self.running:
             self._append_log("a job is already running")
-            return
+            return False
         self._append_log(f"— {name} —")
         logging.getLogger("crate").addHandler(self._handler)
         thread = JobThread(self._db_path, name, job, self)
@@ -841,6 +842,7 @@ class RecomputePanel(QWidget):
         self._thread = thread
         self._set_running(True)
         thread.start()
+        return True
 
     def _on_succeeded(self, name: str, text: str) -> None:
         self._append_log(text)
