@@ -73,7 +73,7 @@ APP_NAME = "Crate"
 SETTINGS_KEY_AUTOPLAY = "preview/autoplay"
 SETTINGS_KEY_ANCHOR_KIND = "anchor/kind"
 SETTINGS_KEY_ANCHOR_ID = "anchor/id"
-SETTINGS_KEY_SPLITTER = "window/splitter2"  # list | right panel, as dragged (2: the 50/50 default of 2026-09-08 shows once)
+SETTINGS_KEY_SPLITTER = "window/splitter3"  # left column | list/map, as dragged (3: the 2026-09-08 arrangement)
 # What each list column's header popup edits (2026-09-08, `headerfilter.py`).
 COLUMN_SPECS = {
     0: ColumnSpec("text"),
@@ -87,7 +87,7 @@ COLUMN_SPECS = {
     SampleTreeModel.COL_SIMILARITY: ColumnSpec("range", "%", maximum=100, scale=100.0),
     SampleTreeModel.COL_MATCH: ColumnSpec("range", "%", maximum=100, scale=100.0),
 }
-SETTINGS_KEY_PANES = "window/panes2"        # list | waveform, as dragged (2: as above)
+SETTINGS_KEY_PANES = "window/panes3"        # waveform | tabs, as dragged (3: as above)
 HALO_NEIGHBOURS = 20               # §9.3: nearest neighbours highlighted after a ranking
 # The model stack logs every HTTP request at INFO; that is noise on a
 # multi-hour run, not progress (same list as the CLI).
@@ -362,14 +362,6 @@ class MainWindow(QMainWindow):
         self._waveform_panel.save_requested.connect(self._save_segments)
         self._waveform_panel.delete_requested.connect(self._delete_segment)
 
-        tables = QSplitter(Qt.Orientation.Vertical)
-        tables.addWidget(self._views)
-        tables.addWidget(self._waveform_panel)
-        tables.setStretchFactor(0, 1)                # list and waveform half and half (2026-09-08, the user's steer)
-        tables.setStretchFactor(1, 1)
-        tables.setSizes([450, 450])
-        self._panes = tables
-
         # --- transport + anchor (§9.2, the minimal slice Phase 7 needs) ---
         self._play_button = QPushButton("▶ Play")
         self._play_button.setObjectName("play")
@@ -405,13 +397,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self._toggle_play)
         QShortcut(QKeySequence(Qt.Key.Key_A), self, activated=self._anchor_current)
 
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(4, 4, 4, 4)
-        left_layout.addWidget(tables, stretch=1)
-        left_layout.addLayout(transport)
-
-        # --- right panel: Attributes (§9.5) and Recompute (§9.6) ---
+        # --- the tabs: Attributes (§9.5), Search, Recompute (§9.6) ---
         self._attributes = AttributesPanel(self._settings)
         self._search_panel = SearchPanel(self._settings)
         self._search_panel.search_requested.connect(self._search)
@@ -443,19 +429,6 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._recompute, "Recompute")
         tabs.setMinimumWidth(360)
 
-        body = QSplitter(Qt.Orientation.Horizontal)
-        body.addWidget(left)
-        body.addWidget(tabs)
-        body.setStretchFactor(0, 1)                  # list and tabs half and half (2026-09-08, the user's steer)
-        body.setStretchFactor(1, 1)
-        body.setSizes([800, 800])
-        self._body = body
-        # The panes keep the size they were dragged to (2026-09-08, the user's
-        # steer): the splitter states persist across restarts.
-        for splitter, key in ((body, SETTINGS_KEY_SPLITTER), (tables, SETTINGS_KEY_PANES)):
-            state = self._settings.value(key, None)
-            if state:
-                splitter.restoreState(state)
         header_widget = QWidget()
         header_widget.setObjectName("header")
         header_layout = QHBoxLayout(header_widget)
@@ -474,13 +447,42 @@ class MainWindow(QMainWindow):
         header_layout.addLayout(bars_column, stretch=1)
         header_widget.setFixedHeight(max(112, 3 * self._list_button.sizeHint().height() + 2 * 2 + 6 + 8))   # three buttons, or room for the bars
         self._header_widget = header_widget
-        central = QWidget()
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(header_widget)
-        root.addWidget(body, stretch=1)
-        self.setCentralWidget(central)
+
+        # --- the window (2026-09-08, the user's steer): the right half is the list
+        # or the map, top to bottom; the left half stacks the header (view switch,
+        # tag bars, strip), the waveform with the transport row under it, and the
+        # tabs — half and half by default, a dragged position kept ---
+        preview = QWidget()
+        preview_layout = QVBoxLayout(preview)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(2)
+        preview_layout.addWidget(self._waveform_panel, stretch=1)
+        preview_layout.addLayout(transport)
+        panes = QSplitter(Qt.Orientation.Vertical)
+        panes.addWidget(preview)
+        panes.addWidget(tabs)
+        panes.setStretchFactor(0, 1)
+        panes.setStretchFactor(1, 1)
+        panes.setSizes([400, 400])
+        self._panes = panes
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(4, 4, 4, 4)
+        left_layout.setSpacing(4)
+        left_layout.addWidget(header_widget)
+        left_layout.addWidget(panes, stretch=1)
+        body = QSplitter(Qt.Orientation.Horizontal)
+        body.addWidget(left)
+        body.addWidget(self._views)
+        body.setStretchFactor(0, 1)
+        body.setStretchFactor(1, 1)
+        body.setSizes([800, 800])
+        self._body = body
+        for splitter, key in ((body, SETTINGS_KEY_SPLITTER), (panes, SETTINGS_KEY_PANES)):
+            state = self._settings.value(key, None)
+            if state:
+                splitter.restoreState(state)
+        self.setCentralWidget(body)
 
         self.reload()
         self._restore_anchor()

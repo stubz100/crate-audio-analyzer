@@ -1145,3 +1145,22 @@ The user: the list and the waveform should split 50/50 vertically, and the list/
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-08 — The window rearranged: list right, waveform and tabs left
+
+**Phase:** 7 polish (the window) · `LAYOUT_HASH`
+
+The user: the list/map where the tabs are, the waveform where the list/map is, the tabs where the waveform is; the CLAP tags and embedding squeezed to 50 % so the list/map takes the whole right half.
+
+**Done**
+
+- `main.py`: the body splitter is *left column | list-or-map*; the left column is the header (view switch, tag bars, strip — now half the window wide), then a vertical splitter of the waveform panel with the transport row under it and the tabs. Both splits half and half by default; the settings keys are `window/splitter3` / `window/panes3` so the new arrangement is not shaped by a state saved for the old one.
+
+**Verified**
+
+- `uv run pytest tests -q` → **199 passed, 3 skipped**; pyflakes clean (the panes test's "right pane at least 360 wide" and the half-and-half assertions hold for the new contents).
+- Offscreen on the user's index at 1600 × 900, fresh settings: left | list 798 | 798, waveform | tabs 375 | 375; screenshot checked.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
