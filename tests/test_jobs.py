@@ -175,3 +175,38 @@ def test_a_failing_model_load_keeps_the_earlier_stages_in_the_report(library):
     assert report.embedding is None and not report.stopped
     assert any("embedding stage failed" in note and "OSError" in note for note in report.notes)
     assert "[analysis]" in report.format() and "[embedding] not run" in report.format()
+
+
+def test_captions_run_after_embedding_when_enabled(library):
+    """§5.2's opt-in stage: off by default, one sentence per sample when on,
+    idle the second time, and a missing model stack is a note, not a lost run."""
+    from crate.qwen_audio import CaptionResult
+
+    conn, lib = library
+
+    class Fake:
+        def caption(self, clip, sr):
+            return CaptionResult("a sound", 0.1, 10, 3)
+
+    class Broken:
+        def load(self):
+            raise ImportError("no transformers")
+
+        def caption(self, clip, sr):
+            raise AssertionError("never reached")
+
+    off = recompute_attributes(conn, RecomputeSettings(scope=(str(lib),)), encoder=FakeEncoder())
+    assert off.captions is None and "[captions]" not in off.format()
+
+    on = RecomputeSettings(scope=(str(lib),), captions=True)
+    first = recompute_attributes(conn, on, encoder=FakeEncoder(), captioner=Fake())
+    assert first.captions is not None and first.captions.captioned == 4
+    assert "[captions]" in first.format() and "captioned 4 samples" in first.format()
+    again = recompute_attributes(conn, on, encoder=FakeEncoder(), captioner=Fake())
+    assert again.captions.captioned == 0
+
+    full = RecomputeSettings(scope=(str(lib),), captions=True, force_full=True)
+    noted = recompute_attributes(conn, full, encoder=FakeEncoder(), captioner=Broken())
+    assert noted.captions is None and noted.embedding is not None
+    assert any("captions skipped" in note for note in noted.notes)
+    assert _count(conn, "SELECT COUNT(*) FROM text_tags WHERE source_model = 'qwen2audio-caption'") == 4

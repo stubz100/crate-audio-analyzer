@@ -171,6 +171,11 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_pa
     from crate.main import MainWindow
 
     db, conn, cache = index
+    conn.execute(
+        "INSERT INTO text_tags (sample_id, tag_or_caption, source_model, created_at) "
+        "SELECT id, 'a click loop', 'qwen2audio-caption', 't' FROM samples WHERE filename = 'loop.wav'"
+    )
+    conn.commit()
     window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path))
     try:
         assert window._proxy.rowCount() == 2
@@ -184,6 +189,7 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_pa
         assert window._segments.rowCount() > 0
         assert window._current is not None and window._current.name == "loop.wav"
         assert window._attributes._tag_buttons                            # the chips
+        assert "a click loop" in window._attributes._caption_label.text()  # the §5.2 sentence, when there is one
         assert window._attributes._strip.dimensions == 32                 # the fake model's vector
         assert window._waveform.loaded and window._waveform.duration_s == pytest.approx(4.0, abs=0.01)
         assert window._attributes.isAncestorOf(window._segment_table)     # the table lives in the tab
@@ -516,6 +522,7 @@ def test_recompute_settings_round_trip_and_validation(app, tmp_path):
     panel._max_segments.setValue(8)
     panel._one_shot_cap.setChecked(False)
     panel._embed_segments.setChecked(False)
+    panel._qwen.setChecked(True)                                    # §5.2 captioning, opt-in
     (tmp_path / "a_b").mkdir()
     add_library(panel._conn, tmp_path / "a_b")                    # the scope lives in the index
     panel.refresh_folders()
@@ -524,6 +531,7 @@ def test_recompute_settings_round_trip_and_validation(app, tmp_path):
     assert collected.force_full and collected.scope == (normalize(tmp_path / "a_b"),)
     assert collected.segmentation.sensitivity == 0.4 and collected.segmentation.max_segments == 8
     assert collected.one_shot_max_duration_s is None and not collected.embedding.embed_segments
+    assert collected.captions
 
     panel.save_settings()
     settings.sync()

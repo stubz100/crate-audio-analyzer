@@ -19,6 +19,7 @@ Crate: a standalone local search/mapping tool over a large personal sample libra
 
 ```
 src/crate/              application package (src layout)
+scripts/                spikes and benchmarks run by hand (Phase 5's phase5_spike.py); never imported by the app
 .docs/samples_final.md  the living spec (source of truth for design)
 .docs/crate_journal.md  development journal — progress against the phase roadmap
 ```

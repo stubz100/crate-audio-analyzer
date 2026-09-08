@@ -66,6 +66,7 @@ from .config import DEFAULT_LIBRARY_PATH
 from .db import open_db
 from .embedding import EmbedSettings, Encoder
 from .jobs import RecomputeSettings, recompute_attributes
+from .qwen_audio import Captioner
 from .library import (
     add_library,
     is_inside,
@@ -100,6 +101,7 @@ _KEY = "recompute/"
 _COL_ROOT, _COL_SCOPE, _COL_PATH, _COL_FILES = range(4)
 
 EncoderFactory = Callable[[EmbedSettings], Encoder]
+CaptionerFactory = Callable[[], Captioner]
 Job = Callable[[sqlite3.Connection, Callable[[], bool]], object]
 
 
@@ -205,12 +207,14 @@ class RecomputePanel(QWidget):
         db_path: Path | str,
         settings: QSettings,
         encoder_factory: EncoderFactory | None = None,
+        captioner_factory: CaptionerFactory | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._db_path = Path(db_path)
         self._settings = settings
         self._encoder_factory = encoder_factory
+        self._captioner_factory = captioner_factory
         self._thread: JobThread | None = None
         self._anchor_available = False
         self._refreshing = False
@@ -383,9 +387,14 @@ class RecomputePanel(QWidget):
             "Worker processes for analysis and segmentation (this machine has "
             f"{os.cpu_count() or 1} cores). Embedding uses the model's own threads."
         )
-        self._qwen = QCheckBox("off")
-        self._qwen.setEnabled(False)
-        self._qwen.setToolTip("Phase 5 (spec §5.2): opt-in, CPU-only, not built yet.")
+        self._qwen = QCheckBox()
+        self._qwen.setChecked(v(_KEY + "captions", False, type=bool))
+        self._qwen.setToolTip(
+            "Qwen2-Audio writes one sentence per sample in scope that has none (§5.2). Measured "
+            "2026-09-08 on this machine: about 10 s per file (6–20 s), so a few hundred files an "
+            "hour — for a folder in scope, not the library (12 days). Needs the ml extra and the "
+            "16 GB checkpoint; runs after embedding."
+        )
 
         form = QFormLayout()
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -510,6 +519,7 @@ class RecomputePanel(QWidget):
             force_full=self._force_full.isChecked(),
             one_shot_max_duration_s=cap,
             workers=self._workers.value(),
+            captions=self._qwen.isChecked(),
             segmentation=segmentation,
             embedding=embedding,
         )
@@ -533,6 +543,7 @@ class RecomputePanel(QWidget):
         s(_KEY + "one_shot_cap", self._one_shot_cap.isChecked())
         s(_KEY + "one_shot_max_duration_s", self._one_shot_seconds.value())
         s(_KEY + "workers", self._workers.value())
+        s(_KEY + "captions", self._qwen.isChecked())
 
     # --- the folder list ---
 
@@ -673,10 +684,11 @@ class RecomputePanel(QWidget):
             return False
         self.save_settings()
         encoder = self._encoder_factory(settings.embedding) if self._encoder_factory else None
+        captioner = self._captioner_factory() if (self._captioner_factory and settings.captions) else None
         self._start(
             "recompute attributes",
             lambda conn, stop: recompute_attributes(
-                conn, settings, should_stop=stop, encoder=encoder
+                conn, settings, should_stop=stop, encoder=encoder, captioner=captioner
             ),
         )
         return True

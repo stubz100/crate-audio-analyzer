@@ -44,6 +44,7 @@ crate-scan = "crate.cli:scan_main"
 crate-analyze = "crate.cli:analyze_main"
 crate-segment = "crate.cli:segment_main"
 crate-embed = "crate.cli:embed_main"
+crate-caption = "crate.cli:caption_main"
 
 [dependency-groups]
 dev = [

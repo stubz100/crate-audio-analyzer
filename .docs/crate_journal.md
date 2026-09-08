@@ -20,7 +20,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 3 | Transient Segmentation | ✅ done — `5e055b2` (nodes S/T, both profiles, settings, segment tables, manual path; validated on 472 real samples). UI for manual markers is Phase 9; lazy render is Phase 4.5/9 |
 | 4 | Embeddings & Classification | ✅ done — `1e1b585` (nodes D/C2/X/E on transformers' CLAP; Facet A 68% on 335 labeled files; full index embedded at 0.21 s/sample) |
 | 4.5 | "Listen and grab" (pull-forward) | ✅ done — `f715d03` (sortable/filterable list, segments drill-down, Qt Multimedia preview, lazy segment render, file-URL drag-out) |
-| 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
+| 5 | Qwen2-Audio + Latent-Similarity Spike | ✅ done — PHASE5_HASH (`.docs/phase5_spike.md`: 102 files, 16 groups; captioning 6–20 s/file on this CPU, built as the opt-in Recompute stage + `crate-caption`; the latent axis a no-go across 13 poolings — no vocal-semantic axis) |
 | 6 | Map View | ✅ done — `72ad400` (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
 | 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); Recompute map layout (both scopes) added with Phase 6 (`72ad400`); reshaped 2026-09-08 into a Library panel (folders in the index, Root / In scope ticks, Add / Remove / Rescan) and one Recompute panel (three ticked steps, one Run) `b04ab9c`; anchored-only Recompute *attributes* remains |
@@ -929,3 +929,30 @@ The user: the right panel's width became variable — every click on a sample re
 **Next**
 
 - Anchored-only Recompute attributes; Phase 5; Phase 9's marker editing.
+
+## 2026-09-08 — Phase 5: Qwen2-Audio on this CPU — captions yes (opt-in), latent axis no
+
+**Phase:** 5 · PHASE5_HASH
+
+"I think we're at a stage of starting phase 5, shall we?"
+
+**Done**
+
+- **The spike** (`scripts/phase5_spike.py`, report `.docs/phase5_spike.md`): 102 files in 16 groups built from the library on disk — six named singers (Amy Kirkpatrick both speaking and singing; Cory Friesenhan, Holly Drummond, Cristina Soto, Veela; CHROMA's Soprano and Ethno singers on the same phrases in A minor), kicks / snares / hats, Krotos footsteps / ambiences / whooshes / gun foley / animals — embedded with CLAP (the app's whole-file vector) and with thirteen Qwen2-Audio latents (layers 4/8/12/16/24 and the encoder output, mean and mean‖std pooled over the frames the clip occupies, plus the projector output), compared leave-one-out (`evaluation.py`: precision@k, Jaccard, group separation, "does X turn up at all"), sixteen files captioned with the full model. `Qwen/Qwen2-Audio-7B-Instruct`, 8.4 B parameters, bf16 on the CPU, no quantisation: 16 GB downloaded to `F:\HF_HOME`, loads in seconds (memory-mapped).
+- **Cost, measured:** latent 1.22 s per file regardless of length (a 30-s window every time) = 9× CLAP's 0.14 s, 38 h for the library; caption 6–20 s per file, 1.9 tokens/s decoding, 12 days for the library.
+- **Captioning built** (node X1, spec §5.2): `qwen_audio.QwenAudio` (lazy load, `latents`, `caption`), `caption_pending` (one `text_tags` row per sample, source `qwen2audio-caption`, stale when the content changes, per-file isolation, stop, scope, limit; the model's `load` runs once before the loop so a missing stack fails once), the Recompute tab's *Qwen2-Audio captioning* toggle now live (after embedding; `RecomputeSettings.captions`, the report's `[captions]` block, an ImportError as a note), `crate-caption --limit --recaption`, the sentence under the chips on the Attributes tab (`load_caption`).
+
+**Decided**
+
+- **No vocal-semantic axis.** The hypothesis of §5.3 was speaker identity; it does not appear: no latent finds the same voice across speech and singing (0 of 5 — nor does CLAP), same-singer retrieval ties CLAP within noise (0.67 vs 0.64 at best), the two singers on shared phrases are told apart no better than CLAP's 0.92, and everywhere else the latents are the same or worse, with half-overlapping neighbourhoods — different, not better. The one consistent win, drum one-shots (0.78 vs 0.66), the DSP axes already give. Node X2 closed; what would reopen it is a model trained *for* speaker/singer identity (x-vector / ECAPA-style, milliseconds per file), not a captioning model's encoder.
+- **Captions stay opt-in and scope-sized:** right and useful beyond a few seconds of material (vocal atmospheres, ambiences, foley actions), wrong on sub-second hits, which the 30-s window drowns in silence — CLAP's chips remain the label for one-shots. The plain prompt "Describe this sound in one sentence." — "as a sound designer would" pulled a sung note into synthesiser vocabulary.
+- The seeded UMAP is single-threaded by design (n_jobs=1 passed explicitly), the spike's evaluation lives in `evaluation.py` for the next axis question, and spike scripts live in `scripts/`, never imported by the app.
+
+**Verified**
+
+- `uv run pytest tests -q` → **185 passed, 3 skipped** (the third skip is the opt-in real-Qwen run, `CRATE_REAL_QWEN=1`); pyflakes clean. New: the pooling arithmetic (frames, masked mean and stats, variant names), the retrieval metrics on planted groups, `caption_pending` with a fake captioner (writes, idle, stale-only, one row per sample, a failure keeps the old sentence, stop, scope + limit), the stage in the Recompute run (off by default, on, idle again, a broken stack as a note), the toggle in the settings round trip, the sentence on the Attributes tab.
+- The real thing: one clip through the model (9 s load, latents 1.2 s, caption 12 s); `crate-caption --limit 3` on the user's index — three iris2 "Ahh Long" files captioned in 7.8 s each: "a human voice singing a long note".
+
+**Next**
+
+- Anchored-only Recompute attributes (the rest of Phase 8); Phase 9's marker editing; Phase 10 (Bitwig: reveal, crate export).

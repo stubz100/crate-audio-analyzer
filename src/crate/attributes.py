@@ -142,6 +142,15 @@ class AttributesPanel(QWidget):
         self._tag_buttons: list[QPushButton] = []
         search_layout.addWidget(self._tags_label)
         search_layout.addLayout(self._tags_grid)
+        # (2a') the Qwen2-Audio sentence, when the sample has one (§5.2, opt-in)
+        self._caption_label = QLabel("")
+        self._caption_label.setWordWrap(True)
+        self._caption_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._caption_label.setToolTip(
+            "One sentence from Qwen2-Audio (§5.2) — written by the Recompute tab's "
+            "Qwen2-Audio captioning toggle, about 10 s per file."
+        )
+        search_layout.addWidget(self._caption_label)
 
         # (2b) CLAP's numbers for the selected sample — the four prompt sets
         clap_group = QGroupBox("CLAP scores of the selected sample")
@@ -438,6 +447,12 @@ class AttributesPanel(QWidget):
             button.clicked.connect(lambda _checked=False, t=tag: self.search_for(t))
             self._tags_grid.addWidget(button, n // 3, n % 3)   # three per row: the row wraps
             self._tag_buttons.append(button)
+
+    def show_caption(self, text: str | None) -> None:
+        self._caption_label.setText(
+            f"Qwen2-Audio: {text}" if text
+            else "no caption — Recompute tab → Qwen2-Audio captioning (opt-in, about 10 s per file)"
+        )
 
     def search_for(self, text: str) -> None:
         self._search.setText(text)

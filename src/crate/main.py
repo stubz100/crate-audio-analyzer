@@ -43,6 +43,7 @@ from .catalog import (
     describe_item,
     hit_label,
     index_summary,
+    load_caption,
     load_samples,
     load_segments,
     load_tags,
@@ -191,6 +192,7 @@ class MainWindow(QMainWindow):
         settings: QSettings | None = None,
         encoder_factory: EncoderFactory | None = None,
         reducer_factory=None,
+        captioner_factory=None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Crate")
@@ -343,7 +345,9 @@ class MainWindow(QMainWindow):
         self._attributes.search_requested.connect(self._search)
         self._attributes.search_cleared.connect(self._clear_search)
         self._attributes.criteria_changed.connect(self._proxy.set_criteria)
-        self._recompute = RecomputePanel(self._db_path, self._settings, encoder_factory, self)
+        self._recompute = RecomputePanel(
+            self._db_path, self._settings, encoder_factory, captioner_factory, parent=self
+        )
         self._recompute.index_changed.connect(self.reload)
         self._recompute.index_changed.connect(self._close_if_pending)
         self._recompute.scope_changed.connect(self.reload)
@@ -500,6 +504,7 @@ class MainWindow(QMainWindow):
         self._segment_table.resizeColumnsToContents()
         self._attributes.show_tags(load_tags(self._conn, row.id))
         self._attributes.show_clap(row.clap_scores)
+        self._attributes.show_caption(load_caption(self._conn, row.id))
         attack_ms, decay_ms = self._envelope_marks(row.id)
         # The CLAP windows of a long file (§6.4) are drawn on the waveform as a
         # strip, not listed with the segments: a hit can land on one.

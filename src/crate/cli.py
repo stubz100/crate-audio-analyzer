@@ -27,6 +27,7 @@ from .analysis import ONE_SHOT_MAX_DURATION_S, analyze_pending
 from .config import DEFAULT_LIBRARY_PATH
 from .db import default_db_path, open_db
 from .embedding import DEFAULT_CHECKPOINT, EmbedSettings, embed_pending, export_vectors, reclassify
+from .qwen_audio import caption_pending
 from .scanner import scan_library
 from .segmentation import (
     BOUNDARY_MODES,
@@ -312,3 +313,26 @@ def embed_main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(scan_main())
+
+
+def caption_main(argv: list[str] | None = None) -> int:
+    """`crate-caption` — one Qwen2-Audio sentence per sample (spec §5.2 node
+    X1, Phase 5). Opt-in and slow by nature: about 10 s per file."""
+    parser = _parser(
+        "crate-caption",
+        "Write one Qwen2-Audio sentence per sample that has none, or whose content "
+        "changed since (spec §5.2, node X1). Measured at ~10 s per file on a 16-core "
+        "CPU: for a folder, not the library. First use needs the 16 GB checkpoint.",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="caption at most N samples — time a handful before a folder",
+    )
+    parser.add_argument(
+        "--recaption", action="store_true",
+        help="rewrite every sample's caption, not just the missing or stale ones",
+    )
+    args = parser.parse_args(argv)
+    return _run(
+        args, lambda conn: caption_pending(conn, limit=args.limit, recaption=args.recaption)
+    )

@@ -114,7 +114,7 @@ A single learned embedding is a black box — insensitive to exact pitch/loudnes
 | **Timbre** | MFCCs (mean+variance), spectral contrast | The "same instrument/material" descriptor set |
 | **Spectrum** | Spectral centroid, bandwidth, rolloff, flatness | Brightness/noisiness independent of pitch |
 | **Conceptual** | CLAP embedding | The "sounds alike even if descriptors don't agree" catch-all; also the text-search backbone |
-| **Vocal-semantic** *(optional, §5.3)* | Qwen2-Audio encoder latent | Speech/vocal-nuance axis CLAP wasn't optimized for — unconfirmed, spike-gated |
+| **Vocal-semantic** *(optional, §5.3)* | Qwen2-Audio encoder latent | Speech/vocal-nuance axis CLAP wasn't optimized for — unconfirmed, spike-gated. *Spike 2026-09-08: **no-go**, not built (§5.3)* |
 
 All descriptor computation stays in `librosa`/`numpy`/`scipy` — no new dependency.
 
@@ -128,6 +128,8 @@ Two models, different jobs, not a bake-off:
 |---|---|---|---|
 | Zero-shot labels + retrieval embedding | **CLAP** | Fast text↔audio matching, the default text-search box, cheap fallback tags | Always on, CPU-cheap |
 | Natural-language caption | **Qwen2-Audio** | A real descriptive sentence per sound | **Optional, toggle-gated** (§9.6) — off by default. Captioning needs the *full* model (~8.4B params, ~17GB in bf16), including the language decoder, and autoregressive decoding on CPU runs at roughly 1–3 tokens/sec even quantized. A ~30-token caption is therefore realistically **tens of seconds to minutes per file**, not seconds — at 110k files that's weeks, not hours. Treat a quantized/CPU-oriented build as the likely prerequisite for using this at any scale, not a fallback |
+
+*Measured (Phase 5, 2026-09-08 — `.docs/phase5_spike.md`): on a 16-core Ryzen in bf16, no quantisation, the full model loads in seconds (memory-mapped) and captions at **6–20 s per file** (1.9 tokens/s decoding; the 30-s audio prefill is the fixed part), i.e. 12 days for the library, a folder's worth per hour. Quality: right and useful on material longer than a few seconds, wrong on sub-second hits, which the 30-s window drowns in silence — CLAP's chips remain the label for one-shots. Built as the opt-in stage (§9.6's toggle, `crate-caption`, `qwen_audio.caption_pending`): one `text_tags` row per sample, source `qwen2audio-caption`, stale when the content changes, shown on the Attributes tab under the chips.*
 
 `bosonai/higgs-audio-v2-tokenizer` was evaluated and dropped — it's a generative TTS/voice tokenizer, not trained with a text-audio contrastive objective, and a poor fit for retrieval.
 
@@ -144,6 +146,8 @@ Genuinely unresolved, kept as a priority anyway — **it's the one similarity si
 - Hand-picked evaluation set: known-similar/dissimilar pairs (two takes of the same phrase, two performances by the same voice, a drum hit vs. its layered variant, unrelated foley). Compare CLAP's nearest-neighbor rankings against the pooled Qwen2-Audio vector's — agreement, complementary-but-sensible divergence, or noise.
 - Rides on the same small-subset benchmark as §5.2's cost measurement — one spike, not two.
 - A positive result adds a selectable axis (§9.5); it doesn't replace CLAP.
+
+*Result (Phase 5, 2026-09-08 — `.docs/phase5_spike.md`): **no-go.** Thirteen poolings of the encoder (layers 4/8/12/16/24 and the output, mean and mean‖std, plus the projector output) against CLAP on 102 files in 16 groups — six named singers, one of them both speaking and singing, two singers on the same phrases in the same key, drum one-shots by instrument, foley by category. No latent finds the same voice across speech and singing (0 of 5, CLAP too); same-singer retrieval ties CLAP within noise (0.67 vs 0.64 at best); everywhere else the latents are the same or worse and their neighbourhoods overlap CLAP's by half — different, not better. The one consistent win, drum one-shots (0.78 vs 0.66), the DSP axes cover for free. At 1.2 s per file (9× CLAP, 38 h for the library) there is no axis to build. What would reopen it is a model trained for speaker/singer identity (x-vector / ECAPA-style, milliseconds per file), not a captioning model's encoder.*
 
 ---
 
@@ -237,8 +241,8 @@ Key execution guarantees:
 | **T — Transient Segmentation** | Detect boundaries per §6.2 (profile, sensitivity, mode, length rules, cap+warning) | Decoded buffer; onset/tempo signals; configured settings | New `segments` row(s); updates parent's `segment_candidates_found`/`segments_capped`/`effective_sensitivity` if capped |
 | **C2 — Per-segment analysis + embedding** | Same descriptor/CLAP extraction as `C`/`D`, windowed, in-memory | Decoded buffer sliced to segment window; `segments` row | `segment_analysis` + `segment_embedding` rows |
 | **X — CLAP zero-shot tagging** | Zero-shot labels from CLAP embedding vs. text prompts | `embedding` (from D) | `text_tags` row(s), `source_model='clap-zeroshot'` |
-| **X1 — Qwen2-Audio captioning** *(optional toggle)* | Natural-language caption | Decoded buffer (raw audio, not CLAP's vector) | `text_tags` row, `source_model='qwen2audio-caption'`, when enabled |
-| **X2 — Qwen2-Audio latent** *(spike, optional)* | Pooled encoder representation as a candidate similarity axis | Decoded buffer | If validated: `embedding` row, `model_name='qwen2audio-latent'`. Until then: spike report only |
+| **X1 — Qwen2-Audio captioning** *(optional toggle)* | Natural-language caption | Decoded buffer (raw audio, not CLAP's vector) | `text_tags` row, `source_model='qwen2audio-caption'`, when enabled. *Built 2026-09-08 (Phase 5): `qwen_audio.caption_pending`, after embedding in the Recompute run* |
+| **X2 — Qwen2-Audio latent** *(spike, optional)* | Pooled encoder representation as a candidate similarity axis | Decoded buffer | If validated: `embedding` row, `model_name='qwen2audio-latent'`. Until then: spike report only. *Closed 2026-09-08: the spike said no (§5.3)* |
 | **E — Classifier** | **Facet B (structural type): rule-based** on descriptors — duration, onset count/periodicity, tempo confidence, embedded loop metadata. **Facet A (content class): CLAP zero-shot** prompts mapped to the four classes, with descriptor tie-breaks (e.g. harmonic ratio pushing Melodic vs. Rhythmic) and a confidence threshold below which the sample is flagged rather than assigned. No trained/custom model — deliberately, since manual corrections (§K) are the intended long-run accuracy path | `analysis`/`embedding` or `segment_analysis`/`segment_embedding` | `classification` or `segment_classification` row; low-confidence flagged |
 | **F — SQLite index** | Persistent store | All of the above | Queryable DB for `G` onward; write-back target for `K` |
 | **G — 2D projection** | Anchored-only: transform just the anchor into the existing layout. Whole-scope: full re-fit | `embedding`/`segment_embedding` rows in scope; prior fitted model (anchored path) | `map_x`/`map_y` on the rows actually in scope |
@@ -428,7 +432,7 @@ Policy: **no map layout or attribute recomputation ever runs automatically.** Ev
 
 | Setting | Controls | Default |
 |---|---|---|
-| Include Qwen2-Audio captioning | On/off (§5.2) | Off |
+| Include Qwen2-Audio captioning | On/off (§5.2). *Built 2026-09-08: runs after embedding, one sentence per sample in scope without one; measured at ~10 s per file — for a folder, not the library* | Off |
 | Embed segments | On/off — segment *detection* is cheap and stays on regardless; this governs the expensive per-segment CLAP pass (`C2`), the library's real cost multiplier (§3) | On |
 | Min length for segment embedding | Below this, a segment is still indexed but not embedded — sub-~200ms windows rarely yield a useful CLAP vector (§3) | 200 ms |
 | Facet A confidence threshold | Node `E`: below this softmax confidence the content class is **flagged, not assigned** (`content_class` NULL, best guess kept as a `clap-class` tag). Four classes, so 0.25 is chance. Re-runnable from stored vectors without audio (`crate-embed --reclassify`). Measured on 335 labeled files: 0.5 assigns 90% of samples at 73% accuracy, 0.65 assigns 75% at 77% | 0.5 |
@@ -484,7 +488,7 @@ Bitwig exposes no public API for injecting tags into its own browser database, s
 **Phase 2 — Heuristic Analysis.** Full amplitude/pitch/timbre/spectrum descriptor set, tempo/loop-ness (incl. the `smpl`/ACID chunk reader reassigned from Phase 1), structural typing.
 **Phase 3 — Transient Segmentation.** Detection (both profiles), configurable sensitivity/length/mode/cap, `segments`+`segment_*` tables, manual create/edit/delete path.
 **Phase 4 — Embeddings & Classification.** CLAP for samples and segments; classifier for both facets (full for samples, inherited/lighter for segments).
-**Phase 5 — Qwen2-Audio Integration + Latent-Similarity Spike.** Small-subset benchmark (per §3's real-scale arithmetic) of captioning cost/quality; latent-axis evaluation per §5.3. Deliverable: measured per-file cost, a go/no-go on the latent axis.
+**Phase 5 — Qwen2-Audio Integration + Latent-Similarity Spike.** Small-subset benchmark (per §3's real-scale arithmetic) of captioning cost/quality; latent-axis evaluation per §5.3. Deliverable: measured per-file cost, a go/no-go on the latent axis. *(Done 2026-09-08 — `.docs/phase5_spike.md`, `scripts/phase5_spike.py`: 102 files in 16 groups; captioning 6–20 s per file, built as the opt-in stage; the latent axis a no-go across 13 poolings — see §5.2, §5.3.)*
 **Phase 6 — Map View.** 2D projection (anchored-transform + full-refit paths), segment-match badges. *(Built 2026-09-07 — see the §9.3 note; schema v7 adds §8's `map_layout` / `map_position`, plus `reducer` and `model_path` columns on the layout row for the pickled fit.)*
 **Phase 7 — List, Search, Filter.** List view with nested sub-hit rows, Attributes tab (weights + filters + anchor-relative ranges), free-text search, auto-tag chips. *(Built 2026-09-07 — see the §9.4 / §9.5 notes — together with §9.6's Recompute ranking and a minimal anchor, the two things the ranking column cannot exist without; the header proper stays Phase 9.)*
 **Phase 8 — Recompute Tab.** Both scope types, the folder-scope list, Recompute-attributes settings panel. *(Library scope, the folder-scope list, Recompute attributes + settings, Rescan, Stop: built 2026-09-06, right after 4.5 — see the §9.6 note. Anchored-only scope, ranking and map-layout actions follow their own phases.)*
@@ -507,8 +511,8 @@ Bitwig exposes no public API for injecting tags into its own browser database, s
 
 1. **Segmentation tuning.** Onset detectors can be noisy on dense/busy material. Mitigated by configurable sensitivity/length/mode and the strongest-first cap with a visible warning — still expect a tuning pass against the real library, not a one-shot correct configuration.
 2. **Total pipeline cost at real scale.** ~110,000 files changes "how long does a full run take" from an afterthought to a first-class design constraint (§3's arithmetic). Mitigated structurally by the folder-scope list and anchored-only recompute (§9.6) — cost is never paid against the full library by accident.
-3. **Qwen2-Audio's latent space was never designed as a similarity embedding.** Extraction (which layer, which pooling) is genuinely experimental, no guaranteed positive result. Kept as a priority research item regardless — it's the one signal none of the prior-art tools offer (§5.3).
-4. **GPU absence.** Confirmed CPU-only. Qwen2-Audio stays opt-in until Phase 5 measures real CPU cost; nothing in MVP depends on GPU being available.
+3. **Qwen2-Audio's latent space was never designed as a similarity embedding.** Extraction (which layer, which pooling) is genuinely experimental, no guaranteed positive result. Kept as a priority research item regardless — it's the one signal none of the prior-art tools offer (§5.3). *Resolved 2026-09-08: the risk materialised — thirteen poolings, no signal beyond CLAP's; closed (§5.3).*
+4. **GPU absence.** Confirmed CPU-only. Qwen2-Audio stays opt-in until Phase 5 measures real CPU cost; nothing in MVP depends on GPU being available. *Measured 2026-09-08: 6–20 s per caption in bf16 on 16 cores, no quantisation needed with 125 GB of RAM; it stays opt-in and scope-sized.*
 5. **RX2 coverage gap.** ~4,800 files (4.4% of the library, §3) are Recycle-sliced audio that Phase 1's scanner will skip-and-log rather than decode. Not a blocker for MVP, but a real, measured gap worth being aware of rather than a hypothetical one.
 
 ---

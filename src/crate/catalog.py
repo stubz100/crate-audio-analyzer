@@ -211,6 +211,16 @@ def load_tags(conn: sqlite3.Connection, sample_id: int) -> list[tuple[str, float
     ]
 
 
+def load_caption(conn: sqlite3.Connection, sample_id: int) -> str | None:
+    """The sample's Qwen2-Audio sentence (§5.2), if it has one."""
+    row = conn.execute(
+        "SELECT tag_or_caption FROM text_tags WHERE sample_id = ? AND source_model = 'qwen2audio-caption' "
+        "ORDER BY id DESC LIMIT 1",
+        (sample_id,),
+    ).fetchone()
+    return None if row is None else str(row[0])
+
+
 def load_vector(conn: sqlite3.Connection, kind: str, item_id: int, model_name: str = "clap"):
     """The stored CLAP vector of a sample or a segment (float32, unit
     length), or None if it has not been embedded. The embedding strip and
