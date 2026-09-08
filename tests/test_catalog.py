@@ -67,6 +67,15 @@ def test_samples_carry_what_the_list_shows(tmp_path):
     assert [w.detection_method for w in load_windows(conn, loop_id)] == ["window"]
     assert [r.segment_count for r in load_samples(conn)] == [0, len(segments)]   # the manual one counts, the window not
     assert index_summary(conn)["segments"] == len(segments) and index_summary(conn)["windows"] == 1
+
+    # The scope (§9.6): None = everything, () = nothing, folders = what lies under them.
+    assert [r.filename for r in load_samples(conn, scope=None)] == ["hit.wav", "loop.wav"]
+    assert load_samples(conn, scope=()) == []
+    assert [r.filename for r in load_samples(conn, scope=[str(lib / "Drums")])] == ["loop.wav"]
+    scoped = index_summary(conn, scope=[str(lib / "Drums")])
+    assert scoped["samples"] == 1 and scoped["indexed"] == 2 and scoped["analysed"] == 1
+    assert scoped["segments"] == len(segments) and scoped["windows"] == 1
+    assert index_summary(conn, scope=())["samples"] == 0
     conn.close()
 
 

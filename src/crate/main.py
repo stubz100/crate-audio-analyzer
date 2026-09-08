@@ -54,7 +54,8 @@ from .embedding import ClapEncoder, EmbedSettings
 from .layout import LayoutSettings, fit_layout, load_current_layout, place_anchor
 from .listmodel import ListProxy, SampleTreeModel, SegmentTableModel
 from .mapview import MapView
-from .recompute import EncoderFactory, RecomputePanel
+from .library import scope_paths
+from .recompute import EncoderFactory, RecomputePanel, RunPlan
 from .render import default_cache_dir, render_segment
 from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable, Scores
 from .theme import apply_theme
@@ -189,6 +190,7 @@ class MainWindow(QMainWindow):
         self._axis = None
         self._axis_by_sample: dict[int, dict[str, float]] = {}
         self._close_pending = False
+        self._plan_steps: list[tuple[str, str | None]] = []   # the Recompute tab's Run, step by step
         self._layout_dir = Path(self._cache_dir).parent / "layouts"
         self._rows_by_id: dict[int, object] = {}
         self._source_row_of: dict[int, int] = {}
@@ -310,8 +312,9 @@ class MainWindow(QMainWindow):
         self._recompute = RecomputePanel(self._db_path, self._settings, encoder_factory, self)
         self._recompute.index_changed.connect(self.reload)
         self._recompute.index_changed.connect(self._close_if_pending)
-        self._recompute.rank_requested.connect(self._rank)
-        self._recompute.layout_requested.connect(self._run_layout)
+        self._recompute.scope_changed.connect(self.reload)
+        self._recompute.run_requested.connect(self._run_plan)
+        self._recompute.job_ended.connect(self._advance_plan)
         self._attributes.criteria_changed.connect(self._sync_map_visibility)
         tabs = QTabWidget()
         tabs.addTab(self._attributes, "Attributes")
@@ -332,10 +335,13 @@ class MainWindow(QMainWindow):
     # --- data ---
 
     def reload(self) -> None:
-        """Re-read the index — after a Recompute job, or a CLI run outside.
-        Scores are view state and start over; an anchor keeps its place and
-        its distances are recomputed on the fresh features."""
-        rows = load_samples(self._conn)
+        """Re-read the index — after a Recompute job, a CLI run outside, or a
+        change of scope. The list, the map and the counts show the folders in
+        scope (§9.6); dormant folders' rows stay in the index unseen. Scores
+        are view state and start over; an anchor keeps its place and its
+        distances are recomputed on the fresh features."""
+        scope = scope_paths(self._conn)
+        rows = load_samples(self._conn, scope=scope)
         self._rows_by_id = {r.id: r for r in rows}
         self._source_row_of = {r.id: i for i, r in enumerate(rows)}
         self._samples.set_rows(rows)
@@ -347,9 +353,13 @@ class MainWindow(QMainWindow):
         self._load_map()
         for column in range(len(SampleTreeModel.COLUMNS)):
             self._table.resizeColumnToContents(column)
-        counts = index_summary(self._conn)
+        counts = index_summary(self._conn, scope)
+        in_scope = (
+            f"{counts['samples']} samples in scope of {counts['indexed']} indexed"
+            if counts['samples'] != counts['indexed'] else f"{counts['samples']} samples"
+        )
         self.statusBar().showMessage(
-            f"{counts['samples']} samples · {counts['analysed']} analysed · "
+            f"{in_scope} · {counts['analysed']} analysed · "
             f"{counts['segments']} segments · {counts['windows']} CLAP windows · "
             f"{counts['embedded']} embedded · index: {self._db_path}"
         )
@@ -591,7 +601,7 @@ class MainWindow(QMainWindow):
             )
             return
         features = self._ensure_features()
-        sample_ids = self._proxy.visible_sample_ids() if scope == "visible" else None
+        sample_ids = self._proxy.visible_sample_ids() if scope == "visible" else set(self._rows_by_id)
         scores = features.rank(self._axis, weights, sample_ids)
         self._samples.set_similarity(scores)
         self._update_score_columns()
@@ -648,7 +658,7 @@ class MainWindow(QMainWindow):
             self._search(pending)
 
     def _apply_search(self, text: str, query) -> None:
-        scores = self._ensure_features().search(query)
+        scores = self._ensure_features().search(query, set(self._rows_by_id))   # the scope (§9.6)
         self._samples.set_match(scores)
         self._update_score_columns()
         self._table.sortByColumn(SampleTreeModel.COL_MATCH, Qt.SortOrder.DescendingOrder)
@@ -682,7 +692,7 @@ class MainWindow(QMainWindow):
         self._last_similarity = None
         self._map.set_scores(None)
         if info is None:
-            caption = "no layout yet — Recompute tab → Recompute map layout"
+            caption = "no layout yet — Recompute tab: tick Map layout and press Run"
         else:
             caption = (
                 f"layout #{info.id}: {len(ids)} samples · {info.scope_description} · "
@@ -725,31 +735,67 @@ class MainWindow(QMainWindow):
         self._select_sample(sample_id)
         self._play_current()
 
-    def _run_layout(self, mode: str) -> None:
-        """§9.6 *Recompute map layout*: a full re-fit over the scope folders,
-        or the anchor alone transformed into the existing layout."""
+    def _run_plan(self, plan: RunPlan) -> None:
+        """The Recompute tab's Run: its ticked steps in order — Attributes,
+        Map layout, Ranking — each job's end (`job_ended`) starting the next;
+        a stopped or failed step drops the rest."""
+        steps: list[tuple[str, str | None]] = []
+        if plan.attributes:
+            steps.append(("attributes", None))
+        if plan.layout:
+            steps.append(("layout", plan.layout))
+        if plan.ranking:
+            steps.append(("ranking", plan.ranking))
+        self._plan_steps = steps
+        self._advance_plan("", True)
+
+    def _advance_plan(self, _name: str, completed: bool) -> None:
+        if not completed:
+            if self._plan_steps:
+                self.statusBar().showMessage("the remaining Recompute steps were dropped")
+            self._plan_steps = []
+            return
+        while self._plan_steps:
+            step, option = self._plan_steps.pop(0)
+            if step == "attributes":
+                if self._recompute.run_attributes():
+                    return                                  # continues from job_ended
+                self._plan_steps = []
+                return
+            if step == "layout":
+                if self._run_layout(option or "library"):
+                    return
+                self._plan_steps = []
+                return
+            if step == "ranking":
+                self._rank(option or "whole")               # on this thread: no job to wait for
+
+    def _run_layout(self, mode: str) -> bool:
+        """§9.6 the *Map layout* step: a full re-fit over the folders in
+        scope, or the anchor alone transformed into the existing layout.
+        True when a job started."""
         if mode == "anchored":
             if self._anchor is None:
                 self.statusBar().showMessage("anchored-only layout needs an anchor (⚓)")
-                return
+                return False
             kind, item_id = self._anchor
             self._recompute.start_job(
                 "place the anchor in the map layout",
                 lambda conn, _stop: place_anchor(conn, kind, item_id),
             )
-            return
+            return True
         weights = self._attributes.weights()
         if not any(weights.values()):
             self.statusBar().showMessage(
                 "a layout needs at least one weight above zero (Attributes tab)"
             )
-            return
+            return False
         scope = tuple(self._recompute.scope_folders())
         if not scope:
             self.statusBar().showMessage(
-                "library scope is empty: add a folder (or the root) on the Recompute tab first"
+                "nothing in scope: tick a folder on the Recompute tab first"
             )
-            return
+            return False
         description = ", ".join(Path(folder).name or folder for folder in scope)
         settings = LayoutSettings(weights=weights, scope=scope, scope_description=description[:80])
         layout_dir = self._layout_dir
@@ -760,6 +806,7 @@ class MainWindow(QMainWindow):
                 conn, settings, layout_dir, reducer=reducer, should_stop=stop
             ),
         )
+        return True
 
     # --- lifecycle ---
 

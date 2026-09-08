@@ -21,7 +21,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # The third kind of segment (spec §6.4): one of the 10-s CLAP windows a file
 # longer than the model's input is embedded through, kept with its vector so a
@@ -41,6 +41,8 @@ WINDOW_METHOD = "window"
 # v7 = Phase 6: `map_layout` + `map_position` (spec §8; node G)
 # v8 = CLAP windows (spec §6.4): `segments.detection_method` gains 'window' — a
 #      rebuild of `segments`, since the value lives in a CHECK constraint
+# v9 = `libraries` (spec §9.6): the folders the index knows, with their root and
+#      in-scope flags — the Library panel's list, seeded from the index + settings
 
 
 def scope_clause(
@@ -300,6 +302,19 @@ CREATE TABLE IF NOT EXISTS map_position (
     UNIQUE (layout_id, segment_id)
 );
 CREATE INDEX IF NOT EXISTS idx_map_position_layout ON map_position(layout_id);
+
+-- Phase 8 (spec §9.6, 2026-09-08): the folders the index knows — the Library
+-- panel's list. `in_scope` = shown in the list and map, walked by Rescan,
+-- covered by Recompute; 0 = dormant, rows kept untouched. `is_root` = at most
+-- one, the library's home folder. Removing a folder deletes its samples.
+CREATE TABLE IF NOT EXISTS libraries (
+    id              INTEGER PRIMARY KEY,
+    path            TEXT NOT NULL UNIQUE,            -- absolute, resolved, native separators
+    is_root         INTEGER NOT NULL DEFAULT 0,
+    in_scope        INTEGER NOT NULL DEFAULT 1,
+    added_at        TEXT NOT NULL,
+    last_scanned_at TEXT
+);
 """
 
 
@@ -411,6 +426,7 @@ _MIGRATIONS: dict[int, list] = {
     6: [],              # v5 -> v6: embedding + text_tags; CREATE IF NOT EXISTS covers it
     7: [],              # v6 -> v7: map_layout + map_position; CREATE IF NOT EXISTS covers it
     8: [_migrate_v8],   # v7 -> v8: segments.detection_method accepts 'window' (table rebuild)
+    9: [],              # v8 -> v9: libraries; CREATE IF NOT EXISTS covers it, the panel seeds it
 }
 
 

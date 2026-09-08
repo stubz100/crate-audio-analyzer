@@ -23,7 +23,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ⬜ not started |
 | 6 | Map View | ✅ done — `72ad400` (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
-| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); Recompute map layout (both scopes) added with Phase 6 (`72ad400`); anchored-only Recompute *attributes* remains |
+| 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); Recompute map layout (both scopes) added with Phase 6 (`72ad400`); reshaped 2026-09-08 into a Library panel (folders in the index, Root / In scope ticks, Add / Remove / Rescan) and one Recompute panel (three ticked steps, one Run) SCOPE_HASH; anchored-only Recompute *attributes* remains |
 | 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`), the waveform panel with segment markers, envelope and playhead since `5acfcd4`; marker editing (drag, Save / Delete segment) not started |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
@@ -825,3 +825,32 @@ The user first asked why the status bar counted over 10k samples when the folder
 **Next**
 
 - The user's choice on the scope-vs-index question above. Phase 5, Phase 9, the rest of Phase 8.
+
+## 2026-09-08 — One Library panel, one Recompute panel; the view follows the scope
+
+**Phase:** 8 (Recompute tab, reshaped) · SCOPE_HASH
+
+The user's decision on the scope question: the library root and the scope list become one panel whose folders are the index's own; each folder has a Root tick and an In-scope tick; Add/Remove manage the database; the in-scope folders are what the list and map show; and the three Recompute buttons — whose difference was unclear — become one panel.
+
+**Done**
+
+- **`libraries` table** (schema v9, `library.py`, no Qt): path, `is_root` (at most one), `in_scope`, added/last-scanned stamps. `add_library`, `remove_library` (deletes the folder's samples — the cascades take analysis, segments, embeddings, map positions — and forgets the folder; files untouched), `set_root`, `set_in_scope`, `scope_paths` (None = no folders known → everything; () = none ticked → nothing), `outermost` (Rescan walks each file once), `derive_scan_roots` (a root is a sample's path minus its `folder/filename` tail) and `seed_libraries` (first launch: the index's scan roots plus the old settings' root and scope list; a folder in the old scope is in scope, everything when there was none, the old root is the root). `scan_library` registers every root it walks, so CLI scans show up in the panel.
+- **The Library panel** (`recompute.py`): a tree of the folders with Root / In scope ticks, the file count and last-scan tooltip, dormant ones dimmed; *Rescan* (the folders in scope), *Add folder…* (registers, in scope, and scans — a scan job), *Remove folder* (asks, then a job). A tick in the tree updates the index and, for scope, the window; the tree is adjusted in place, never rebuilt from inside its own change signal.
+- **The Recompute panel**: three steps as tick boxes with a one-line explanation each and their options on the row below — *Attributes* (new/changed only · everything again; the settings form beneath), *Map layout* (whole scope re-fit · anchor only), *Ranking* (whole scope · visible rows; disabled with a note until there is an anchor) — one *Run*, one *Stop*. `RunPlan` carries the ticked steps to the window, which runs them in order: `run_attributes` → `_run_layout` → `_rank`, each job's `job_ended(name, completed)` starting the next, a stop or failure dropping the rest.
+- **The view follows the scope**: `load_samples(conn, scope)`, `index_summary(conn, scope)` ("1,616 samples in scope of 10,140 indexed"), the map's points, text search and ranking (`sample_ids` = the rows in scope), the map layout's scope, all from `scope_paths`. Dormant folders' rows stay, unseen, and come back on a tick.
+
+**Decided**
+
+- The folders live in the index, not in QSettings: they describe the index (which roots it was scanned under), so they travel with it; the old `library/root_path` and `recompute/scope` settings are read once as a seed and not written again.
+- Rescan walks the folders in scope — not the root and not the dormant ones: "in scope" means active in every sense (view, Rescan, Recompute), "dormant" means untouched. The root's job is to be the home: where Add folder starts, and what "outside the library" is measured against.
+- A `crate-scan --root` of a folder not yet listed adds it in scope; a re-scan of a known folder keeps its flags.
+- Ranking runs on the GUI thread (a second or so on the feature table) and so needs no job; the plan runs it last, after the reload that follows the map job.
+
+**Verified**
+
+- `uv run pytest tests -q` → **180 passed, 2 skipped**; pyflakes clean. New (`test_library.py`, `test_gui.py`, `test_catalog.py`): the flags and the two meanings of an empty scope; scanning registers the root and a re-scan keeps the flags; removing deletes rows and cascades, disk untouched; `outermost`; the seed from a pre-v9 index with and without settings; the window built from nothing through Add folder → tick → Run → Remove folder → Rescan, with the status bar's "N samples in scope of M indexed" at each step; one Run executing Attributes → Map layout, then Attributes → anchor placement → Ranking in order; the map test through Run with Map layout ticked; `load_samples` / `index_summary` under None, () and a folder.
+- The user's index seeded from their real settings: three folders — `D:\_soundPacks\___GUITAR_INSTR` (root, in scope, 1,616 files), `D:\_soundPacks\Krotos Starter Library` (dormant, 3,956), `D:\_soundPacks\iris2\Samples` (dormant, 4,568); the window shows 1,616 rows and "1616 samples in scope of 10140 indexed"; the tab checked offscreen.
+
+**Next**
+
+- Anchored-only Recompute attributes (the rest of Phase 8); Phase 5; Phase 9.

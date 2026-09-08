@@ -30,7 +30,9 @@ from crate.catalog import load_samples, load_segments
 from crate.db import open_db
 from crate.embedding import embed_pending
 from crate.layout import PcaReducer
+from crate.library import add_library, normalize
 from crate.listmodel import ListProxy, SampleTreeModel, SegmentTableModel
+from crate.recompute import RunPlan
 from crate.render import render_segment
 from crate.scanner import scan_library
 from crate.segmentation import segment_pending
@@ -84,6 +86,16 @@ def _proxy_row_named(window, name: str) -> int:
         r for r in range(window._proxy.rowCount())
         if window._proxy.data(window._proxy.index(r, 0)) == name
     )
+
+
+def _run_ranking(window) -> None:
+    """Press Run on the Recompute tab with only the Ranking step ticked —
+    ranking runs on the GUI thread, so it is done when this returns."""
+    panel = window._recompute
+    panel._step_attributes.setChecked(False)
+    panel._step_layout.setChecked(False)
+    panel._step_ranking.setChecked(True)
+    panel.run()
 
 
 @pytest.fixture()
@@ -248,25 +260,25 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
     try:
         window._autoplay.setChecked(False)
         assert not window._attributes._ranges_group.isEnabled()
-        assert not window._recompute._rank_button.isEnabled()
+        assert not window._recompute._step_ranking.isEnabled()
 
         window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
         window._anchor_current()
 
         assert window._anchor_label.text().endswith("loop.wav")
         assert window._attributes._ranges_group.isEnabled()
-        assert window._recompute._rank_button.isEnabled()
-        assert "loop.wav" in window._recompute._rank_anchor.text()
+        assert window._recompute._step_ranking.isEnabled()
+        assert "loop.wav" in window._recompute._rank_note.text()
 
         for slider in window._attributes._weight_sliders.values():
             slider.setValue(0)
-        window._recompute._rank_button.click()                     # nothing to blend: told, not silent
+        _run_ranking(window)                                       # nothing to blend: told, not silent
         assert "weight" in window.statusBar().currentMessage()
         assert window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
         for slider in window._attributes._weight_sliders.values():
             slider.setValue(100)
 
-        window._recompute._rank_button.click()                     # → rank_requested("whole")
+        _run_ranking(window)                                       # Run with only Ranking ticked
         assert not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
         assert window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"   # the anchor itself first
         assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_SIMILARITY)) == "100"
@@ -288,7 +300,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         # Visible-only scope ranks just what the list shows.
         window._filter.setText("hit")
         window._recompute._rank_visible.setChecked(True)
-        window._recompute._rank_button.click()
+        _run_ranking(window)
         assert "ranked 1 samples" in window.statusBar().currentMessage()
         window._filter.setText("")
 
@@ -361,8 +373,10 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
 
 
 def test_recompute_tab_builds_the_index_from_the_window(app, tmp_path):
-    """Empty index → Rescan → Recompute attributes over a scope, all from the
-    window, on the worker thread; the list reloads itself after each job."""
+    """Empty index → Add folder (scans it in) → Run with Attributes ticked,
+    all from the window, on the worker thread; the list reloads itself after
+    each job; the Library panel's flags decide what the list shows, Remove
+    folder deletes rows, Rescan walks the folders in scope."""
     from crate.main import MainWindow
 
     lib = _write_library(tmp_path / "lib")
@@ -373,33 +387,109 @@ def test_recompute_tab_builds_the_index_from_the_window(app, tmp_path):
     )
     try:
         panel = window._recompute
-        assert window._proxy.rowCount() == 0 and not panel.running
+        assert window._proxy.rowCount() == 0 and not panel.running and panel.folder_paths() == []
+        assert not panel.run_rescan() and "nothing in scope" in panel.log_text()
 
-        panel.set_library_root(lib)
-        panel.run_rescan()
+        assert not panel.add_folder(tmp_path / "nowhere")          # not a folder: told
+        assert panel.add_folder(lib)                                # registered in scope, then scanned
         assert panel.running
         _wait_until(app, lambda: not panel.running)
-        assert window._proxy.rowCount() == 2                     # reloaded itself
+        assert window._proxy.rowCount() == 2                        # reloaded itself
         assert "added 2" in panel.log_text()
+        assert panel.folder_paths() == [normalize(lib)] == panel.scope_folders()
+        item = panel._folders.topLevelItem(0)
+        assert item.text(3) == "2" and item.checkState(1) == Qt.CheckState.Checked
 
-        panel.run_recompute()                                    # empty scope: refused
-        assert not panel.running and "scope is empty" in panel.log_text()
+        panel._step_attributes.setChecked(True)
+        panel._step_layout.setChecked(False)
+        panel._step_ranking.setChecked(False)
+        item.setCheckState(1, Qt.CheckState.Unchecked)              # dormant: hidden, not deleted
+        assert window._proxy.rowCount() == 0 and panel.scope_folders() == []
+        assert "0 samples in scope of 2 indexed" in window.statusBar().currentMessage()
+        panel.run()                                                 # nothing in scope: refused
+        assert not panel.running and "nothing in scope" in panel.log_text()
+        item.setCheckState(1, Qt.CheckState.Checked)
+        assert window._proxy.rowCount() == 2
 
-        panel.add_scope_folder(lib / "Drums")
-        panel.run_recompute()
+        panel.run()                                                 # Attributes over the scope
         _wait_until(app, lambda: not panel.running)
         status = window.statusBar().currentMessage()
-        assert "· 1 analysed" in status and "· 1 embedded" in status   # the loop only
+        assert "· 2 analysed" in status and "· 2 embedded" in status
         assert "[embedding]" in panel.log_text()
 
-        panel.add_scope_folder(lib)
-        panel.run_recompute()
+        item = panel._folders.topLevelItem(0)                       # rebuilt after the job
+        item.setCheckState(0, Qt.CheckState.Checked)                # the root flag
+        assert panel.library_root == normalize(lib)
+        assert panel.add_folder(lib / "Drums")                      # inside the root: scanned again
         _wait_until(app, lambda: not panel.running)
-        assert "· 2 analysed" in window.statusBar().currentMessage()
+        assert panel.folder_paths() == [normalize(lib), normalize(lib / "Drums")]
+        assert window._proxy.rowCount() == 2                        # the same two files, once each
+        assert panel.library_root == normalize(lib)                 # the root flag survived the refresh
+        panel.set_in_scope(lib, False)
+        assert window._proxy.rowCount() == 1                        # Drums only
+        assert "1 samples in scope of 2 indexed" in window.statusBar().currentMessage()
+
+        assert panel.remove_folder(lib / "Drums", confirm=False)    # deletes its rows
+        _wait_until(app, lambda: not panel.running)
+        assert "1 samples with their analysis" in panel.log_text()
+        assert panel.folder_paths() == [normalize(lib)]
+        assert window._proxy.rowCount() == 0
+        assert "0 samples in scope of 1 indexed" in window.statusBar().currentMessage()
+        panel.set_in_scope(lib, True)
+        assert window._proxy.rowCount() == 1
+
+        assert panel.run_rescan()                                   # walks the folders in scope
+        _wait_until(app, lambda: not panel.running)
+        assert "added 1" in panel.log_text()                        # Drums' loop is back under lib
+        assert window._proxy.rowCount() == 2
 
         settings.sync()
         stored = (tmp_path / "crate.ini").read_text(encoding="utf-8")
-        assert "Drums" in stored and "root_path" in stored          # scope + root persisted
+        assert "step_attributes" in stored                          # the ticked steps persist
+    finally:
+        window.close()
+
+
+def test_run_executes_the_ticked_steps_in_order(app, tmp_path):
+    """One Run: Attributes, then Map layout, then Ranking — each step's job
+    starting the next; Ranking stays unticked-able without an anchor."""
+    from crate.main import MainWindow
+
+    lib = _write_library(tmp_path / "lib")
+    t = np.arange(SR) / SR                                          # a layout needs three samples
+    sf.write(lib / "tone.wav", (0.8 * np.sin(2 * np.pi * 220 * t)).astype("float32"), SR)
+    window = MainWindow(
+        db_path=tmp_path / "index.db", cache_dir=tmp_path / "cache", settings=_ini(tmp_path),
+        encoder_factory=_encoder, reducer_factory=PcaReducer,
+    )
+    try:
+        window._autoplay.setChecked(False)
+        panel = window._recompute
+        assert panel.add_folder(lib)
+        _wait_until(app, lambda: not panel.running)
+
+        panel._step_attributes.setChecked(True)
+        panel._step_layout.setChecked(True)
+        panel._step_ranking.setChecked(True)
+        assert not panel._step_ranking.isEnabled()                  # no anchor: ranking cannot run
+        assert panel.plan() == RunPlan(attributes=True, layout="library", ranking=None)
+        panel.run()
+        _wait_until(app, lambda: not panel.running and "samples placed" in panel.log_text(), timeout_s=180)
+        log = panel.log_text()
+        assert log.index("— recompute attributes —") < log.index("— recompute map layout —")
+        assert window._map.point_count == 3 and not window._plan_steps
+
+        window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
+        window._anchor_current()
+        assert panel._step_ranking.isEnabled()
+        panel._layout_anchored.setChecked(True)
+        assert panel.plan() == RunPlan(attributes=True, layout="anchored", ranking="whole")
+        panel.run()
+        _wait_until(app, lambda: not panel.running and window._samples.has_similarity, timeout_s=180)
+        log = panel.log_text()
+        assert log.rindex("— recompute attributes —") < log.rindex("— place the anchor in the map layout —")
+        assert "ranked 3 samples" in window.statusBar().currentMessage()
+        assert not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
     finally:
         window.close()
 
@@ -414,10 +504,12 @@ def test_recompute_settings_round_trip_and_validation(app, tmp_path):
     panel._max_segments.setValue(8)
     panel._one_shot_cap.setChecked(False)
     panel._embed_segments.setChecked(False)
-    panel.add_scope_folder(tmp_path / "a_b")
+    (tmp_path / "a_b").mkdir()
+    add_library(panel._conn, tmp_path / "a_b")                    # the scope lives in the index
+    panel.refresh_folders()
 
     collected = panel.collect_settings()
-    assert collected.force_full and collected.scope == (str(tmp_path / "a_b"),)
+    assert collected.force_full and collected.scope == (normalize(tmp_path / "a_b"),)
     assert collected.segmentation.sensitivity == 0.4 and collected.segmentation.max_segments == 8
     assert collected.one_shot_max_duration_s is None and not collected.embedding.embed_segments
 
@@ -428,11 +520,13 @@ def test_recompute_settings_round_trip_and_validation(app, tmp_path):
 
     again._min_length.setValue(5.0)                               # min ≥ max: refused,
     again._max_length.setValue(1.0)                               # nothing starts
-    again.run_recompute()
+    assert not again.run_attributes()
     assert not again.running and "settings:" in again.log_text()
 
     again.stop()                                                  # no job: a no-op
     assert not again.running
+    panel.shutdown()
+    again.shutdown()
 
 
 def test_closing_the_window_mid_job_waits_for_the_job(app, tmp_path):
@@ -497,10 +591,14 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         panel = window._recompute
         assert window._map.point_count == 0 and "no layout" in window._map._caption
 
-        window._run_layout("library")                             # empty scope: refused
-        assert not panel.running and "scope is empty" in window.statusBar().currentMessage()
-        panel.add_scope_folder(lib)
-        window._run_layout("library")
+        panel.set_in_scope(lib, False)                            # the fixture's scan registered lib
+        assert not window._run_layout("library")                  # nothing in scope: refused
+        assert not panel.running and "nothing in scope" in window.statusBar().currentMessage()
+        panel.set_in_scope(lib, True)
+        panel._step_attributes.setChecked(False)
+        panel._step_layout.setChecked(True)
+        panel._step_ranking.setChecked(False)
+        panel.run()                                               # Run with Map layout ticked
         _wait_until(app, lambda: not panel.running)
         assert window._map.point_count == 3 and "layout #1" in window._map._caption
         assert "3 samples placed" in panel.log_text()
@@ -522,7 +620,7 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         assert loop_id not in window._map._badges
 
         window._anchor_current()                                  # the loop is current
-        window._recompute._rank_button.click()
+        _run_ranking(window)
         assert window._map._anchor == loop_id
         assert window._map._halo and loop_id not in window._map._halo
         assert "fit under other weights" not in window._map._caption

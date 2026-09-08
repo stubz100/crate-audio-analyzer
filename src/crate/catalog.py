@@ -15,7 +15,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from .db import WINDOW_METHOD
+from .db import WINDOW_METHOD, scope_clause
 
 
 @dataclass(frozen=True)
@@ -118,8 +118,19 @@ SELECT s.id, s.filepath, s.filename, s.folder, s.duration_s,
 FROM samples s
 LEFT JOIN classification k ON k.sample_id = s.id
 LEFT JOIN analysis a ON a.sample_id = s.id
+WHERE 1=1{{scope}}
 ORDER BY s.folder, s.filename
 """
+
+
+def _scope(scope) -> tuple[str, list[str]]:
+    """The §9.6 scope as SQL: None = everything (no folders known); an empty
+    scope = nothing (folders known, none in scope); else the folders."""
+    if scope is None:
+        return "", []
+    if not scope:
+        return " AND 0", []
+    return scope_clause(scope, "s.filepath")
 
 
 def _parse_scores(text: str) -> dict[str, float]:
@@ -133,10 +144,12 @@ def _parse_scores(text: str) -> dict[str, float]:
     return scores
 
 
-def load_samples(conn: sqlite3.Connection, top_tags: int = 3) -> list[SampleRow]:
-    """Every sample in the index, one row each, with what the list displays."""
+def load_samples(conn: sqlite3.Connection, top_tags: int = 3, scope=None) -> list[SampleRow]:
+    """The samples in scope (§9.6: the folders ticked on the Recompute tab;
+    None = every sample), one row each, with what the list displays."""
+    clause, params = _scope(scope)
     rows: list[SampleRow] = []
-    for row in conn.execute(_SAMPLES_SQL, (top_tags,)):
+    for row in conn.execute(_SAMPLES_SQL.replace("{scope}", clause), [top_tags, *params]):
         *fields, clap = row
         rows.append(SampleRow(*fields, clap_scores=_parse_scores(clap)))
     return rows
@@ -232,13 +245,21 @@ def describe_item(conn: sqlite3.Connection, kind: str, item_id: int) -> str | No
     return f"{hit_label(row[1], row[2], row[3] == WINDOW_METHOD)} in {row[0]}"
 
 
-def index_summary(conn: sqlite3.Connection) -> dict[str, int]:
-    """Counts for the status bar."""
-    q = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
+def index_summary(conn: sqlite3.Connection, scope=None) -> dict[str, int]:
+    """Counts for the status bar: everything but `indexed` is over the scope."""
+    clause, params = _scope(scope)
+    q = lambda sql: conn.execute(sql, params).fetchone()[0]  # noqa: E731
     return {
-        "samples": q("SELECT COUNT(*) FROM samples"),
-        "analysed": q("SELECT COUNT(*) FROM analysis"),
-        "segments": q(f"SELECT COUNT(*) FROM segments WHERE detection_method != '{WINDOW_METHOD}'"),
-        "windows": q(f"SELECT COUNT(*) FROM segments WHERE detection_method = '{WINDOW_METHOD}'"),
-        "embedded": q("SELECT COUNT(*) FROM embedding"),
+        "indexed": conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0],
+        "samples": q(f"SELECT COUNT(*) FROM samples s WHERE 1=1{clause}"),
+        "analysed": q(f"SELECT COUNT(*) FROM analysis a JOIN samples s ON s.id = a.sample_id WHERE 1=1{clause}"),
+        "segments": q(
+            f"SELECT COUNT(*) FROM segments g JOIN samples s ON s.id = g.sample_id "
+            f"WHERE g.detection_method != '{WINDOW_METHOD}'{clause}"
+        ),
+        "windows": q(
+            f"SELECT COUNT(*) FROM segments g JOIN samples s ON s.id = g.sample_id "
+            f"WHERE g.detection_method = '{WINDOW_METHOD}'{clause}"
+        ),
+        "embedded": q(f"SELECT COUNT(*) FROM embedding e JOIN samples s ON s.id = e.sample_id WHERE 1=1{clause}"),
     }

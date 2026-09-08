@@ -19,10 +19,10 @@ crate-analyze   # descriptors, tempo/loop-ness, structural type
 crate-segment   # find one-shot hits buried inside longer samples
 crate-embed     # CLAP vectors, zero-shot tag chips, content class; --export FILE.npz dumps every vector
 crate           # the window: filter, sort, preview, drag a sample or a buried hit into Bitwig;
-                # Recompute tab = Rescan library, folder scope, Recompute attributes (§9.6)
+                # Recompute tab = Library (folders, Root / In scope, Add / Remove, Rescan) + Recompute (§9.6)
 ```
 
-First run, in the window: Browse to the library root → **Rescan library** → add a folder to the **Library scope** (or *Add root*) → **Recompute attributes**. Nothing runs until you press a button; **Stop** ends the current stage after its current file and keeps everything committed so far.
+First run, in the window: on the **Recompute** tab press **Add folder…** and pick a sample folder — it is scanned in and ticked *In scope* — then tick **Attributes** and press **Run**. Every folder the index knows is listed with two ticks: *Root* (the library's home) and *In scope* (shown in the list and map, walked by **Rescan**, covered by Run; unticked folders stay in the index, dormant). **Remove folder** deletes a folder's samples from the index. The three steps under Run — Attributes, Map layout, Ranking — run in that order when ticked. Nothing runs until you press a button; **Stop** ends the current step after its current file and keeps everything committed so far.
 
 Then, on the **Attributes** tab: type what you are after ("footsteps on gravel", "sword clash") and press Search — a segment that matches better than its parent shows as an indented *hit* row you can preview and drag, and a long file whose best part is one of its 10-s CLAP windows shows an indented *window* row the same way, so a search can land at minute seven of an ambience. Select a sample or a hit, press **⚓ Anchor**, set the weight bars, and press **Recompute ranking** (Recompute tab) for a Similarity column; the distance ranges under Filters then cut the list down per axis. **Recompute map layout** (same tab, needs `uv sync --extra map`) fits the map; the **Map** button switches the list for it — click a point to select and preview, wheel to zoom, drag to pan, right-click to fit.
 

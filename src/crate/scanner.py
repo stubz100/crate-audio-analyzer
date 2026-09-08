@@ -39,6 +39,7 @@ from pathlib import Path
 import soundfile as sf
 
 from .db import now_iso
+from .library import register_scan
 
 log = logging.getLogger(__name__)
 
@@ -484,6 +485,7 @@ def scan_library(
         "SELECT COUNT(*) FROM analysis a JOIN samples s ON s.id = a.sample_id "
         "WHERE s.content_changed_at > a.analyzed_at"
     ).fetchone()[0]
+    register_scan(conn, root)   # the Library panel's list (§9.6): a walked root is a known folder
 
     summary.elapsed_s = time.perf_counter() - started
     return summary

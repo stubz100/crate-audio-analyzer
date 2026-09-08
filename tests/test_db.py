@@ -239,7 +239,8 @@ def test_v7_index_gains_the_window_kind_without_losing_a_row(tmp_path):
 
     conn = open_db(db_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 9
+        assert _columns(conn, "libraries") >= {"path", "is_root", "in_scope"}       # v9 came along
         assert segments_accept_windows(conn)
         rows = conn.execute(
             "SELECT id, start_ms, end_ms, detection_method, is_user_confirmed, needs_review, strength, cache_path "
