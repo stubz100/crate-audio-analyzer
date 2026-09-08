@@ -888,7 +888,7 @@ The user reported UMAP's "n_jobs value 1 overridden to 1 by setting random_state
 
 ## 2026-09-08 — Ranking leaves the Recompute tab; the weight bars re-rank
 
-**Phase:** 7 / 8 (anchor and ranking, reshaped) · NORANK_HASH
+**Phase:** 7 / 8 (anchor and ranking, reshaped) · `59c4c6c`
 
 "Great! ranking now should come out of recompute."
 
