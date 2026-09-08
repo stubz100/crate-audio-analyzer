@@ -885,3 +885,27 @@ The user reported UMAP's "n_jobs value 1 overridden to 1 by setting random_state
 **Next**
 
 - Anchored-only Recompute attributes; Phase 5; Phase 9's marker editing.
+
+## 2026-09-08 — Ranking leaves the Recompute tab; the weight bars re-rank
+
+**Phase:** 7 / 8 (anchor and ranking, reshaped) · NORANK_HASH
+
+"Great! ranking now should come out of recompute."
+
+**Done**
+
+- The *Ranking* step, its two scopes and its note are gone from the Recompute panel; `RunPlan` is attributes + layout; the anchor's only remaining role on that tab is the *Map layout* step's "anchor only" option (`set_anchor_available`).
+- The weight bars re-rank the anchored list on release: `weights_changed` → a 150 ms single-shot timer → `_rank()` through the feature-table queue, so a drag ranks once at its end and a table still loading is waited for. The bars' group says so ("Weights — the list re-ranks as you move them"); `_rank` has no scope argument any more (the "visible rows only" ranking went with the step — the quick filter and the Attributes filters already narrow what is shown).
+- CLAUDE.md's "nothing expensive runs automatically" names ranking as the measured exception (~25 ms), with the condition that it goes back behind a button if that ever changes; spec §9.6's policy line and table row say the same; README and the panel's docstring follow.
+
+**Decided**
+
+- Re-ranking on a bar's release rather than on a button: with ranking at 25 ms the button was ceremony, and a bar that changes nothing until a later click would be half-dead. The debounce keeps a drag from ranking per pixel; at library scale (~0.5 s per pass, projected) it is still one pass per release.
+
+**Verified**
+
+- `uv run pytest tests -q` → **180 passed, 2 skipped**; pyflakes clean. The anchor test now ranks by releasing the bars (zero weights → told; bars up → ranked with the anchor first); the Run-order test runs Attributes → anchored placement and finds the list re-ranked after the reload; the settings round-trip no longer stores the step.
+
+**Next**
+
+- Anchored-only Recompute attributes; Phase 5; Phase 9's marker editing.

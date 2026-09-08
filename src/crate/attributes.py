@@ -235,11 +235,11 @@ class AttributesPanel(QWidget):
         filters_layout.addWidget(self._ranges_group)
 
         # (5) weights — for the next Recompute ranking / map layout only
-        weights_group = QGroupBox("Weights (next ranking / map layout)")
+        weights_group = QGroupBox("Weights — the list re-ranks as you move them")
         weights_group.setToolTip(
-            "How much each axis counts when you press Recompute ranking or Recompute map "
-            "layout. Moving these changes nothing until you do (§9.6). They are not the "
-            "differences above."
+            "How much each axis counts in the ranking against the anchor — the anchored list "
+            "re-ranks when a bar moves (a 25 ms pass, §9.6) — and in the map layout on its next "
+            "Run. They are not the differences above."
         )
         weights_layout = QGridLayout(weights_group)
         self._weight_sliders: dict[str, QSlider] = {}

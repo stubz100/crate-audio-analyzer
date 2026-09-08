@@ -347,6 +347,14 @@ class MainWindow(QMainWindow):
         self._recompute.run_requested.connect(self._run_plan)
         self._recompute.job_ended.connect(self._advance_plan)
         self._attributes.criteria_changed.connect(self._sync_map_visibility)
+        # The weight bars re-rank the anchored list on release (2026-09-08, the
+        # user's steer, after ranking measured at ~25 ms): a short debounce so a
+        # drag ranks once, at its end, not per pixel.
+        self._rerank_timer = QTimer(self)
+        self._rerank_timer.setSingleShot(True)
+        self._rerank_timer.setInterval(150)
+        self._rerank_timer.timeout.connect(self._rerank_for_weights)
+        self._attributes.weights_changed.connect(self._on_weights_changed)
         tabs = QTabWidget()
         tabs.addTab(self._attributes, "Attributes")
         tabs.addTab(self._recompute, "Recompute")
@@ -597,6 +605,14 @@ class MainWindow(QMainWindow):
 
     # --- anchor (§9.2) and ranking (§9.6) ---
 
+    def _on_weights_changed(self, _weights) -> None:
+        if self._anchor is not None:
+            self._rerank_timer.start()
+
+    def _rerank_for_weights(self) -> None:
+        if self._anchor is not None:
+            self._with_features(lambda _table: self._rank())
+
     def _anchor_current(self) -> None:
         if self._current_item is None:
             self.statusBar().showMessage("select a sample or a hit first, then anchor it")
@@ -623,7 +639,7 @@ class MainWindow(QMainWindow):
 
         def go(features) -> None:
             if self._apply_anchor(kind, item_id, announce=False):
-                self._rank("whole")
+                self._rank()
                 self._table.scrollToTop()
             elif self._anchor == (kind, item_id):
                 self._clear_anchor()
@@ -651,7 +667,7 @@ class MainWindow(QMainWindow):
         self._samples.set_anchor((kind, item_id))
         self._proxy.set_axis_lookup(self._axis_by_sample.get)
         self._attributes.set_anchor_state(True)
-        self._recompute.set_ranking_available(True, label)
+        self._recompute.set_anchor_available(True, label)
         self._map.set_anchor(self._anchor_sample_id())
         self._anchor_vector = load_vector(self._conn, kind, item_id)
         self._update_difference()
@@ -670,7 +686,7 @@ class MainWindow(QMainWindow):
         self._samples.set_anchor(None)
         self._proxy.set_axis_lookup(lambda _sample_id: None)
         self._attributes.set_anchor_state(False)
-        self._recompute.set_ranking_available(False)
+        self._recompute.set_anchor_available(False)
         # The list keeps its order, its Similarity column and the map its halo
         # (2026-09-08, the user's steer): un-anchoring changes nothing but the anchor.
         self._map.set_anchor(None)
@@ -688,9 +704,10 @@ class MainWindow(QMainWindow):
             self._anchor = (kind, item_id)
             self._anchor_and_rank(kind, item_id)     # the table loads on a thread; the list ranks when it lands
 
-    def _rank(self, scope: str) -> None:
-        """§9.6 *Recompute ranking*: blend the anchor distances with the
-        weight bars, over the whole index or the visible rows only."""
+    def _rank(self) -> None:
+        """Rank the scope against the anchor: blend its per-axis distances with
+        the weight bars (§5.1) and fold the sub-hits (§9.4). Runs on a ⚓
+        click, on a weight bar's release, and after every reload."""
         if self._anchor is None or self._axis is None:
             self.statusBar().showMessage("ranking needs an anchor (⚓)")
             return
@@ -701,7 +718,7 @@ class MainWindow(QMainWindow):
             )
             return
         features = self._ensure_features()
-        sample_ids = self._proxy.visible_sample_ids() if scope == "visible" else set(self._rows_by_id)
+        sample_ids = set(self._rows_by_id)
         scores = features.rank(self._axis, weights, sample_ids)
         self._samples.set_similarity(scores)
         self._update_score_columns()
@@ -840,15 +857,13 @@ class MainWindow(QMainWindow):
 
     def _run_plan(self, plan: RunPlan) -> None:
         """The Recompute tab's Run: its ticked steps in order — Attributes,
-        Map layout, Ranking — each job's end (`job_ended`) starting the next;
-        a stopped or failed step drops the rest."""
+        then Map layout — each job's end (`job_ended`) starting the next; a
+        stopped or failed step drops the rest."""
         steps: list[tuple[str, str | None]] = []
         if plan.attributes:
             steps.append(("attributes", None))
         if plan.layout:
             steps.append(("layout", plan.layout))
-        if plan.ranking:
-            steps.append(("ranking", plan.ranking))
         self._plan_steps = steps
         self._advance_plan("", True)
 
@@ -870,8 +885,6 @@ class MainWindow(QMainWindow):
                     return
                 self._plan_steps = []
                 return
-            if step == "ranking":
-                self._with_features(lambda _t, o=option: self._rank(o or "whole"))   # after the reload's table
 
     def _run_layout(self, mode: str) -> bool:
         """§9.6 the *Map layout* step: a full re-fit over the folders in

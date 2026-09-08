@@ -12,12 +12,12 @@ Recompute; off = dormant, rows kept). *Add folder* scans a folder in,
 *Remove folder* deletes its samples from the index (asked first), *Rescan*
 walks the folders in scope.
 
-**Recompute** — the three things that can be computed, as ticked steps run
-in order by one *Run*: **Attributes** (analysis, segmentation, CLAP
-embedding — the expensive stage, with its settings below), **Map layout**
-(the projection, whole scope or the anchor alone), **Ranking** (the
-Similarity column against the anchor — cheap, needs an anchor). *Stop* ends
-the current step after its current file and drops the rest.
+**Recompute** — the two things worth a job, as ticked steps run in order by
+one *Run*: **Attributes** (analysis, segmentation, CLAP embedding — the
+expensive stage, with its settings below) and **Map layout** (the
+projection, whole scope or the anchor alone). *Stop* ends the current step
+after its current file and drops the rest. Ranking is not here: the ⚓ on a
+list row ranks at once and the weight bars re-rank on release (2026-09-08).
 
 The work runs on a `QThread` with its own SQLite connection — one process
 (§10); WAL lets the window keep reading meanwhile (`db.open_db`). Progress is
@@ -109,11 +109,10 @@ class RunPlan:
 
     attributes: bool = False
     layout: str | None = None    # "library" (re-fit over the scope) | "anchored" (place the anchor)
-    ranking: str | None = None   # "whole" (the scope) | "visible" (the filtered rows)
 
     @property
     def empty(self) -> bool:
-        return not (self.attributes or self.layout or self.ranking)
+        return not (self.attributes or self.layout)
 
 
 class _LogRelay(QObject):
@@ -213,7 +212,7 @@ class RecomputePanel(QWidget):
         self._settings = settings
         self._encoder_factory = encoder_factory
         self._thread: JobThread | None = None
-        self._rank_available = False
+        self._anchor_available = False
         self._refreshing = False
         self._relay = _LogRelay(self)
         self._relay.message.connect(self._append_log)
@@ -291,15 +290,9 @@ class RecomputePanel(QWidget):
         self._layout_anchored = QRadioButton("anchor only (place it)")
         (self._layout_anchored if v(_KEY + "layout_mode", "library", type=str) == "anchored"
          else self._layout_library).setChecked(True)
-        self._step_ranking = QCheckBox("Ranking")
-        self._step_ranking.setChecked(v(_KEY + "step_ranking", False, type=bool))
-        self._rank_whole = QRadioButton("whole scope")
-        self._rank_visible = QRadioButton("visible rows only")
-        (self._rank_visible if v(_KEY + "rank_scope", "whole", type=str) == "visible"
-         else self._rank_whole).setChecked(True)
-        self._rank_note = QLabel("")
-        self._rank_note.setObjectName("caption")
-        self._rank_note.setWordWrap(True)
+        self._anchor_note = QLabel("")
+        self._anchor_note.setObjectName("caption")
+        self._anchor_note.setWordWrap(True)
 
         steps = QVBoxLayout()
         steps.setSpacing(2)
@@ -315,16 +308,10 @@ class RecomputePanel(QWidget):
             "\"anchor only\" places the anchor into the existing layout instead",
             [self._layout_library, self._layout_anchored],
         ))
-        steps.addLayout(_step(
-            self._step_ranking,
-            "rank the list against the anchor again with the weight bars as they are now — "
-            "pressing ⚓ on a row already ranks at once; this is for after moving the bars",
-            [self._rank_whole, self._rank_visible],
-        ))
-        steps.addWidget(self._rank_note)
+        steps.addWidget(self._anchor_note)
 
         self._run_button = QPushButton("Run")
-        self._run_button.setToolTip("Run the ticked steps, in order: Attributes → Map layout → Ranking.")
+        self._run_button.setToolTip("Run the ticked steps, in order: Attributes → Map layout.")
         self._run_button.clicked.connect(self.run)
         self._stop_button = QPushButton("Stop")
         self._stop_button.setEnabled(False)
@@ -423,7 +410,7 @@ class RecomputePanel(QWidget):
         recompute_layout.addLayout(run_row)
         recompute_layout.addWidget(settings_label)
         recompute_layout.addLayout(form)
-        self.set_ranking_available(False)
+        self.set_anchor_available(False)
 
         # --- log ---
         self._log = QPlainTextEdit()
@@ -476,18 +463,18 @@ class RecomputePanel(QWidget):
     def folder_paths(self) -> list[str]:
         return [lib.path for lib in list_libraries(self._conn)]
 
-    def set_ranking_available(self, available: bool, anchor_label: str = "") -> None:
-        """The window tells the tab whether there is an anchor to rank against."""
-        self._rank_available = available
-        self._step_ranking.setEnabled(available)
-        self._rank_whole.setEnabled(available)
-        self._rank_visible.setEnabled(available)
+    def set_anchor_available(self, available: bool, anchor_label: str = "") -> None:
+        """The window tells the tab whether there is an anchor — what the
+        Map layout step's "anchor only" option needs. (Ranking itself left
+        this tab on 2026-09-08: ⚓ on a row ranks at once, the weight bars
+        re-rank on release.)"""
+        self._anchor_available = available
         self._layout_anchored.setEnabled(available)
         if not available and self._layout_anchored.isChecked():
             self._layout_library.setChecked(True)
-        self._rank_note.setText(
+        self._anchor_note.setText(
             f"anchor: {anchor_label}" if available
-            else "Ranking needs an anchor: select a sample or a hit in the list and press ⚓ Anchor."
+            else "\"anchor only\" needs an anchor: press ⚓ at the start of a row in the list."
         )
 
     def log_text(self) -> str:
@@ -497,11 +484,8 @@ class RecomputePanel(QWidget):
         """The ticked steps as the window will run them."""
         layout = None
         if self._step_layout.isChecked():
-            layout = "anchored" if self._layout_anchored.isChecked() and self._rank_available else "library"
-        ranking = None
-        if self._step_ranking.isChecked() and self._rank_available:
-            ranking = "visible" if self._rank_visible.isChecked() else "whole"
-        return RunPlan(self._step_attributes.isChecked(), layout, ranking)
+            layout = "anchored" if self._layout_anchored.isChecked() and self._anchor_available else "library"
+        return RunPlan(self._step_attributes.isChecked(), layout)
 
     def collect_settings(self) -> RecomputeSettings:
         """The controls as one settings object; raises ValueError on a
@@ -534,9 +518,7 @@ class RecomputePanel(QWidget):
         s = self._settings.setValue
         s(_KEY + "step_attributes", self._step_attributes.isChecked())
         s(_KEY + "step_layout", self._step_layout.isChecked())
-        s(_KEY + "step_ranking", self._step_ranking.isChecked())
         s(_KEY + "layout_mode", "anchored" if self._layout_anchored.isChecked() else "library")
-        s(_KEY + "rank_scope", "visible" if self._rank_visible.isChecked() else "whole")
         s(_KEY + "force_full", self._force_full.isChecked())
         s(_KEY + "embed_segments", self._embed_segments.isChecked())
         s(_KEY + "min_segment_length_ms", self._min_embed_ms.value())
@@ -667,7 +649,7 @@ class RecomputePanel(QWidget):
         """Run: hand the ticked steps to the window, which runs them in order."""
         plan = self.plan()
         if plan.empty:
-            self._append_log("tick at least one step: Attributes, Map layout or Ranking")
+            self._append_log("tick at least one step: Attributes or Map layout")
             return
         if self.running:
             self._append_log("a job is already running")

@@ -95,14 +95,9 @@ def _anchor_current(app, window) -> None:
     _wait_until(app, lambda: window._feature_thread is None and not window._feature_waiters)
 
 
-def _run_ranking(window) -> None:
-    """Press Run on the Recompute tab with only the Ranking step ticked —
-    ranking runs on the GUI thread, so it is done when this returns."""
-    panel = window._recompute
-    panel._step_attributes.setChecked(False)
-    panel._step_layout.setChecked(False)
-    panel._step_ranking.setChecked(True)
-    panel.run()
+def _rerank(app, window) -> None:
+    """The weight bars re-rank on a short debounce; pump until it has fired."""
+    _wait_until(app, lambda: not window._rerank_timer.isActive() and not window._feature_waiters)
 
 
 @pytest.fixture()
@@ -267,7 +262,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
     try:
         window._autoplay.setChecked(False)
         assert not window._attributes._ranges_group.isEnabled()
-        assert not window._recompute._step_ranking.isEnabled()
+        assert not window._recompute._layout_anchored.isEnabled()
 
         for slider in window._attributes._weight_sliders.values():
             slider.setValue(0)
@@ -278,14 +273,14 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         assert window._samples.anchor == ("sample", window._rows_by_id and next(
             r.id for r in window._rows_by_id.values() if r.filename == "loop.wav"))
         assert window._attributes._ranges_group.isEnabled()
-        assert window._recompute._step_ranking.isEnabled()
-        assert "loop.wav" in window._recompute._rank_note.text()
+        assert window._recompute._layout_anchored.isEnabled()
+        assert "loop.wav" in window._recompute._anchor_note.text()
         assert "weight" in window.statusBar().currentMessage()        # … but nothing to blend: told
         assert window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
         for slider in window._attributes._weight_sliders.values():
             slider.setValue(100)
 
-        _run_ranking(window)                                       # Run with only Ranking ticked
+        _rerank(app, window)                                       # the bars re-rank on release
         assert not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
         assert window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"   # the anchor itself first
         assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_SIMILARITY)) == "100"
@@ -315,13 +310,6 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         assert window._proxy.rowCount() == 1                       # hit.wav is far in CLAP space
         window._attributes._range_max["conceptual"].setValue(100)
         assert window._proxy.rowCount() == 2
-
-        # Visible-only scope ranks just what the list shows.
-        window._filter.setText("hit")
-        window._recompute._rank_visible.setChecked(True)
-        _run_ranking(window)
-        assert "ranked 1 samples" in window.statusBar().currentMessage()
-        window._filter.setText("")
 
         settings.sync()
         stored = (tmp_path / "crate.ini").read_text(encoding="utf-8")
@@ -424,7 +412,6 @@ def test_recompute_tab_builds_the_index_from_the_window(app, tmp_path):
 
         panel._step_attributes.setChecked(True)
         panel._step_layout.setChecked(False)
-        panel._step_ranking.setChecked(False)
         item.setCheckState(1, Qt.CheckState.Unchecked)              # dormant: hidden, not deleted
         assert window._proxy.rowCount() == 0 and panel.scope_folders() == []
         assert "0 samples in scope of 2 indexed" in window.statusBar().currentMessage()
@@ -492,9 +479,9 @@ def test_run_executes_the_ticked_steps_in_order(app, tmp_path):
 
         panel._step_attributes.setChecked(True)
         panel._step_layout.setChecked(True)
-        panel._step_ranking.setChecked(True)
-        assert not panel._step_ranking.isEnabled()                  # no anchor: ranking cannot run
-        assert panel.plan() == RunPlan(attributes=True, layout="library", ranking=None)
+        panel._layout_anchored.setChecked(True)                     # no anchor: falls back to the re-fit
+        assert not panel._layout_anchored.isEnabled()
+        assert panel.plan() == RunPlan(attributes=True, layout="library")
         panel.run()
         _wait_until(app, lambda: not panel.running and "samples placed" in panel.log_text(), timeout_s=180)
         log = panel.log_text()
@@ -502,16 +489,19 @@ def test_run_executes_the_ticked_steps_in_order(app, tmp_path):
         assert window._map.point_count == 3 and not window._plan_steps
 
         window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
-        _anchor_current(app, window)
-        assert panel._step_ranking.isEnabled()
-        panel._layout_anchored.setChecked(True)
-        assert panel.plan() == RunPlan(attributes=True, layout="anchored", ranking="whole")
+        _anchor_current(app, window)                                # anchored: ranked at once
+        assert panel._layout_anchored.isEnabled()
+        assert "ranked 3 samples" in window.statusBar().currentMessage()
+        assert panel.plan() == RunPlan(attributes=True, layout="anchored")
         panel.run()
-        _wait_until(app, lambda: not panel.running and window._samples.has_similarity, timeout_s=180)
+        _wait_until(
+            app,
+            lambda: not panel.running and not window._feature_waiters and window._samples.has_similarity,
+            timeout_s=180,
+        )
         log = panel.log_text()
         assert log.rindex("— recompute attributes —") < log.rindex("— place the anchor in the map layout —")
-        assert "ranked 3 samples" in window.statusBar().currentMessage()
-        assert not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
+        assert not window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)   # re-ranked after the reload
     finally:
         window.close()
 
@@ -619,7 +609,6 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         panel.set_in_scope(lib, True)
         panel._step_attributes.setChecked(False)
         panel._step_layout.setChecked(True)
-        panel._step_ranking.setChecked(False)
         panel.run()                                               # Run with Map layout ticked
         _wait_until(app, lambda: not panel.running)
         assert window._map.point_count == 3 and "layout #1" in window._map._caption
