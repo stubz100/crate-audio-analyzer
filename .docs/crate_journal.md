@@ -23,7 +23,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 5 | Qwen2-Audio + Latent-Similarity Spike | ✅ done — `32ef47b` (`.docs/phase5_spike.md`: 102 files, 16 groups; captioning 6–20 s/file on this CPU, built as the opt-in Recompute stage + `crate-caption`; the latent axis a no-go across 13 poolings — no vocal-semantic axis) |
 | 6 | Map View | ✅ done — `72ad400` (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
-| 8 | Recompute Tab | ✅ done — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; ranking with Phase 7 (`4756a35`), map layout (both scopes) with Phase 6 (`72ad400`); reshaped into a Library panel + one Recompute panel `b04ab9c`; ⚓ anchored-only Recompute *attributes*, the last piece, `ANCHORED_HASH` (2026-09-08; schema v10 with it) |
+| 8 | Recompute Tab | ✅ done — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; ranking with Phase 7 (`4756a35`), map layout (both scopes) with Phase 6 (`72ad400`); reshaped into a Library panel + one Recompute panel `b04ab9c`; ⚓ anchored-only Recompute *attributes*, the last piece, `b1c037f` (2026-09-08; schema v10 with it) |
 | 9 | Header Interactions | 🟨 preview + drag-out since 4.5, a minimal ⚓ Anchor (persisted) since Phase 7 (`4756a35`), the waveform panel with segment markers, envelope and playhead since `5acfcd4`; marker editing (drag, Save / Delete segment) not started |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
@@ -1001,7 +1001,7 @@ The user: use the chips' scores in the CLAP scores box instead of the four calcu
 
 ## 2026-09-08 — ⚓ Anchored-only Recompute attributes: Phase 8 complete
 
-**Phase:** 8 (the last piece) · `ANCHORED_HASH`
+**Phase:** 8 (the last piece) · `b1c037f`
 
 The user: finish what is left of Phase 8 first.
 
