@@ -981,7 +981,7 @@ The user: captioning is laborious — do it in parts, and for a single sample; a
 
 ## 2026-09-08 — The CLAP box shows the tag scores
 
-**Phase:** 7 (Attributes tab) · TAGBARS_HASH
+**Phase:** 7 (Attributes tab) · `98437a5`
 
 The user: use the chips' scores in the CLAP scores box instead of the four calculated ones.
 
