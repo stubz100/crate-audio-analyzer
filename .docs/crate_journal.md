@@ -20,7 +20,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 3 | Transient Segmentation | ✅ done — `5e055b2` (nodes S/T, both profiles, settings, segment tables, manual path; validated on 472 real samples). UI for manual markers is Phase 9; lazy render is Phase 4.5/9 |
 | 4 | Embeddings & Classification | ✅ done — `1e1b585` (nodes D/C2/X/E on transformers' CLAP; Facet A 68% on 335 labeled files; full index embedded at 0.21 s/sample) |
 | 4.5 | "Listen and grab" (pull-forward) | ✅ done — `f715d03` (sortable/filterable list, segments drill-down, Qt Multimedia preview, lazy segment render, file-URL drag-out) |
-| 5 | Qwen2-Audio + Latent-Similarity Spike | ✅ done — PHASE5_HASH (`.docs/phase5_spike.md`: 102 files, 16 groups; captioning 6–20 s/file on this CPU, built as the opt-in Recompute stage + `crate-caption`; the latent axis a no-go across 13 poolings — no vocal-semantic axis) |
+| 5 | Qwen2-Audio + Latent-Similarity Spike | ✅ done — `32ef47b` (`.docs/phase5_spike.md`: 102 files, 16 groups; captioning 6–20 s/file on this CPU, built as the opt-in Recompute stage + `crate-caption`; the latent axis a no-go across 13 poolings — no vocal-semantic axis) |
 | 6 | Map View | ✅ done — `72ad400` (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
 | 8 | Recompute Tab | 🟨 library-scope half done, pulled forward after 4.5 — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; Recompute ranking added with Phase 7 (`4756a35`); Recompute map layout (both scopes) added with Phase 6 (`72ad400`); reshaped 2026-09-08 into a Library panel (folders in the index, Root / In scope ticks, Add / Remove / Rescan) and one Recompute panel (three ticked steps, one Run) `b04ab9c`; anchored-only Recompute *attributes* remains |
@@ -932,7 +932,7 @@ The user: the right panel's width became variable — every click on a sample re
 
 ## 2026-09-08 — Phase 5: Qwen2-Audio on this CPU — captions yes (opt-in), latent axis no
 
-**Phase:** 5 · PHASE5_HASH
+**Phase:** 5 · `32ef47b`
 
 "I think we're at a stage of starting phase 5, shall we?"
 
