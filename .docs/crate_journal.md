@@ -1055,7 +1055,7 @@ The user: complete Phase 9.
 
 ## 2026-09-08 — Waveform: zoom, a finer raster, reads off the GUI thread, the caption on top
 
-**Phase:** 9 polish (the waveform panel) · `ZOOM_HASH`
+**Phase:** 9 polish (the waveform panel) · `23591e4`
 
 The user: the waveform needs a zoom for precision; some GPU support for a less crude look; separate the playback from the graphics with parallel rendering; the Qwen2-Audio caption and its Recaption button at the top of the waveform, "—" when missing.
 
