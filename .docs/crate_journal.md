@@ -912,7 +912,7 @@ The user reported UMAP's "n_jobs value 1 overridden to 1 by setting random_state
 
 ## 2026-09-08 — The right panel stops moving with the selection
 
-**Phase:** 9 (window polish) · PANES_HASH
+**Phase:** 9 (window polish) · `55bc53d`
 
 The user: the right panel's width became variable — every click on a sample retracts or widens it; it should keep a default size or the size it was dragged to.
 
