@@ -1129,7 +1129,7 @@ The user: "Segments of the selected sample" is not needed; the weights belong on
 
 ## 2026-09-08 — Half-and-half splits by default
 
-**Phase:** 7 polish (the window) · `SPLIT_HASH`
+**Phase:** 7 polish (the window) · `f2d0f9e`
 
 The user: the list and the waveform should split 50/50 vertically, and the list/waveform pane and the three tabs 50/50 horizontally, by default.
 
