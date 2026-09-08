@@ -10,9 +10,9 @@ way.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize
-from PySide6.QtGui import QColor, QFont, QPalette
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPalette
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 # --- palette ---------------------------------------------------------------
 
@@ -176,6 +176,36 @@ class SqueezableWidget(QWidget):
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         return QSize(0, super().minimumSizeHint().height())
+
+
+class ElidedLabel(QLabel):
+    """A one-line label that never claims its text's width. A long file name
+    in the transport row raised the left pane's minimum width and squeezed
+    the right panel to its floor — and the splitter then remembered the
+    squeeze (2026-09-08, the user's report). The text is elided in the middle
+    to the space there is; the full text is the tooltip; `text()` is the full
+    text, as callers expect."""
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.setToolTip(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        super().setText(text)
+        self.setToolTip(text)
+        self.update()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        rect = self.contentsRect()
+        elided = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideMiddle, rect.width())
+        painter.setFont(self.font())
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(rect, int(self.alignment()) | Qt.TextFlag.TextSingleLine, elided)
+        painter.end()
 
 
 def apply_theme(app: QApplication) -> None:

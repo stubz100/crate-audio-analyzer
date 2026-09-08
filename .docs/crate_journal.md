@@ -909,3 +909,23 @@ The user reported UMAP's "n_jobs value 1 overridden to 1 by setting random_state
 **Next**
 
 - Anchored-only Recompute attributes; Phase 5; Phase 9's marker editing.
+
+## 2026-09-08 — The right panel stops moving with the selection
+
+**Phase:** 9 (window polish) · PANES_HASH
+
+The user: the right panel's width became variable — every click on a sample retracts or widens it; it should keep a default size or the size it was dragged to.
+
+**Done**
+
+- **Found by measuring, not guessing.** Offscreen, the right panel held its width across selections; the movement came from the *left*: the transport row's "now playing" and anchor labels are plain QLabels whose minimum width is their text's width. A long file name ("Ambience Los Angeles Street Traffic Cars Pedestrians Dog Night Loop.wav", plus a window-hit anchor label) raised the left pane's minimum from 583 px to 1433 px, the splitter squeezed the right panel to its 360 px floor — and kept the squeeze after the name was short again, because a splitter remembers the sizes it was forced to.
+- `theme.ElidedLabel`: a one-line label with a zero minimum width that elides its text in the middle to the space it has, keeps the full text in `text()` (callers read it) and as the tooltip. The two transport labels use it, sharing the row 2:1.
+- Both splitters persist: `window/splitter` (list | right panel) and `window/panes` (list | waveform) are saved on close and restored at start-up, so a dragged position is the default from then on.
+
+**Verified**
+
+- `uv run pytest tests -q` → **181 passed, 2 skipped**; pyflakes clean. New: two 150-character labels leave the splitter sizes untouched and the label's minimum width at 0; sizes set "by hand" on both splitters come back in a new window on the same settings.
+
+**Next**
+
+- Anchored-only Recompute attributes; Phase 5; Phase 9's marker editing.

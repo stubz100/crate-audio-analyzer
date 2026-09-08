@@ -371,6 +371,8 @@ Two established interaction patterns — Atlas 2's spatial map, Sononym's sortab
 └────────────────────────────────────────────────────────────────┴───────────┘
 ```
 
+*(2026-09-08, the user's report — the right panel widened and narrowed with every selection: a long file name in the transport row's "now playing" and anchor labels raised the left pane's minimum width, the splitter squeezed the right panel to its floor and then kept the squeeze. Those two labels now elide in the middle and claim no minimum width (`theme.ElidedLabel`, the full text as tooltip), and both splitters — list | right panel, list | waveform — persist the position they were dragged to across restarts.)*
+
 ### 9.2 Header — preview, anchor, drag-out, manual markers
 
 - **View switch** (`Map`/`List`), always visible.

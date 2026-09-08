@@ -697,3 +697,52 @@ def test_a_search_can_land_on_a_window_inside_a_long_file(app, tmp_path):
         assert not window._waveform.grab().isNull()
     finally:
         window.close()
+
+
+# --- the panes keep their width (2026-09-08) ---
+
+
+def test_long_names_do_not_move_the_panes_and_their_position_persists(app, index, tmp_path):
+    """A long file name in the transport row used to raise the left pane's
+    minimum width and squeeze the right panel — and the splitter kept the
+    squeeze. Now the labels elide, and a dragged position survives a restart."""
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    settings = _ini(tmp_path)
+    window = MainWindow(db_path=db, cache_dir=cache, settings=settings)
+    try:
+        window.resize(1600, 900)
+        window.show()
+        app.processEvents()
+        before = window._body.sizes()
+        assert before[1] >= 360
+        window._now_playing.setText("Ambience Los Angeles Street Traffic Cars Pedestrians Dog Night Loop.wav" * 2)
+        window._anchor_label.setText("window @ 2:20.000 (10 s) in Ambience Venice Canals Crowd Footsteps Loop.wav" * 2)
+        app.processEvents()
+        assert window._body.sizes() == before                                # nothing moved
+        assert window._now_playing.minimumSizeHint().width() == 0
+        assert window._now_playing.text().startswith("Ambience")             # the full text is kept
+        assert window._now_playing.toolTip() == window._now_playing.text()
+
+        # "Dragged" by hand — to a width above the left pane's own minimum (the
+        # transport row's buttons; larger under the test's default font).
+        left = window._body.widget(0)
+        target = max(900, left.minimumSizeHint().width() + 40)
+        assert target < before[0], (before, left.minimumSizeHint().width())
+        window._body.setSizes([target, before[0] + before[1] - target])
+        window._panes.setSizes([400, 200])
+        app.processEvents()
+        dragged, panes = window._body.sizes(), window._panes.sizes()
+        assert dragged[0] == target
+    finally:
+        window.close()
+
+    again = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path))
+    try:
+        again.resize(1600, 900)
+        again.show()
+        app.processEvents()
+        assert again._body.sizes() == dragged and again._panes.sizes() == panes
+    finally:
+        again.close()

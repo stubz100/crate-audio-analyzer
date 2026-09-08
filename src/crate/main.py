@@ -58,7 +58,7 @@ from .library import scope_paths
 from .recompute import EncoderFactory, RecomputePanel, RunPlan
 from .render import default_cache_dir, render_segment
 from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable, Scores
-from .theme import apply_theme
+from .theme import ElidedLabel, apply_theme
 from .waveform import WaveformView
 
 log = logging.getLogger(__name__)
@@ -68,6 +68,8 @@ APP_NAME = "Crate"
 SETTINGS_KEY_AUTOPLAY = "preview/autoplay"
 SETTINGS_KEY_ANCHOR_KIND = "anchor/kind"
 SETTINGS_KEY_ANCHOR_ID = "anchor/id"
+SETTINGS_KEY_SPLITTER = "window/splitter"   # list | right panel, as dragged
+SETTINGS_KEY_PANES = "window/panes"         # list | waveform, as dragged
 HALO_NEIGHBOURS = 20               # §9.3: nearest neighbours highlighted after a ranking
 # The model stack logs every HTTP request at INFO; that is noise on a
 # multi-hour run, not progress (same list as the CLI).
@@ -288,6 +290,7 @@ class MainWindow(QMainWindow):
         tables.addWidget(self._waveform)
         tables.setStretchFactor(0, 4)
         tables.setStretchFactor(1, 1)
+        self._panes = tables
 
         # --- transport + anchor (§9.2, the minimal slice Phase 7 needs) ---
         self._play_button = QPushButton("▶ Play")
@@ -300,9 +303,9 @@ class MainWindow(QMainWindow):
         self._autoplay.toggled.connect(
             lambda on: self._settings.setValue(SETTINGS_KEY_AUTOPLAY, bool(on))
         )
-        self._now_playing = QLabel("")
+        self._now_playing = ElidedLabel("")
         self._now_playing.setObjectName("nowPlaying")
-        self._anchor_label = QLabel("no anchor")
+        self._anchor_label = ElidedLabel("no anchor")
         self._anchor_label.setToolTip(
             "The comparison reference (§9.2): press ⚓ at the start of a row to anchor that "
             "sample and rank the list against it (or press A on the selected row)."
@@ -315,9 +318,9 @@ class MainWindow(QMainWindow):
         transport.addWidget(self._play_button)
         transport.addWidget(stop_button)
         transport.addWidget(self._autoplay)
-        transport.addWidget(self._now_playing, stretch=1)
+        transport.addWidget(self._now_playing, stretch=2)
         transport.addWidget(QLabel("⚓"))
-        transport.addWidget(self._anchor_label)
+        transport.addWidget(self._anchor_label, stretch=1)
         transport.addWidget(clear_anchor)
         transport.addWidget(QLabel("Drag a row into Bitwig ↗"))
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self._toggle_play)
@@ -366,6 +369,13 @@ class MainWindow(QMainWindow):
         body.setStretchFactor(0, 3)
         body.setStretchFactor(1, 1)
         body.setSizes([840, 560])
+        self._body = body
+        # The panes keep the size they were dragged to (2026-09-08, the user's
+        # steer): the splitter states persist across restarts.
+        for splitter, key in ((body, SETTINGS_KEY_SPLITTER), (tables, SETTINGS_KEY_PANES)):
+            state = self._settings.value(key, None)
+            if state:
+                splitter.restoreState(state)
         self.setCentralWidget(body)
 
         self.reload()
@@ -946,6 +956,8 @@ class MainWindow(QMainWindow):
             self._feature_thread.wait()
         self._recompute.index_changed.disconnect(self.reload)
         self._recompute.save_settings()
+        self._settings.setValue(SETTINGS_KEY_SPLITTER, self._body.saveState())
+        self._settings.setValue(SETTINGS_KEY_PANES, self._panes.saveState())
         self._recompute.shutdown()
         self._conn.close()
         super().closeEvent(event)
