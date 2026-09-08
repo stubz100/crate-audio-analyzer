@@ -959,7 +959,7 @@ The user: the right panel's width became variable — every click on a sample re
 
 ## 2026-09-08 — Captions in parts and per sample; a Search tab
 
-**Phase:** 5 / 7 (captioning made usable; the right panel re-cut) · SPLIT_HASH
+**Phase:** 5 / 7 (captioning made usable; the right panel re-cut) · `031523c`
 
 The user: captioning is laborious — do it in parts, and for a single sample; and the Attributes tab is crammed — move everything search-related to a third tab.
 
