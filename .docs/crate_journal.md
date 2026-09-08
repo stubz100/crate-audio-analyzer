@@ -24,7 +24,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 6 | Map View | ✅ done — `72ad400` (UMAP layout over the weighted feature space: full re-fit + anchored transform; painted map with class colours / type shapes, halo, badges; schema v7) |
 | 7 | List, Search, Filter | ✅ done — `4756a35` (tree list with sub-hit rows; Attributes tab: weights, CLAP search, filters, anchor ranges, tag chips; Recompute ranking and a minimal anchor came with it; review fixes `7e3e6fb`) |
 | 8 | Recompute Tab | ✅ done — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; ranking with Phase 7 (`4756a35`), map layout (both scopes) with Phase 6 (`72ad400`); reshaped into a Library panel + one Recompute panel `b04ab9c`; ⚓ anchored-only Recompute *attributes*, the last piece, `b1c037f` (2026-09-08; schema v10 with it) |
-| 9 | Header Interactions | ✅ done — preview + drag-out since 4.5, the ⚓ anchor since Phase 7 (`4756a35`; on every row since 2026-09-08), the waveform panel with segment markers, envelope and playhead `5acfcd4`; marker editing — drag, draw, Save / Discard / Delete segment — `MARKERS_HASH` (2026-09-08) |
+| 9 | Header Interactions | ✅ done — preview + drag-out since 4.5, the ⚓ anchor since Phase 7 (`4756a35`; on every row since 2026-09-08), the waveform panel with segment markers, envelope and playhead `5acfcd4`; marker editing — drag, draw, Save / Discard / Delete segment — `06a7ec5` (2026-09-08) |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ⬜ not started |
 | 12 | Scale & Polish Hardening | ⬜ not started |
@@ -1029,7 +1029,7 @@ The user: finish what is left of Phase 8 first.
 
 ## 2026-09-08 — Manual markers on the waveform: Phase 9 complete
 
-**Phase:** 9 (the last piece) · `MARKERS_HASH`
+**Phase:** 9 (the last piece) · `06a7ec5`
 
 The user: complete Phase 9.
 
