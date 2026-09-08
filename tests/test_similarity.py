@@ -194,3 +194,54 @@ def test_criteria_rules():
 
 def test_scores_default_empty():
     assert Scores().sample == {} and Scores().hits == {}
+
+
+# --- §6.4 CLAP windows as hits (2026-09-08) ---
+
+LONG_LABELS = {10.0: "rain on a roof", 5.0: "a door slam", 0.4: "kick drum"}
+
+
+@pytest.fixture(scope="module")
+def long_index(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("windows")
+    lib = tmp / "lib"
+    lib.mkdir()
+    sf.write(lib / "ambience.wav", _clicks([1.0, 12.0, 21.0], 25.0), SR)
+    sf.write(lib / "kick.wav", _clicks([0.0], 0.4), SR)
+    conn = open_db(tmp / "index.db")
+    scan_library(conn, lib)
+    analyze_pending(conn)
+    segment_pending(conn)
+    embed_pending(conn, encoder=FakeEncoder(LONG_LABELS))
+    ids = {row[0]: row[1] for row in conn.execute("SELECT filename, id FROM samples")}
+    yield conn, ids
+    conn.close()
+
+
+def test_a_clap_window_is_a_conceptual_item_that_can_be_the_hit(long_index):
+    conn, ids = long_index
+    table = FeatureTable.load(conn)
+    windows = [r[0] for r in conn.execute("SELECT id FROM segments WHERE detection_method = 'window' ORDER BY start_ms")]
+    assert len(windows) == 3 and all(table.row_of("segment", w) is not None for w in windows)
+    assert int(table.is_window.sum()) == 3
+
+    encoder = FakeEncoder(LONG_LABELS)
+    slam = table.search(encoder.embed_text(["a door slam"])[0])
+    hit = slam.hits[ids["ambience.wav"]]
+    assert hit.window and hit.segment_id == windows[2] and (hit.start_ms, hit.end_ms) == (20000, 25000)
+    assert hit.score == pytest.approx(1.0) and slam.sample[ids["ambience.wav"]] == pytest.approx(1.0)
+    rain = table.search(encoder.embed_text(["rain on a roof"])[0])
+    assert rain.hits[ids["ambience.wav"]].window                    # the first window beats the mean
+
+    # Anchored on the kick: a window has the conceptual axis and nothing else,
+    # so it scores only when that axis carries weight.
+    d = table.distances(table.row_of("sample", ids["kick.wav"]))
+    row = table.row_of("segment", windows[0])
+    concept = AXES.index("conceptual")
+    assert not math.isnan(d[row, concept])
+    assert all(math.isnan(d[row, j]) for j in range(len(AXES)) if j != concept)
+    ranked = table.rank(d, {axis: 1.0 for axis in AXES})
+    assert windows[0] in ranked.segment
+    without = table.rank(d, {axis: (0.0 if axis == "conceptual" else 1.0) for axis in AXES})
+    assert windows[0] not in without.segment
+    assert describe_item(conn, "segment", windows[2]) == "window @ 20.000 s (5 s) in ambience.wav"

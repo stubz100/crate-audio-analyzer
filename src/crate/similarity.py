@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .db import WINDOW_METHOD
 from .embedding import MODEL_NAME, blob_to_vector
 
 log = logging.getLogger(__name__)
@@ -58,12 +59,15 @@ _DESCRIPTOR_COLUMNS = (
 
 @dataclass(frozen=True)
 class Hit:
-    """A segment that beats its own parent for the current scoring (§9.4)."""
+    """A segment that beats its own parent for the current scoring (§9.4) —
+    a detected or manual segment, or (`window`) one of the 10-s CLAP windows
+    of a long file (§6.4)."""
 
     segment_id: int
     start_ms: int
     end_ms: int
     score: float
+    window: bool = False
 
 
 @dataclass
@@ -153,9 +157,11 @@ class FeatureTable:
         features: dict[str, np.ndarray],
         vectors: np.ndarray,
         has_vector: np.ndarray,
+        is_window: np.ndarray | None = None,
     ) -> None:
         self.ids = ids
         self.is_segment = is_segment
+        self.is_window = np.zeros(len(ids), dtype=bool) if is_window is None else is_window
         self.parents = parents
         self.starts = starts
         self.ends = ends
@@ -178,11 +184,18 @@ class FeatureTable:
             "  ON e.sample_id = a.sample_id AND e.model_name = ? ORDER BY a.sample_id",
             (MODEL_NAME,),
         ).fetchall()
+        # A detected or manual segment has descriptors and (once embedded) a
+        # vector; a CLAP window of a long file (§6.4) has its vector only, so
+        # it is a conceptual-axis item — the blend and the search skip what an
+        # item lacks.
         segment_rows = conn.execute(
             f"SELECT g.id AS item_id, g.sample_id AS parent_id, g.start_ms, g.end_ms, "
+            f"g.detection_method AS method, "
             f"{', '.join('sa.' + c for c in _DESCRIPTOR_COLUMNS)}, se.vector AS vector "
-            "FROM segment_analysis sa JOIN segments g ON g.id = sa.segment_id "
+            "FROM segments g "
+            "LEFT JOIN segment_analysis sa ON sa.segment_id = g.id "
             "LEFT JOIN segment_embedding se ON se.segment_id = g.id AND se.model_name = ? "
+            "WHERE sa.segment_id IS NOT NULL OR se.segment_id IS NOT NULL "
             "ORDER BY g.id",
             (MODEL_NAME,),
         ).fetchall()
@@ -190,6 +203,7 @@ class FeatureTable:
         n = len(rows)
         ids = np.zeros(n, dtype=np.int64)
         is_segment = np.zeros(n, dtype=bool)
+        is_window = np.zeros(n, dtype=bool)
         parents = np.zeros(n, dtype=np.int64)
         starts = np.zeros(n, dtype=np.int64)
         ends = np.zeros(n, dtype=np.int64)
@@ -198,6 +212,7 @@ class FeatureTable:
         for i, (row, seg) in enumerate(rows):
             ids[i] = row["item_id"]
             is_segment[i] = seg
+            is_window[i] = seg and row["method"] == WINDOW_METHOD
             parents[i] = row["parent_id"]
             starts[i] = row["start_ms"]
             ends[i] = row["end_ms"]
@@ -218,10 +233,10 @@ class FeatureTable:
                 matrix[i] = v
                 has_vector[i] = True
         log.info(
-            "feature table: %d samples + %d segments, %d with vectors",
-            int((~is_segment).sum()), int(is_segment.sum()), int(has_vector.sum()),
+            "feature table: %d samples + %d segments (%d of them CLAP windows), %d with vectors",
+            int((~is_segment).sum()), int(is_segment.sum()), int(is_window.sum()), int(has_vector.sum()),
         )
-        return cls(ids, is_segment, parents, starts, ends, features, matrix, has_vector)
+        return cls(ids, is_segment, parents, starts, ends, features, matrix, has_vector, is_window)
 
     # --- lookups ---
 
@@ -330,7 +345,8 @@ class FeatureTable:
             if own is None or value > own:
                 scores.sample[parent] = value
                 scores.hits[parent] = Hit(
-                    int(self.ids[i]), int(self.starts[i]), int(self.ends[i]), value
+                    int(self.ids[i]), int(self.starts[i]), int(self.ends[i]), value,
+                    window=bool(self.is_window[i]),
                 )
         return scores
 

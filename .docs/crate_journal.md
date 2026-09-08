@@ -796,3 +796,32 @@ The user asked what a model that takes 10 s makes of a 1-s one-shot and of a 16-
 **Next**
 
 - Phase 5, Phase 9, the rest of Phase 8; per-window search hits inside long files if wanted.
+
+## 2026-09-08 — CLAP windows as searchable hits; where the 10k samples came from
+
+**Phase:** feedback on the milestone build · WINDOWS_HASH
+
+The user first asked why the status bar counted over 10k samples when the folder just scanned holds about 1.6k, then picked up the per-window idea left open yesterday: "I like this idea, can you get back to this?"
+
+**Done**
+
+- **The count.** Not stale rows: the index holds the three roots scanned so far (iris2 4,568 · Krotos 3,956 · ___GUITAR_INSTR 1,616, all analysed and embedded). Rescan deliberately removes only under the root it walks (`scanner.py`, so a sub-folder scan can never wipe the rest), and the scope list limits *recompute*, not what the list, map and counts show. Three options put to the user, recommended first: the view follows the scope ("1,616 in scope of 10,140 indexed"); a confirmed "Remove folder from index" action; or leave it and put the root back to `D:\_soundPacks`. Their call is pending.
+- **The third kind of segment** (spec §6.4, schema v8). `segments.detection_method` accepts `'window'`: one row per 10-s CLAP window of a file embedded through more than one, with its vector in `segment_embedding`, no strength, no descriptors, no classification. `embedding.py`: `window_spans` (the layout as sample offsets — `sample_windows` slices with it), `_store_windows` (delete-then-insert whenever a parent's windows are computed, nothing for a one-window file), `needs_window_rows` and a `missing_windows` worklist condition so an index from before these rows existed is backfilled — the parent's vector is the mean of the same windows and is left alone. Kept regardless of *Embed segments*; `--export` gains a `methods` array.
+- **Searchable.** `similarity.py` loads segments with `LEFT JOIN`s, so a window is a conceptual-axis-only item; `Hit.window` says which kind won; `fold` is unchanged — a window becomes the parent's sub-hit when it beats the parent's mean. `catalog.hit_label` / `clock` name hits everywhere ("window @ 7:10.250 (10 s)", "hit @ 1.234 s (250 ms)"; positions past a minute read as m:ss). The list's *Type* cell says "window"; the transport caption, the anchor label and the vector strip follow; preview and drag render the window like any segment.
+- **Not a segment to the user.** `load_segments` excludes windows and `load_windows` returns them; the list's *Hits* count and the status bar's segment count leave them out ("… · 6,036 CLAP windows · …"); `segment_classification` skips them. The waveform draws them as a thin strip along the bottom, the selected one as a band with edge lines.
+- **Schema v8.** The allowed values are a CHECK constraint, which SQLite cannot alter, so `_migrate_v8` rebuilds `segments` (create the new shape from SCHEMA's own DDL, copy by column name, drop, rename, recreate the index) with foreign keys **off** for the duration — with them on, the DROP would cascade through every segment_analysis / segment_embedding / segment_classification / map_position row — and refuses to proceed if the pragma did not take; `foreign_key_check` must be clean before COMMIT. `segments_accept_windows` reads the constraint itself (the first version matched the word in a column comment).
+
+**Decided**
+
+- Windows are CLAP-only items. The four DSP axes were designed for one-shots and loops, not a slice of an ambience, and describing every window (pyin, MFCCs on 10 s) would cost several times the model pass; under a ranking a window scores on the conceptual axis alone and has no score when that weight is zero. Additive later if wanted.
+- The embedding stage owns them, not segmentation: it is the only stage that knows the window layout, the vectors are computed for the parent anyway, and an existing index needs one backfill pass instead of a re-segment plus re-embed.
+- The fold rule stays "beats the parent, strictly": for a two-window loop the parent's normalised mean usually wins by a hair when the halves are alike, and a window surfaces when one part is distinctly the better match — which is the behaviour wanted.
+
+**Verified**
+
+- `uv run pytest tests -q` → **175 passed, 2 skipped**; pyflakes clean. New: the v7→v8 rebuild on a hand-built old index (rows, flags, dependents, the index and the cascade survive; 'window' accepted, 'bogus' rejected; re-open a no-op); a 25-s file → three window rows (0–10, 10–20, 20–25 s) whose normalised mean is the parent's vector, a second run idle, the backfill after deleting them leaving `embedded_at` untouched, `--reembed` replacing rather than doubling, *Embed segments* off still keeping them, the export's `methods`; the feature table holding a window as a conceptual-only item, a text search landing on the last window as a `Hit(window=True)`, a ranking without conceptual weight leaving it unscored; the window's "↳ window @ 20.000 s (5 s)" row in the list, its caption, render, offset, the waveform strip and header, the segments table without it.
+- The real index: the v8 rebuild on a backup copy in 0.14 s, every dependent row intact, `foreign_key_check` empty, `integrity_check` ok; then the backfill on the index itself — 2,028 files visited, **6,036 window rows** with vectors in 549 s (0.27 s/file), 0 failed, `integrity_check` ok, 168 → 194 MB. A real search, “a phone ringing”, over 10,140 samples: 5,383 hits inside longer samples, 846 of them on windows — the top one at 2:20 of a 2:55 Venice canals ambience, another at 7:23 of a 9:36 Los Angeles street recording: the minute-seven case, literally. Checked offscreen on that index: the “↳ window @ 2:20.000 (10 s)” row with Type “window”, the waveform’s “5 segments · 18 CLAP windows”, the strip along the bottom and the selected band, the transport caption, the 512-number strip of the window itself, the status bar’s “37347 segments · 6036 CLAP windows”.
+
+**Next**
+
+- The user's choice on the scope-vs-index question above. Phase 5, Phase 9, the rest of Phase 8.

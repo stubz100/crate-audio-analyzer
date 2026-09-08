@@ -117,6 +117,7 @@ class WaveformView(QWidget):
         self._title = ""
         self._error: str | None = None
         self._segments: list[SegmentRow] = []
+        self._windows: list[SegmentRow] = []      # the CLAP windows of a long file (§6.4)
         self._selected_segment: int | None = None
         self._attack_ms: float | None = None
         self._decay_ms: float | None = None
@@ -133,9 +134,11 @@ class WaveformView(QWidget):
         segments: list[SegmentRow],
         attack_ms: float | None,
         decay_ms: float | None,
+        windows: list[SegmentRow] = (),
     ) -> None:
         self._title = title
         self._segments = list(segments)
+        self._windows = list(windows)
         self._attack_ms = attack_ms
         self._decay_ms = decay_ms
         self._selected_segment = None
@@ -201,6 +204,7 @@ class WaveformView(QWidget):
         self._title = ""
         self._error = None
         self._segments = []
+        self._windows = []
         self._selected_segment = None
         self._position_ms = None
         self.update()
@@ -270,6 +274,7 @@ class WaveformView(QWidget):
         painter.setPen(QPen(BORDER, 1))
         painter.drawLine(QPointF(rect.left(), mid), QPointF(rect.right(), mid))
 
+        self._paint_windows(painter, rect)
         self._paint_segments(painter, rect)
 
         if env.columns:
@@ -304,7 +309,34 @@ class WaveformView(QWidget):
         if self._segments:
             manual = sum(1 for s in self._segments if s.detection_method == "manual")
             parts.append(f"{len(self._segments)} segments" + (f" ({manual} manual)" if manual else ""))
+        if self._windows:
+            parts.append(f"{len(self._windows)} CLAP windows")
         return "  ·  ".join(parts)
+
+    def _paint_windows(self, painter: QPainter, rect: QRectF) -> None:
+        """The CLAP windows as a thin strip along the bottom of the plot —
+        where the model looked, not slices anyone chose — and the selected
+        one (a hit) as a band across the full height."""
+        strip = 5.0
+        for win in self._windows:
+            x0 = self._x_of(win.start_ms / 1000, rect)
+            x1 = self._x_of(win.end_ms / 1000, rect)
+            selected = win.id == self._selected_segment
+            painter.setPen(Qt.PenStyle.NoPen)
+            if selected:
+                painter.setBrush(_alpha(ACCENT, 45))
+                painter.drawRect(QRectF(x0, rect.top(), max(x1 - x0, 1.0), rect.height()))
+                painter.setPen(QPen(ACCENT, 2.0))
+                painter.drawLine(QPointF(x0, rect.top()), QPointF(x0, rect.bottom()))
+                painter.drawLine(QPointF(x1, rect.top()), QPointF(x1, rect.bottom()))
+                if x1 - x0 > 50:
+                    painter.setPen(ACCENT)
+                    painter.drawText(
+                        QRectF(x0 + 2, rect.top() + 1, x1 - x0 - 4, 14), Qt.AlignmentFlag.AlignRight, "window"
+                    )
+                painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(ACCENT if selected else _alpha(ACCENT, 70))
+            painter.drawRect(QRectF(x0 + 0.5, rect.bottom() - strip, max(x1 - x0 - 1.0, 1.0), strip))
 
     def _paint_segments(self, painter: QPainter, rect: QRectF) -> None:
         for seg in self._segments:

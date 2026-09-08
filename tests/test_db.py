@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from crate.db import SCHEMA, SCHEMA_VERSION, open_db
+from crate.db import SCHEMA, SCHEMA_VERSION, open_db, segments_accept_windows
 
 
 def test_open_db_creates_samples_table(tmp_path):
@@ -201,3 +201,69 @@ def test_old_index_gains_needs_review(tmp_path):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     finally:
         conn.close()
+
+
+# --- Migration v8 (2026-09-08): segments.detection_method accepts 'window' ---
+
+
+def test_v7_index_gains_the_window_kind_without_losing_a_row(tmp_path):
+    """The allowed values are a CHECK constraint, so v8 rebuilds `segments`;
+    every dependent row, the confirmed flags, the index and the cascade must
+    come through — with foreign keys ON, the rebuild's DROP would cascade."""
+    db_path = tmp_path / "v7.db"
+    raw = sqlite3.connect(db_path)
+    raw.executescript(
+        SCHEMA.replace("IN ('auto', 'manual', 'window')", "IN ('auto', 'manual')")
+        + "PRAGMA user_version = 7;"
+    )
+    assert not segments_accept_windows(raw)
+    raw.execute(
+        "INSERT INTO samples (id, filepath, filename, added_at, last_scanned_at, file_size, file_mtime) "
+        "VALUES (1, 'x.wav', 'x.wav', 't', 't', 1, 1.0)"
+    )
+    raw.execute(
+        "INSERT INTO segments (id, sample_id, start_ms, end_ms, detection_method, strength) "
+        "VALUES (1, 1, 0, 500, 'auto', 0.75)"
+    )
+    raw.execute(
+        "INSERT INTO segments (id, sample_id, start_ms, end_ms, detection_method, is_user_confirmed, "
+        "needs_review, cache_path) VALUES (2, 1, 100, 200, 'manual', 1, 1, 'c.wav')"
+    )
+    raw.execute("INSERT INTO segment_analysis (segment_id, rms_db) VALUES (1, -10.0)")
+    raw.execute("INSERT INTO segment_embedding (segment_id, model_name, vector) VALUES (2, 'clap', x'0000')")
+    raw.execute("INSERT INTO segment_classification (segment_id, content_class) VALUES (1, 'rhythmic')")
+    raw.execute("INSERT INTO map_layout (id, computed_at, is_current) VALUES (1, 't', 1)")
+    raw.execute("INSERT INTO map_position (layout_id, segment_id, map_x, map_y) VALUES (1, 1, 0.5, 0.5)")
+    raw.commit()
+    raw.close()
+
+    conn = open_db(db_path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
+        assert segments_accept_windows(conn)
+        rows = conn.execute(
+            "SELECT id, start_ms, end_ms, detection_method, is_user_confirmed, needs_review, strength, cache_path "
+            "FROM segments ORDER BY id"
+        ).fetchall()
+        assert [tuple(r) for r in rows] == [
+            (1, 0, 500, "auto", 0, 0, 0.75, None),
+            (2, 100, 200, "manual", 1, 1, None, "c.wav"),
+        ]
+        assert conn.execute("SELECT rms_db FROM segment_analysis WHERE segment_id = 1").fetchone()[0] == -10.0
+        assert conn.execute("SELECT COUNT(*) FROM segment_embedding WHERE segment_id = 2").fetchone()[0] == 1
+        assert conn.execute("SELECT content_class FROM segment_classification WHERE segment_id = 1").fetchone()[0] == "rhythmic"
+        assert conn.execute("SELECT segment_id FROM map_position").fetchone()[0] == 1
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'idx_segments_sample'").fetchone()
+
+        conn.execute("INSERT INTO segments (sample_id, start_ms, end_ms, detection_method) VALUES (1, 0, 10000, 'window')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO segments (sample_id, start_ms, end_ms, detection_method) VALUES (1, 0, 10000, 'bogus')")
+        conn.execute("DELETE FROM samples WHERE id = 1")                     # the cascade still works
+        assert conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM segment_analysis").fetchone()[0] == 0
+        conn.rollback()
+    finally:
+        conn.close()
+    open_db(db_path).close()                                                 # re-opening is a no-op

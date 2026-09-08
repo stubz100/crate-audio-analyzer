@@ -30,7 +30,7 @@ from PySide6.QtCore import (
     QUrl,
 )
 
-from .catalog import Criteria, SampleRow, SegmentRow
+from .catalog import Criteria, SampleRow, SegmentRow, hit_label
 from .similarity import Hit, Scores
 
 log = logging.getLogger(__name__)
@@ -186,14 +186,11 @@ class SampleTreeModel(QAbstractItemModel):
                 return None
             length_s = (hit.end_ms - hit.start_ms) / 1000
             if col == 0:
-                return (
-                    f"↳ hit @ {hit.start_ms / 1000:.3f} s ({hit.end_ms - hit.start_ms} ms)"
-                    if display else hit.start_ms
-                )
+                return "↳ " + hit_label(hit.start_ms, hit.end_ms, hit.window) if display else hit.start_ms
             if col == 2:
                 return _fmt_seconds(length_s) if display else length_s
             if col == 3:
-                return "hit"
+                return "window" if hit.window else "hit"
             if col == self.COL_SIMILARITY:
                 return _score_cell(self._similarity, "segment", hit.segment_id, display)
             if col == self.COL_MATCH:

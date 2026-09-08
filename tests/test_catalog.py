@@ -6,7 +6,7 @@ import numpy as np
 import soundfile as sf
 
 from crate.analysis import analyze_pending
-from crate.catalog import index_summary, load_samples, load_segments
+from crate.catalog import clock, hit_label, index_summary, load_samples, load_segments, load_windows
 from crate.db import open_db
 from crate.scanner import scan_library
 from crate.segmentation import create_manual_segment, segment_pending
@@ -56,4 +56,22 @@ def test_samples_carry_what_the_list_shows(tmp_path):
 
     summary = index_summary(conn)
     assert summary["samples"] == 2 and summary["analysed"] == 2 and summary["segments"] == len(segments)
+
+    # A CLAP window of a long file (§6.4) is neither listed nor counted as a segment.
+    conn.execute(
+        "INSERT INTO segments (sample_id, start_ms, end_ms, detection_method) VALUES (?, 0, 4000, 'window')",
+        (loop_id,),
+    )
+    conn.commit()
+    assert load_segments(conn, loop_id) == segments
+    assert [w.detection_method for w in load_windows(conn, loop_id)] == ["window"]
+    assert [r.segment_count for r in load_samples(conn)] == [0, len(segments)]   # the manual one counts, the window not
+    assert index_summary(conn)["segments"] == len(segments) and index_summary(conn)["windows"] == 1
     conn.close()
+
+
+def test_hit_labels_read_as_positions():
+    assert clock(1234) == "1.234 s" and clock(59_999) == "59.999 s"
+    assert clock(60_000) == "1:00.000" and clock(430_250) == "7:10.250"
+    assert hit_label(1234, 1484) == "hit @ 1.234 s (250 ms)"
+    assert hit_label(430_250, 440_250, window=True) == "window @ 7:10.250 (10 s)"

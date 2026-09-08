@@ -539,3 +539,53 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         assert window._views.currentWidget() is window._table
     finally:
         window.close()
+
+
+# --- §6.4 CLAP windows of long files (2026-09-08) ---
+
+
+def test_a_search_can_land_on_a_window_inside_a_long_file(app, tmp_path):
+    from crate.main import MainWindow
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    sf.write(lib / "ambience.wav", _clicks([1.0, 12.0, 21.0], 25.0), SR)
+    sf.write(lib / "hit.wav", _clicks([0.0], 0.4), SR)
+    labels = {10.0: "rain on a roof", 5.0: "a door slam", 0.4: "kick drum"}
+    db = tmp_path / "index.db"
+    conn = open_db(db)
+    scan_library(conn, lib)
+    analyze_pending(conn)
+    segment_pending(conn)
+    embed_pending(conn, encoder=FakeEncoder(labels))
+    conn.close()
+
+    window = MainWindow(
+        db_path=db, cache_dir=tmp_path / "cache", settings=_ini(tmp_path),
+        encoder_factory=lambda _settings=None: FakeEncoder(labels),
+    )
+    try:
+        window._autoplay.setChecked(False)
+        assert "3 CLAP windows" in window.statusBar().currentMessage()
+
+        window._attributes.search_for("a door slam")
+        _wait_until(app, lambda: window._search_thread is None and "door slam" in window.statusBar().currentMessage())
+        parent = window._proxy.index(_proxy_row_named(window, "ambience.wav"), 0)
+        assert window._proxy.rowCount(parent) == 1
+        sub_hit = window._proxy.index(0, 0, parent)
+        assert window._proxy.data(sub_hit) == "↳ window @ 20.000 s (5 s)"
+        assert window._proxy.data(window._proxy.index(0, 3, parent)) == "window"
+
+        window._table.setCurrentIndex(sub_hit)
+        assert window._now_playing.text() == "window @ 20.000 s (5 s) in ambience.wav"
+        assert window._current is not None and window._current.name.startswith("seg_") and window._current.exists()
+        assert window._current_offset_ms == 20000
+        assert window._current_item[0] == "segment"
+        assert all(r.detection_method != "window" for r in window._segments._rows)   # not in the drill-down
+        assert len(window._waveform._windows) == 3
+        assert "3 CLAP windows" in window._waveform._header_text()
+        assert window._waveform._selected_segment == window._current_item[1]
+        assert window._attributes._strip.dimensions == 32                             # the window's own vector
+        assert not window._waveform.grab().isNull()
+    finally:
+        window.close()

@@ -15,12 +15,19 @@ created in its final shape by `SCHEMA`, passes through every step as a no-op.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+
+# The third kind of segment (spec §6.4): one of the 10-s CLAP windows a file
+# longer than the model's input is embedded through, kept with its vector so a
+# search can land inside a long file. Written by the embedding stage, no
+# strength, replaced whenever the parent is embedded again.
+WINDOW_METHOD = "window"
 # v1 = Phase 1: `samples`
 # v2 = Phase 2: `analysis` + `classification`
 # v3 = Phase 2 review: staleness timestamps (`samples.content_changed_at`,
@@ -32,6 +39,8 @@ SCHEMA_VERSION = 7
 #      content changed underneath it)
 # v6 = Phase 4: `embedding` + `text_tags` (spec §8; nodes D, X, E)
 # v7 = Phase 6: `map_layout` + `map_position` (spec §8; node G)
+# v8 = CLAP windows (spec §6.4): `segments.detection_method` gains 'window' — a
+#      rebuild of `segments`, since the value lives in a CHECK constraint
 
 
 def scope_clause(
@@ -169,7 +178,9 @@ CREATE TABLE IF NOT EXISTS segments (
                       REFERENCES samples(id) ON DELETE CASCADE,
     start_ms          INTEGER NOT NULL,
     end_ms            INTEGER NOT NULL,
-    detection_method  TEXT NOT NULL DEFAULT 'auto',   -- 'auto' | 'manual' (§6.2/§6.3)
+    detection_method  TEXT NOT NULL DEFAULT 'auto',   -- 'auto' | 'manual' (§6.2/§6.3) |
+                                                      -- 'window' (§6.4: a CLAP window of a
+                                                      -- long file, from the embedding stage)
     is_user_confirmed INTEGER NOT NULL DEFAULT 0,     -- manual save; blocks auto overwrite (§6.3)
     strength          REAL,                           -- onset strength, 0..1 of the strongest in
                                                       -- the parent; the cap's tie-break (§6.2)
@@ -183,7 +194,7 @@ CREATE TABLE IF NOT EXISTS segments (
     cache_rendered_at TEXT,
     UNIQUE (sample_id, start_ms, end_ms, detection_method),
     CHECK (end_ms > start_ms),
-    CHECK (detection_method IN ('auto', 'manual'))
+    CHECK (detection_method IN ('auto', 'manual', 'window'))
 );
 CREATE INDEX IF NOT EXISTS idx_segments_sample ON segments(sample_id);
 
@@ -336,6 +347,62 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
     _add_column(conn, "segments", "needs_review", "INTEGER NOT NULL DEFAULT 0")
 
 
+def _segments_ddl(table: str) -> str:
+    """SCHEMA's `segments` definition under another table name — the one
+    source of truth for the table's shape, so a rebuild cannot drift."""
+    start = SCHEMA.index("CREATE TABLE IF NOT EXISTS segments (")
+    end = SCHEMA.index("\n);", start) + 3
+    return SCHEMA[start:end].replace(
+        "CREATE TABLE IF NOT EXISTS segments (", f"CREATE TABLE {table} (", 1
+    )
+
+
+def segments_accept_windows(conn: sqlite3.Connection) -> bool:
+    """Whether `segments`' CHECK constraint lists 'window' — read from the
+    stored DDL's constraint itself, not its comments."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'segments'"
+    ).fetchone()
+    if row is None:
+        return False
+    match = re.search(r"CHECK\s*\(\s*detection_method\s+IN\s*\(([^)]*)\)", row[0], re.IGNORECASE)
+    return match is not None and "'window'" in match.group(1)
+
+
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """`segments.detection_method` gains 'window' (spec §6.4). The allowed
+    values are a CHECK constraint, which SQLite cannot alter in place, so the
+    table is rebuilt the documented way — create the new shape, copy, drop
+    the old, rename — with foreign keys OFF for the duration: with them on,
+    DROP TABLE would cascade through every segment_analysis /
+    segment_embedding / segment_classification / map_position row."""
+    if not _columns(conn, "segments") or segments_accept_windows(conn):
+        return
+    conn.commit()                                   # a PRAGMA inside a transaction is ignored
+    conn.execute("PRAGMA foreign_keys = OFF")
+    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 0:
+        raise RuntimeError("could not switch foreign keys off for the segments rebuild")
+    try:
+        conn.execute("BEGIN")
+        conn.execute(_segments_ddl("segments_new"))
+        new_columns = [r[1] for r in conn.execute("PRAGMA table_info(segments_new)")]
+        old_columns = _columns(conn, "segments")
+        columns = ", ".join(c for c in new_columns if c in old_columns)
+        conn.execute(f"INSERT INTO segments_new ({columns}) SELECT {columns} FROM segments")
+        conn.execute("DROP TABLE segments")
+        conn.execute("ALTER TABLE segments_new RENAME TO segments")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_segments_sample ON segments(sample_id)")
+        dangling = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if dangling:
+            raise RuntimeError(f"segments rebuild left {len(dangling)} dangling foreign keys")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
 _MIGRATIONS: dict[int, list] = {
     2: [],              # v1 -> v2: new tables only; SCHEMA's CREATE IF NOT EXISTS covers it
     3: [_migrate_v3],   # v2 -> v3: staleness timestamps + spec §8 classification columns
@@ -343,6 +410,7 @@ _MIGRATIONS: dict[int, list] = {
     5: [_migrate_v5],   # v4 -> v5: segments.needs_review
     6: [],              # v5 -> v6: embedding + text_tags; CREATE IF NOT EXISTS covers it
     7: [],              # v6 -> v7: map_layout + map_position; CREATE IF NOT EXISTS covers it
+    8: [_migrate_v8],   # v7 -> v8: segments.detection_method accepts 'window' (table rebuild)
 }
 
 

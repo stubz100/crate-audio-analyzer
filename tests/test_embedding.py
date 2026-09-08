@@ -438,3 +438,83 @@ def test_long_files_are_embedded_as_the_mean_of_spread_windows(tmp_path):
     vec = blob_to_vector(conn.execute("SELECT vector FROM embedding").fetchone()[0])
     assert vec.size == DIM and abs(float(np.linalg.norm(vec)) - 1.0) < 1e-5
     conn.close()
+
+
+def test_long_files_keep_their_windows_as_searchable_segments(tmp_path):
+    """§6.4's third kind of segment (2026-09-08): a file embedded through
+    more than one 10-s window keeps one `window` row per window with its
+    vector, so a search can land inside it; the parent's vector is the
+    normalised mean of exactly those; derived rows are replaced, never
+    duplicated, and an index from before they existed is backfilled without
+    touching the parent."""
+    from crate.embedding import export_vectors, needs_window_rows, window_spans
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _write(lib / "ambience.wav", _clicks([1.0, 12.0, 21.0], 25.0))
+    _write(lib / "hit.wav", _clicks([0.0], 0.4))
+    conn = open_db(tmp_path / "index.db")
+    scan_library(conn, lib)
+    analyze_pending(conn)
+    segment_pending(conn)
+    labels = {10.0: "rain on a roof", 5.0: "a door slam", 0.4: "a drum hit"}
+    enc = FakeEncoder(labels)
+
+    summary = embed_pending(conn, encoder=enc)
+
+    amb = conn.execute("SELECT id FROM samples WHERE filename = 'ambience.wav'").fetchone()[0]
+    hit = conn.execute("SELECT id FROM samples WHERE filename = 'hit.wav'").fetchone()[0]
+
+    def windows_of(sample_id):
+        return conn.execute(
+            "SELECT id, start_ms, end_ms FROM segments WHERE sample_id = ? AND detection_method = 'window' "
+            "ORDER BY start_ms", (sample_id,),
+        ).fetchall()
+
+    windows = windows_of(amb)
+    assert [(s, e) for _, s, e in windows] == [(0, 10000), (10000, 20000), (20000, 25000)]
+    assert summary.windows_stored == 3 and windows_of(hit) == []
+    assert "3 windows of long files" in summary.format()
+    vectors = [
+        blob_to_vector(conn.execute("SELECT vector FROM segment_embedding WHERE segment_id = ?", (w[0],)).fetchone()[0])
+        for w in windows
+    ]
+    parent = blob_to_vector(conn.execute("SELECT vector FROM embedding WHERE sample_id = ?", (amb,)).fetchone()[0])
+    mean = np.mean(vectors, axis=0)
+    assert np.allclose(parent, mean / np.linalg.norm(mean), atol=1e-5)
+    assert float(vectors[2] @ enc.embed_text(["a door slam"])[0]) == pytest.approx(1.0)   # the last 5 s
+    assert conn.execute(                                                                    # not a one-shot
+        "SELECT COUNT(*) FROM segment_classification c JOIN segments g ON g.id = c.segment_id "
+        "WHERE g.detection_method = 'window'"
+    ).fetchone()[0] == 0
+
+    again = embed_pending(conn, encoder=FakeEncoder(labels))
+    assert again.windows_stored == 0 and again.samples_embedded == 0 and again.segments_embedded == 0
+
+    # An index embedded before window rows existed: backfilled, parent untouched.
+    stamp = conn.execute("SELECT embedded_at FROM embedding WHERE sample_id = ?", (amb,)).fetchone()[0]
+    conn.execute("DELETE FROM segments WHERE detection_method = 'window'")
+    conn.commit()
+    back = embed_pending(conn, encoder=FakeEncoder(labels))
+    assert back.windows_stored == 3 and back.samples_embedded == 0
+    assert conn.execute("SELECT embedded_at FROM embedding WHERE sample_id = ?", (amb,)).fetchone()[0] == stamp
+    assert len(windows_of(amb)) == 3
+
+    full = embed_pending(conn, encoder=FakeEncoder(labels), reembed=True)
+    assert full.windows_stored == 3 and len(windows_of(amb)) == 3                          # replaced, not doubled
+
+    conn.execute("DELETE FROM segments WHERE detection_method = 'window'")
+    conn.commit()
+    off = embed_pending(conn, encoder=FakeEncoder(labels), settings=EmbedSettings(embed_segments=False))
+    assert off.windows_stored == 3                                     # free with the parent: kept regardless
+
+    exported = export_vectors(conn, tmp_path / "vectors.npz")
+    data = np.load(tmp_path / "vectors.npz")
+    assert exported.windows == 3 and list(data["methods"]).count("window") == 3
+    assert list(data["methods"][: exported.samples]) == [""] * exported.samples
+    assert "3 of them windows" in exported.format()
+
+    assert needs_window_rows(25.0) and needs_window_rows(11.0)
+    assert not needs_window_rows(10.5) and not needs_window_rows(None) and not needs_window_rows(0.0)
+    assert window_spans(48_000 * 4, 48_000) == [(0, 48_000 * 4)]
+    conn.close()

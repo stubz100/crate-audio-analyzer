@@ -75,9 +75,14 @@ def test_view_maps_clicks_to_segments_and_times(app, tmp_path):
         SegmentRow(1, 1, 500, 900, 1.0, "auto", 0, None),
         SegmentRow(2, 1, 600, 700, 0.5, "manual", 0, None),
     ]
-    view.load(_click_file(tmp_path / "c.wav"), "c.wav", segments, attack_ms=10.0, decay_ms=100.0)
+    windows = [
+        SegmentRow(3, 1, 0, 1000, None, "window", 0, None),
+        SegmentRow(4, 1, 1000, 2000, None, "window", 0, None),
+    ]
+    view.load(_click_file(tmp_path / "c.wav"), "c.wav", segments, attack_ms=10.0, decay_ms=100.0, windows=windows)
 
     assert view.loaded and view.duration_s == pytest.approx(2.0)
+    assert view.segment_at(1.5) is None                                    # windows are not clickable
     assert view.segment_at(0.65).id == 2                                   # the nested, shorter one wins
     assert view.segment_at(0.55).id == 1 and view.segment_at(1.5) is None
     rect = view._plot_rect()
@@ -85,6 +90,7 @@ def test_view_maps_clicks_to_segments_and_times(app, tmp_path):
     assert view.time_at_x(rect.right()) == pytest.approx(2.0)
     header = view._header_text()
     assert "attack 10 ms" in header and "decay 100 ms" in header and "2 segments (1 manual)" in header
+    assert "2 CLAP windows" in header
 
     clicked: list[int] = []
     seeks: list[int] = []
@@ -98,6 +104,8 @@ def test_view_maps_clicks_to_segments_and_times(app, tmp_path):
     view.set_selected_segment(1)
     view.set_position_ms(700)
     assert not view.grab().isNull()                                        # paints with everything on
+    view.set_selected_segment(4)                                           # a window as the hit
+    assert not view.grab().isNull()
 
     view.load(tmp_path / "missing.wav", "missing", [], None, None)
     assert not view.loaded and view._error

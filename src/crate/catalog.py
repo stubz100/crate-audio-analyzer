@@ -15,6 +15,8 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from .db import WINDOW_METHOD
+
 
 @dataclass(frozen=True)
 class SampleRow:
@@ -98,7 +100,9 @@ class Criteria:
         return True
 
 
-_SAMPLES_SQL = """
+# The list's segment count leaves the CLAP windows of long files out (§6.4):
+# they are not slices anyone chose, only where the model looked.
+_SAMPLES_SQL = f"""
 SELECT s.id, s.filepath, s.filename, s.folder, s.duration_s,
        k.structural_type, k.content_class, k.confidence,
        a.tempo_bpm, a.key,
@@ -106,7 +110,8 @@ SELECT s.id, s.filepath, s.filename, s.folder, s.duration_s,
                     SELECT tag_or_caption FROM text_tags t
                     WHERE t.sample_id = s.id AND t.source_model = 'clap-zeroshot'
                     ORDER BY t.score DESC LIMIT ?)), '') AS tags,
-       (SELECT COUNT(*) FROM segments g WHERE g.sample_id = s.id) AS segment_count,
+       (SELECT COUNT(*) FROM segments g WHERE g.sample_id = s.id
+        AND g.detection_method != '{WINDOW_METHOD}') AS segment_count,
        (SELECT COUNT(*) FROM segments g WHERE g.sample_id = s.id AND g.needs_review = 1) AS flagged,
        COALESCE((SELECT group_concat(tag_or_caption || '=' || score, ';') FROM text_tags t
                  WHERE t.sample_id = s.id AND t.source_model = 'clap-class'), '') AS clap
@@ -137,16 +142,47 @@ def load_samples(conn: sqlite3.Connection, top_tags: int = 3) -> list[SampleRow]
     return rows
 
 
+_SEGMENT_COLUMNS = (
+    "SELECT id, sample_id, start_ms, end_ms, strength, detection_method, needs_review, cache_path "
+    "FROM segments WHERE sample_id = ? AND detection_method "
+)
+
+
 def load_segments(conn: sqlite3.Connection, sample_id: int) -> list[SegmentRow]:
-    """One sample's segments in time order — the §6.4 drill-down."""
+    """One sample's detected and manual segments in time order — the §6.4
+    drill-down. The CLAP windows of a long file are `load_windows`."""
     return [
         SegmentRow(*row)
-        for row in conn.execute(
-            "SELECT id, sample_id, start_ms, end_ms, strength, detection_method, "
-            "needs_review, cache_path FROM segments WHERE sample_id = ? ORDER BY start_ms",
-            (sample_id,),
-        )
+        for row in conn.execute(_SEGMENT_COLUMNS + "!= ? ORDER BY start_ms", (sample_id, WINDOW_METHOD))
     ]
+
+
+def load_windows(conn: sqlite3.Connection, sample_id: int) -> list[SegmentRow]:
+    """The 10-s CLAP windows a long file was embedded through (§6.4), in
+    time order — drawn on the waveform, never listed as segments."""
+    return [
+        SegmentRow(*row)
+        for row in conn.execute(_SEGMENT_COLUMNS + "= ? ORDER BY start_ms", (sample_id, WINDOW_METHOD))
+    ]
+
+
+def clock(ms: int) -> str:
+    """A position in a file: seconds to three places under a minute, m:ss
+    beyond it — a hit at minute seven of an ambience reads as 7:10.250."""
+    seconds = ms / 1000
+    if seconds < 60:
+        return f"{seconds:.3f} s"
+    minutes, rest = divmod(seconds, 60)
+    return f"{int(minutes)}:{rest:06.3f}"
+
+
+def hit_label(start_ms: int, end_ms: int, window: bool = False) -> str:
+    """How a hit inside a longer sample is named everywhere (§9.4): the
+    sub-hit row, the transport caption, the anchor's label."""
+    length_ms = end_ms - start_ms
+    if window:
+        return f"window @ {clock(start_ms)} ({length_ms / 1000:.0f} s)"
+    return f"hit @ {clock(start_ms)} ({length_ms} ms)"
 
 
 def load_tags(conn: sqlite3.Connection, sample_id: int) -> list[tuple[str, float]]:
@@ -187,13 +223,13 @@ def describe_item(conn: sqlite3.Connection, kind: str, item_id: int) -> str | No
         row = conn.execute("SELECT filename FROM samples WHERE id = ?", (item_id,)).fetchone()
         return None if row is None else str(row[0])
     row = conn.execute(
-        "SELECT s.filename, g.start_ms, g.end_ms FROM segments g "
+        "SELECT s.filename, g.start_ms, g.end_ms, g.detection_method FROM segments g "
         "JOIN samples s ON s.id = g.sample_id WHERE g.id = ?",
         (item_id,),
     ).fetchone()
     if row is None:
         return None
-    return f"hit @ {row[1] / 1000:.3f} s ({row[2] - row[1]} ms) in {row[0]}"
+    return f"{hit_label(row[1], row[2], row[3] == WINDOW_METHOD)} in {row[0]}"
 
 
 def index_summary(conn: sqlite3.Connection) -> dict[str, int]:
@@ -202,6 +238,7 @@ def index_summary(conn: sqlite3.Connection) -> dict[str, int]:
     return {
         "samples": q("SELECT COUNT(*) FROM samples"),
         "analysed": q("SELECT COUNT(*) FROM analysis"),
-        "segments": q("SELECT COUNT(*) FROM segments"),
+        "segments": q(f"SELECT COUNT(*) FROM segments WHERE detection_method != '{WINDOW_METHOD}'"),
+        "windows": q(f"SELECT COUNT(*) FROM segments WHERE detection_method = '{WINDOW_METHOD}'"),
         "embedded": q("SELECT COUNT(*) FROM embedding"),
     }

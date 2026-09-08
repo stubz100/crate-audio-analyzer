@@ -44,7 +44,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .db import now_iso, scope_clause
+from .db import WINDOW_METHOD, now_iso, scope_clause
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +138,7 @@ class EmbedSettings:
 class EmbedSummary:
     samples_embedded: int = 0
     segments_embedded: int = 0
+    windows_stored: int = 0        # §6.4 CLAP windows of long files, kept as searchable hits
     segments_skipped_short: int = 0
     classified: int = 0            # Facet A assigned
     flagged: int = 0               # Facet A below threshold: flagged, not assigned
@@ -150,7 +151,7 @@ class EmbedSummary:
     def format(self) -> str:
         lines = [
             f"embedded {self.samples_embedded} samples + {self.segments_embedded} segments "
-            f"(skipped {self.segments_skipped_short} short) | "
+            f"(skipped {self.segments_skipped_short} short) + {self.windows_stored} windows of long files | "
             f"Facet A assigned {self.classified}, flagged {self.flagged}, "
             f"protected {self.protected} | failed {self.failed}"
         ]
@@ -264,25 +265,40 @@ def projected_features(output) -> np.ndarray:
 CLAP_MAX_WINDOWS = 24   # windows per file: a 16-minute ambience is sampled across, not just its start
 
 
-def sample_windows(y: np.ndarray, sr: int) -> list[np.ndarray]:
-    """The 10-s windows that stand for a whole file (2026-09-07, the user's
-    steer — the first 10 s alone misrepresented anything longer). One window
-    for a clip up to 10 s; contiguous windows up to CLAP_MAX_WINDOWS; beyond
-    that, that many spread evenly over the file. A short tail (< 1 s) is
-    dropped when there are other windows. Their vectors are averaged and
-    re-normalised — the usual whole-clip embedding for a fixed-window model.
-    Clips shorter than 10 s are repeat-padded by the feature extractor, as
-    CLAP was trained."""
+def window_spans(n_samples: int, sr: int) -> list[tuple[int, int]]:
+    """The 10-s windows that stand for a whole file, as [start, end) sample
+    offsets (2026-09-07, the user's steer — the first 10 s alone
+    misrepresented anything longer). One window for a clip up to 10 s;
+    contiguous windows up to CLAP_MAX_WINDOWS; beyond that, that many spread
+    evenly over the file. A short tail (< 1 s) is dropped when there are
+    other windows. A function of the length alone, so the rows the embedding
+    stage keeps for them (§6.4 `window` segments) are reproducible."""
     limit = int(CLAP_MAX_SECONDS * sr)
-    if y.size <= limit:
-        return [y]
-    count = int(np.ceil(y.size / limit))
+    if n_samples <= limit:
+        return [(0, n_samples)]
+    count = int(np.ceil(n_samples / limit))
     if count <= CLAP_MAX_WINDOWS:
         starts = [i * limit for i in range(count)]
     else:
-        starts = np.linspace(0, y.size - limit, CLAP_MAX_WINDOWS).astype(int).tolist()
-    windows = [y[s : s + limit] for s in starts]
-    return [w for w in windows if w.size >= sr] or windows[:1]
+        starts = np.linspace(0, n_samples - limit, CLAP_MAX_WINDOWS).astype(int).tolist()
+    spans = [(s, min(n_samples, s + limit)) for s in starts]
+    return [(s, e) for s, e in spans if e - s >= sr] or spans[:1]
+
+
+def sample_windows(y: np.ndarray, sr: int) -> list[np.ndarray]:
+    """`window_spans` applied to a buffer. Their vectors are averaged and
+    re-normalised — the usual whole-clip embedding for a fixed-window model.
+    Clips shorter than 10 s are repeat-padded by the feature extractor, as
+    CLAP was trained."""
+    return [y[s:e] for s, e in window_spans(y.size, sr)]
+
+
+def needs_window_rows(duration_s: float | None) -> bool:
+    """Whether a file of this length is embedded through more than one
+    window — the same rule as `window_spans`, at CLAP's rate."""
+    if duration_s is None or duration_s <= 0:
+        return False
+    return len(window_spans(int(round(duration_s * CLAP_SAMPLE_RATE)), CLAP_SAMPLE_RATE)) > 1
 
 
 def crop_for_clap(clip: np.ndarray, sr: int) -> np.ndarray:
@@ -445,11 +461,45 @@ def _write_segment_classification(conn: sqlite3.Connection, sample_id: int) -> N
         return
     conn.execute(
         "INSERT INTO segment_classification (segment_id, content_class, structural_type, confidence) "
-        "SELECT id, ?, 'one-shot', ? FROM segments WHERE sample_id = ? "
+        "SELECT id, ?, 'one-shot', ? FROM segments WHERE sample_id = ? AND detection_method != ? "
         "ON CONFLICT(segment_id) DO UPDATE SET content_class = excluded.content_class, "
         "confidence = excluded.confidence WHERE segment_classification.is_user_confirmed = 0",
-        (parent[0], parent[1], sample_id),
+        (parent[0], parent[1], sample_id, WINDOW_METHOD),
     )
+
+
+def _store_windows(
+    conn: sqlite3.Connection,
+    sample_id: int,
+    spans: list[tuple[int, int]],
+    sr: int,
+    vectors: np.ndarray,
+    now: str,
+) -> int:
+    """§6.4's third kind of segment: one `window` row per 10-s CLAP window of
+    a file that needed more than one, each with its vector, so a text search
+    or a ranking can land at minute seven of an ambience the way it lands on
+    a detected segment. Derived rows — replaced whenever the parent's windows
+    are computed again; a file that now fits one window keeps none."""
+    conn.execute(
+        "DELETE FROM segments WHERE sample_id = ? AND detection_method = ?",
+        (sample_id, WINDOW_METHOD),
+    )
+    if len(spans) < 2:
+        return 0
+    stored = 0
+    for (start, end), vec in zip(spans, vectors):
+        cursor = conn.execute(
+            "INSERT INTO segments (sample_id, start_ms, end_ms, detection_method, "
+            "is_user_confirmed, detected_at) VALUES (?, ?, ?, ?, 0, ?)",
+            (sample_id, round(start * 1000 / sr), round(end * 1000 / sr), WINDOW_METHOD, now),
+        )
+        conn.execute(
+            "INSERT INTO segment_embedding (segment_id, model_name, vector) VALUES (?, ?, ?)",
+            (cursor.lastrowid, MODEL_NAME, vector_to_blob(vec)),
+        )
+        stored += 1
+    return stored
 
 
 def _embed_one_sample(
@@ -463,12 +513,17 @@ def _embed_one_sample(
     summary: EmbedSummary,
     reembed_segments: bool,
     embed_parent: bool = True,
+    embed_windows: bool = False,
 ) -> bool:
     """Nodes D + C2 (embedding) + X + E for one sample. False if it cannot decode.
 
     `embed_parent=False` is the "only its segments need vectors" case (they
     were detected after the parent was embedded): the parent's vector, tags
     and Facet A are left alone and only the segment windows go to the model.
+    `embed_windows` (with `embed_parent=False`) computes the parent's 10-s
+    windows only to keep them as `window` segments (§6.4) — the backfill for
+    an index embedded before those rows existed; the parent's own vector is
+    the mean of the same windows and is left as it is.
     """
     loaded = load_audio_for_clap(filepath)
     if loaded is None:
@@ -481,16 +536,16 @@ def _embed_one_sample(
     if settings.embed_segments:
         sql = (
             "SELECT g.id, g.start_ms, g.end_ms FROM segments g "
-            "WHERE g.sample_id = ?"
+            "WHERE g.sample_id = ? AND g.detection_method != ?"
         )
         if not reembed_segments:
             sql += (
                 " AND NOT EXISTS (SELECT 1 FROM segment_embedding e "
                 "                 WHERE e.segment_id = g.id AND e.model_name = ?)"
             )
-            params: tuple = (sample_id, MODEL_NAME)
+            params: tuple = (sample_id, WINDOW_METHOD, MODEL_NAME)
         else:
-            params = (sample_id,)
+            params = (sample_id, WINDOW_METHOD)
         min_samples = int(settings.min_segment_length_ms * sr / 1000)
         for seg_id, start_ms, end_ms in conn.execute(sql + " ORDER BY g.start_ms", params):
             # Judge the window that actually exists in the file: a manual
@@ -504,7 +559,8 @@ def _embed_one_sample(
             segment_rows.append((seg_id, start_ms, end_ms))
             windows.append(y[start:end])
 
-    parent_windows = sample_windows(y, sr) if embed_parent else []
+    parent_spans = window_spans(y.size, sr) if (embed_parent or embed_windows) else []
+    parent_windows = [y[start:end] for start, end in parent_spans]
     clips = parent_windows + windows
     if not clips:
         return True
@@ -520,6 +576,10 @@ def _embed_one_sample(
             "ON CONFLICT(sample_id, model_name) DO UPDATE "
             "SET vector = excluded.vector, embedded_at = excluded.embedded_at",
             (sample_id, MODEL_NAME, vector_to_blob(parent_vec), now),
+        )
+    if parent_spans:
+        summary.windows_stored += _store_windows(
+            conn, sample_id, parent_spans, sr, vectors[: len(parent_spans)], now
         )
     segment_vectors = vectors[len(parent_windows):]
     for (seg_id, _s, _e), vec in zip(segment_rows, segment_vectors):
@@ -558,9 +618,12 @@ def embed_pending(
     A sample needs a visit when it has been analysed (Phase 2 — node E's
     tie-break reads `harmonic_ratio`) and either its own vector is missing or
     stale (the scanner's content flag), or — with segment embedding on — it
-    has a long-enough segment without a vector. The second case is what a
-    later `crate-segment` run (or `--resegment`, which makes new rows) leaves
-    behind; it embeds only the segments and leaves the parent alone.
+    has a long-enough segment without a vector, or it is long enough for
+    more than one CLAP window and has no `window` rows yet (§6.4; an index
+    embedded before those rows existed). The second case is what a later
+    `crate-segment` run (or `--resegment`, which makes new rows) leaves
+    behind; it embeds only the segments and leaves the parent alone, as the
+    third does after computing the windows.
 
     `scope` (folders, §9.6) limits the visit to files under them; None is
     everything. `should_stop` is polled before each sample.
@@ -573,23 +636,31 @@ def embed_pending(
     stale_parent = "(e.sample_id IS NULL OR s.content_changed_at > e.embedded_at)"
     orphan_segments = (
         "EXISTS (SELECT 1 FROM segments g WHERE g.sample_id = s.id "
-        "        AND g.end_ms - g.start_ms >= ? "
+        "        AND g.detection_method != ? AND g.end_ms - g.start_ms >= ? "
         "        AND NOT EXISTS (SELECT 1 FROM segment_embedding se "
         "                        WHERE se.segment_id = g.id AND se.model_name = ?))"
     )
+    # A coarse SQL gate (more than a window plus the 1-s tail rule needs);
+    # `needs_window_rows` applies the exact rule per file below.
+    missing_windows = (
+        "(s.duration_s >= ? AND NOT EXISTS (SELECT 1 FROM segments w "
+        "                                   WHERE w.sample_id = s.id AND w.detection_method = ?))"
+    )
     sql = (
-        f"SELECT s.id, s.filepath, a.harmonic_ratio, {stale_parent} AS needs_parent "
+        f"SELECT s.id, s.filepath, a.harmonic_ratio, s.duration_s, "
+        f"{stale_parent} AS needs_parent, {missing_windows} AS missing_windows "
         "FROM samples s JOIN analysis a ON a.sample_id = s.id "
         "LEFT JOIN embedding e ON e.sample_id = s.id AND e.model_name = ? "
         "WHERE s.duration_s IS NOT NULL"
     )
-    params: list = [MODEL_NAME]
+    params: list = [CLAP_MAX_SECONDS + 1.0, WINDOW_METHOD, MODEL_NAME]
     if not reembed:
+        conditions = [stale_parent, missing_windows]
+        params += [CLAP_MAX_SECONDS + 1.0, WINDOW_METHOD]
         if settings.embed_segments:
-            sql += f" AND ({stale_parent} OR {orphan_segments})"
-            params += [settings.min_segment_length_ms, MODEL_NAME]
-        else:
-            sql += f" AND {stale_parent}"
+            conditions.append(orphan_segments)
+            params += [WINDOW_METHOD, settings.min_segment_length_ms, MODEL_NAME]
+        sql += " AND (" + " OR ".join(conditions) + ")"
     scope_sql, scope_params = scope_clause(scope)
     sql += scope_sql + " ORDER BY s.id"
     params += scope_params
@@ -604,16 +675,20 @@ def embed_pending(
 
     prompts = Prompts.build(encoder)
     visited = 0
-    for sample_id, filepath, harmonic_ratio, needs_parent in worklist:
+    for sample_id, filepath, harmonic_ratio, duration_s, needs_parent, missing_windows in worklist:
         if should_stop is not None and should_stop():
             summary.stopped = True
             log.info("embedding stopped by request after %d of %d", visited, total)
             break
+        embed_parent = bool(needs_parent) or reembed
         try:
             ok = _embed_one_sample(
                 conn, sample_id, filepath, harmonic_ratio, encoder, prompts,
                 settings, summary, reembed_segments=reembed,
-                embed_parent=bool(needs_parent) or reembed,
+                embed_parent=embed_parent,
+                embed_windows=(
+                    not embed_parent and bool(missing_windows) and needs_window_rows(duration_s)
+                ),
             )
             if not ok:
                 conn.rollback()
@@ -630,14 +705,15 @@ def embed_pending(
                 summary.error_samples.append(f"{type(exc).__name__}: {filepath}")
             continue
         visited += 1
-        if needs_parent or reembed:
+        if embed_parent:
             summary.samples_embedded += 1
         if progress_every and visited % progress_every == 0:
             elapsed = time.perf_counter() - started
             log.info(
-                "visited %d/%d (%.2f s/sample, %d samples + %d segments embedded, %d failed)",
+                "visited %d/%d (%.2f s/sample, %d samples + %d segments embedded, "
+                "%d windows kept, %d failed)",
                 visited, total, elapsed / visited, summary.samples_embedded,
-                summary.segments_embedded, summary.failed,
+                summary.segments_embedded, summary.windows_stored, summary.failed,
             )
     summary.elapsed_s = time.perf_counter() - started
     return summary
@@ -680,22 +756,25 @@ class ExportSummary:
     path: str = ""
     samples: int = 0
     segments: int = 0
+    windows: int = 0       # of the segments, how many are §6.4 CLAP windows of long files
     dimensions: int = 0
 
     def format(self) -> str:
         return (
             f"exported {self.samples} sample + {self.segments} segment vectors "
-            f"({self.dimensions} dims) to {self.path}"
+            f"({self.windows} of them windows of long files, {self.dimensions} dims) to {self.path}"
         )
 
 
 def export_vectors(conn: sqlite3.Connection, path, model_name: str = MODEL_NAME) -> ExportSummary:
     """Every stored CLAP vector as one `.npz` for use outside Crate (a
     notebook, a classifier of your own): arrays `ids`, `kinds` ('sample' |
-    'segment'), `filepaths`, `start_ms`, `end_ms`, `vectors` (n × dim,
+    'segment'), `methods` ('' for a sample; 'auto' | 'manual' | 'window' for
+    a segment), `filepaths`, `start_ms`, `end_ms`, `vectors` (n × dim,
     float32, unit length), row-aligned."""
     ids: list[int] = []
     kinds: list[str] = []
+    methods: list[str] = []
     paths: list[str] = []
     starts: list[int] = []
     ends: list[int] = []
@@ -705,21 +784,25 @@ def export_vectors(conn: sqlite3.Connection, path, model_name: str = MODEL_NAME)
         "JOIN samples s ON s.id = e.sample_id WHERE e.model_name = ? ORDER BY e.sample_id",
         (model_name,),
     ):
-        ids.append(int(sid)); kinds.append("sample"); paths.append(str(filepath))
+        ids.append(int(sid)); kinds.append("sample"); methods.append(""); paths.append(str(filepath))
         starts.append(0); ends.append(0); vectors.append(blob_to_vector(blob))
     n_samples = len(ids)
-    for gid, filepath, start, end, blob in conn.execute(
-        "SELECT g.id, s.filepath, g.start_ms, g.end_ms, se.vector FROM segment_embedding se "
+    for gid, filepath, start, end, method, blob in conn.execute(
+        "SELECT g.id, s.filepath, g.start_ms, g.end_ms, g.detection_method, se.vector "
+        "FROM segment_embedding se "
         "JOIN segments g ON g.id = se.segment_id JOIN samples s ON s.id = g.sample_id "
         "WHERE se.model_name = ? ORDER BY g.id",
         (model_name,),
     ):
-        ids.append(int(gid)); kinds.append("segment"); paths.append(str(filepath))
+        ids.append(int(gid)); kinds.append("segment"); methods.append(str(method)); paths.append(str(filepath))
         starts.append(int(start)); ends.append(int(end)); vectors.append(blob_to_vector(blob))
     matrix = np.stack(vectors).astype(np.float32) if vectors else np.zeros((0, EMBED_DIM), np.float32)
     np.savez_compressed(
         str(path), ids=np.asarray(ids, dtype=np.int64), kinds=np.asarray(kinds),
-        filepaths=np.asarray(paths), start_ms=np.asarray(starts, dtype=np.int64),
+        methods=np.asarray(methods), filepaths=np.asarray(paths),
+        start_ms=np.asarray(starts, dtype=np.int64),
         end_ms=np.asarray(ends, dtype=np.int64), vectors=matrix,
     )
-    return ExportSummary(str(path), n_samples, len(ids) - n_samples, int(matrix.shape[1]))
+    return ExportSummary(
+        str(path), n_samples, len(ids) - n_samples, methods.count(WINDOW_METHOD), int(matrix.shape[1])
+    )

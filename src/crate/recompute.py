@@ -265,6 +265,11 @@ class RecomputePanel(QWidget):
 
         self._embed_segments = QCheckBox()
         self._embed_segments.setChecked(v(_KEY + "embed_segments", True, type=bool))
+        self._embed_segments.setToolTip(
+            "The per-segment CLAP pass (§9.6), the library's real cost multiplier. The 10-s "
+            "windows a long file is embedded through are kept as searchable hits regardless: "
+            "their vectors come free with the whole-file one (§6.4)."
+        )
         self._min_embed_ms = QSpinBox()
         self._min_embed_ms.setRange(0, 10_000)
         self._min_embed_ms.setSuffix(" ms")

@@ -41,11 +41,13 @@ from PySide6.QtWidgets import (
 from .attributes import AttributesPanel
 from .catalog import (
     describe_item,
+    hit_label,
     index_summary,
     load_samples,
     load_segments,
     load_tags,
     load_vector,
+    load_windows,
 )
 from .db import default_db_path, open_db
 from .embedding import ClapEncoder, EmbedSettings
@@ -348,7 +350,8 @@ class MainWindow(QMainWindow):
         counts = index_summary(self._conn)
         self.statusBar().showMessage(
             f"{counts['samples']} samples · {counts['analysed']} analysed · "
-            f"{counts['segments']} segments · {counts['embedded']} embedded · index: {self._db_path}"
+            f"{counts['segments']} segments · {counts['windows']} CLAP windows · "
+            f"{counts['embedded']} embedded · index: {self._db_path}"
         )
         if self._anchor is not None and not self._apply_anchor(*self._anchor, announce=False):
             self._clear_anchor()
@@ -397,7 +400,12 @@ class MainWindow(QMainWindow):
         self._attributes.show_tags(load_tags(self._conn, row.id))
         self._attributes.show_clap(row.clap_scores)
         attack_ms, decay_ms = self._envelope_marks(row.id)
-        self._waveform.load(Path(row.filepath), row.filename, segments, attack_ms, decay_ms)
+        # The CLAP windows of a long file (§6.4) are drawn on the waveform as a
+        # strip, not listed with the segments: a hit can land on one.
+        self._waveform.load(
+            Path(row.filepath), row.filename, segments, attack_ms, decay_ms,
+            windows=load_windows(self._conn, row.id),
+        )
         self._waveform.set_selected_segment(hit.segment_id if hit is not None else None)
         self._current_offset_ms = hit.start_ms if hit is not None else 0
         if hit is not None:
@@ -408,7 +416,7 @@ class MainWindow(QMainWindow):
                 return
             self._current_item = (KIND_SEGMENT, hit.segment_id)
             self._now_playing.setText(
-                f"hit @ {hit.start_ms / 1000:.3f} s ({hit.end_ms - hit.start_ms} ms) in {row.filename}"
+                f"{hit_label(hit.start_ms, hit.end_ms, hit.window)} in {row.filename}"
             )
         else:
             self._current = Path(row.filepath)
@@ -430,7 +438,7 @@ class MainWindow(QMainWindow):
             return
         self._current_item = (KIND_SEGMENT, seg.id)
         self._current_offset_ms = seg.start_ms
-        self._now_playing.setText(f"hit @ {seg.start_ms / 1000:.3f} s ({seg.length_ms} ms)")
+        self._now_playing.setText(hit_label(seg.start_ms, seg.end_ms))
         self._waveform.set_selected_segment(seg.id)
         self._update_difference()
         self._show_vector()
