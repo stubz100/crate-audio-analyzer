@@ -1167,7 +1167,7 @@ The user: the list/map where the tabs are, the waveform where the list/map is, t
 
 ## 2026-09-08 — Attributes down to the difference bars; the anchor a circle; the transport row gone
 
-**Phase:** 7 polish (the window) · `TRIM_HASH`
+**Phase:** 7 polish (the window) · `a0be76c`
 
 The user: the tags, CLAP scores and CLAP embedding groups leave the Attributes tab (they are in the header); the anchor icon looks awful — a radio-button-like circle instead; play and stop as plain icons in front of *Save segment*; *Auto-play on select* in place of the hint; everything else in the row below (the anchor label, *Drag into Bitwig*) out.
 
