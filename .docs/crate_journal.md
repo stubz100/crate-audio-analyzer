@@ -1052,3 +1052,30 @@ The user: complete Phase 9.
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export — native drag-out is done); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-08 — Waveform: zoom, a finer raster, reads off the GUI thread, the caption on top
+
+**Phase:** 9 polish (the waveform panel) · `ZOOM_HASH`
+
+The user: the waveform needs a zoom for precision; some GPU support for a less crude look; separate the playback from the graphics with parallel rendering; the Qwen2-Audio caption and its Recaption button at the top of the waveform, "—" when missing.
+
+**Done**
+
+- **Zoom and pan** (`waveform.py`): `set_view` / `zoom` / `pan` / `fit` over a (start, end) window — the wheel zooms about the cursor (×1.25 a notch, never narrower than 2 ms), Shift+wheel or a horizontal wheel pans a tenth of the view, right-click or Home fits; the panel has a scrollbar under the plot, synced both ways. The header names the zoom and the seconds shown; the axis picks its step from the view (down to 1 ms); markers, segments, windows, the envelope and the playhead all draw through the view.
+- **The read on a thread for every file** (`load` → `_EnvelopeThread`, a newer load wins): the GUI thread only opens the header for the duration. `Envelope` keeps the mono samples for files up to 3 minutes (`KEEP_SAMPLES_SECONDS`) and 32k min/max/RMS columns for every file (`OVERVIEW_COLUMNS`); `peaks_for_view` reduces either to one column per device pixel (`np.*.reduceat`).
+- **A cached raster**: the body — peaks as a light fill, RMS as a brighter core — is drawn into a `QPixmap` at the device pixel ratio once per (file, view, size) and blitted after; the overlays stay vector. `wait_for_load(deliver)` for the tests and the close.
+- **The caption line** at the top of `WaveformPanel`: the sentence (elided, "—" without one) and a *Caption* / *Recaption* button (`caption_requested`); `set_caption`. The Attributes tab's group is *Tags of the selected sample* now and no longer shows the caption.
+
+**Decided**
+
+- **No GPU.** The crude look came from 1,200 min/max columns stretched over 1,600 px and one flat polygon, not from the paint engine: per-device-pixel columns, an RMS core and an antialiased raster fix it, and Qt's raster engine paints a strip in a few ms. A `QOpenGLWidget` would add a driver dependency (CLAUDE.md: CPU only) for no visible gain.
+- **What "parallel" buys.** The audio read is the only heavy part and it now never runs on the GUI thread; rasterising is 16–40 ms once per view change and stays on the GUI thread (a thread would add latency to every wheel notch for nothing). Playback runs in Qt Multimedia's own thread already — what delayed it was the GUI thread's work at selection time, now measured at 2–55 ms.
+
+**Verified**
+
+- `uv run pytest tests -q` → **195 passed, 3 skipped**; pyflakes clean. New: `peaks_for_view` from samples and from columns; zoom about a point, the clip to the file, the 2 ms floor, the scrollbar both ways, the wheel (zoom, Shift-pan, horizontal pan), right-click and Home, the raster reused until the view changes, markers at the zoomed scale; the caption line and its button. The GUI tests wait for the threaded read where they read the waveform.
+- Measured (1600 px, 44.1k stereo): read 19 ms (5 s), 31 ms (30 s), 72 ms (2 min), 334 ms (15 min, columns only) — on the thread; raster 16–40 ms; cached repaint 0.3–0.4 ms. On the user's index (offscreen): selecting a 4.7-s vocal costs 2–55 ms on the GUI thread, its waveform lands 100 ms later; a 2.3-minute street ambience lands in 0.22 s. Screenshots checked: the caption line, a ×8 zoom with the RMS core, the scrollbar, a ×50 zoom of the ambience.
+
+**Next**
+
+- The header across the window with the List / Map buttons stacked, the tag-score bars and the CLAP strip; per-column filters in the list's header; the segments table out of Attributes and the weights on the Search tab (the rest of the user's list).

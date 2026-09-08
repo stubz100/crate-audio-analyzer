@@ -189,8 +189,9 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_pa
         assert window._segments.rowCount() > 0
         assert window._current is not None and window._current.name == "loop.wav"
         assert window._attributes._tag_buttons                            # the chips
-        assert "a click loop" in window._attributes._caption_label.text()  # the §5.2 sentence, when there is one
+        assert "a click loop" in window._waveform_panel.caption_text     # the §5.2 sentence, at the top of the waveform
         assert window._attributes._strip.dimensions == 32                 # the fake model's vector
+        window._waveform.wait_for_load()                                  # read on a thread: the preview never waits
         assert window._waveform.loaded and window._waveform.duration_s == pytest.approx(4.0, abs=0.01)
         assert window._attributes.isAncestorOf(window._segment_table)     # the table lives in the tab
 
@@ -701,6 +702,7 @@ def test_a_search_can_land_on_a_window_inside_a_long_file(app, tmp_path):
         assert window._current_offset_ms == 20000
         assert window._current_item[0] == "segment"
         assert all(r.detection_method != "window" for r in window._segments._rows)   # not in the drill-down
+        window._waveform.wait_for_load()
         assert len(window._waveform._windows) == 3
         assert "3 CLAP windows" in window._waveform._header_text()
         assert window._waveform._selected_segment == window._current_item[1]
@@ -797,13 +799,13 @@ def test_captions_step_runs_in_batches_and_the_button_does_one_sample(app, index
         _wait_until(app, lambda: not panel.running and "captioned 0 samples" in panel.log_text())
 
         window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
-        assert "a clip of 4.0 s" in window._attributes._caption_label.text()
-        assert window._attributes._caption_button.text() == "Recaption"
+        assert "a clip of 4.0 s" in window._waveform_panel.caption_text
+        assert window._waveform_panel._caption_button.text() == "Recaption"
         conn.execute("UPDATE text_tags SET tag_or_caption = 'stale words' WHERE source_model = 'qwen2audio-caption'")
         conn.commit()
-        window._attributes._caption_button.click()                  # this sample only, rewritten
+        window._waveform_panel._caption_button.click()              # this sample only, rewritten
         _wait_until(app, lambda: not panel.running and "caption loop.wav" in panel.log_text())
-        _wait_until(app, lambda: "a clip of 4.0 s" in window._attributes._caption_label.text())
+        _wait_until(app, lambda: "a clip of 4.0 s" in window._waveform_panel.caption_text)
         assert fakes[0].calls == 3
         assert window._current is not None and window._current.name == "loop.wav"   # the selection survived the reload
         assert conn.execute(
@@ -921,6 +923,7 @@ def test_save_and_delete_segments_from_the_waveform(app, index, tmp_path):
         assert tuple(moved) == (first.start_ms + 20, first.end_ms + 40, "manual", 1, 0, None)
         assert conn.execute("SELECT COUNT(*) FROM segment_analysis WHERE segment_id = ?", (new_id,)).fetchone()[0] == 1
         _wait_until(app, lambda: window._segments.index_of(new_id) is not None)   # the reload shows it
+        view.wait_for_load()
         assert window._current_sample == loop_id and "2 manual" in view._header_text()
 
         window._segment_table.selectRow(window._segments.index_of(new_id))

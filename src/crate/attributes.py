@@ -22,7 +22,6 @@ from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QLayout,
     QProgressBar,
@@ -71,7 +70,6 @@ def _prompts_text(name: str) -> str:
 
 class AttributesPanel(QWidget):
     search_requested = Signal(str)      # a chip was clicked: search for its tag
-    caption_requested = Signal()        # "Caption this sample"
     weights_changed = Signal(object)    # {axis: 0..1}
 
     def __init__(self, settings: QSettings, parent=None) -> None:
@@ -102,8 +100,8 @@ class AttributesPanel(QWidget):
         diff_layout.setColumnStretch(1, 1)
         self.show_difference(None, None, None)
 
-        # (2) the selected sample's chips and its caption
-        search_group = QGroupBox("Tags and caption of the selected sample")
+        # (2) the selected sample's chips (its caption is the waveform panel's line, 2026-09-08)
+        search_group = QGroupBox("Tags of the selected sample")
         search_layout = QVBoxLayout(search_group)
         self._tags_label = QLabel("CLAP zero-shot chips — click one to search for it (Search tab):")
         self._tags_label.setWordWrap(True)
@@ -112,26 +110,6 @@ class AttributesPanel(QWidget):
         self._tag_buttons: list[QPushButton] = []
         search_layout.addWidget(self._tags_label)
         search_layout.addLayout(self._tags_grid)
-        # (2a') the Qwen2-Audio sentence, when the sample has one (§5.2, opt-in)
-        self._caption_label = QLabel("")
-        self._caption_label.setWordWrap(True)
-        self._caption_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._caption_label.setToolTip(
-            "One sentence from Qwen2-Audio (§5.2) — written by the Recompute tab's Captions "
-            "step (a batch per Run) or by the button next to it (this sample only), about "
-            "10 s per file."
-        )
-        self._caption_button = QPushButton("Caption this sample")
-        self._caption_button.setToolTip(
-            "Write (or rewrite) this sample's Qwen2-Audio sentence now — about 10 s, plus a few "
-            "seconds the first time while the model loads. Runs as a job on the Recompute tab."
-        )
-        self._caption_button.setEnabled(False)
-        self._caption_button.clicked.connect(self.caption_requested.emit)
-        caption_row = QHBoxLayout()
-        caption_row.addWidget(self._caption_label, stretch=1)
-        caption_row.addWidget(self._caption_button, alignment=Qt.AlignmentFlag.AlignTop)
-        search_layout.addLayout(caption_row)
 
         # (2b) CLAP's tag scores for the selected sample — the numbers behind the
         # chips (2026-09-08, the user's steer: these instead of the four class numbers)
@@ -311,15 +289,6 @@ class AttributesPanel(QWidget):
             button.clicked.connect(lambda _checked=False, t=tag: self.search_for(t))
             self._tags_grid.addWidget(button, n // 3, n % 3)   # three per row: the row wraps
             self._tag_buttons.append(button)
-
-    def show_caption(self, text: str | None, can_caption: bool = True) -> None:
-        self._caption_label.setText(
-            f"Qwen2-Audio: {text}" if text
-            else "no caption yet — the button writes one for this sample; the Recompute tab's "
-                 "Captions step does a batch"
-        )
-        self._caption_button.setText("Recaption" if text else "Caption this sample")
-        self._caption_button.setEnabled(can_caption)
 
     def search_for(self, text: str) -> None:
         """A chip: hand the tag to the Search tab (the window routes it)."""

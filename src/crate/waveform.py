@@ -13,78 +13,144 @@ edit is *staged* — dashed, "unsaved" — and written only by *Save segment*
 (§6.3: staged on drag, committed only via Save), which the window does;
 *Discard* or Esc drops it, as does loading another sample. *Delete
 segment* (or Del) asks the window to remove the selected one. The panel
-class below holds the view and the buttons.
+class below holds the view, its caption line and the buttons.
 
-The envelope is read in blocks (`soundfile`), so a 16-minute ambience costs
-one pass over the file and never more memory than one block.
+Zoom and rendering (2026-09-08, the user's steer — "zoom for precision", "a
+less crude look", "separate the playback from the graphics"):
+
+- The audio is read on a worker thread for every file, never on the GUI
+  thread: selecting a sample starts the preview at once and the waveform
+  lands when it is ready (~10 ms for a 30-s WAV, seconds for a 16-minute
+  ambience; a newer load wins). Files up to KEEP_SAMPLES_SECONDS keep their
+  mono samples (5 MB for 30 s) so any zoom is drawn from the samples
+  themselves (a 3-minute file: 32 MB); longer files keep OVERVIEW_COLUMNS
+  min/max/RMS columns (a 16-minute ambience: 29 ms per column).
+- The wheel zooms about the cursor, Shift+wheel (or a horizontal wheel)
+  pans, right-click or Home fits the file; the panel's scrollbar pans too.
+- The waveform body — peaks as a light fill, RMS as a brighter core, one
+  column per device pixel — is rasterised once per view into a cached
+  pixmap; a playhead tick only blits it and draws the overlays. All CPU:
+  Qt's antialiased raster engine is more than enough for a 2-D strip, and a
+  GPU surface would add a driver dependency for no gain (CLAUDE.md).
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from PySide6.QtCore import QPointF, QRectF, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QCoreApplication, QPointF, QRectF, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QWheelEvent
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QScrollBar, QVBoxLayout, QWidget
 
 from .catalog import SegmentRow
 from .theme import ACCENT, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel
 
 log = logging.getLogger(__name__)
 
-DEFAULT_COLUMNS = 1200
+OVERVIEW_COLUMNS = 32768       # min/max/RMS columns kept for every file: the overview, and a long file's zoom
+DEFAULT_COLUMNS = OVERVIEW_COLUMNS
+KEEP_SAMPLES_SECONDS = 180.0   # up to this, the mono samples are kept so a zoom draws from them (32 MB at 44.1k)
 _TOP = 18.0        # title strip
 _BOTTOM = 16.0     # time axis
 _SIDE = 6.0
-_TICK_STEPS = (0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600)
+_TICK_STEPS = (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600)
 _DECAY_LEVEL = 0.1  # −20 dB, the level analysis.decay_ms is measured to
-INLINE_MAX_SECONDS = 30.0  # longer files read on a thread: a 16-minute ambience took 4.7 s
+INLINE_MAX_SECONDS = 30.0  # above this the panel says it is reading (a 16-minute ambience took 4.7 s)
 MARKER_GRAB_PX = 6.0       # a press this close to a marker grabs it
 DRAG_THRESHOLD_PX = 4.0    # less movement than this is a click
 MIN_SEGMENT_MS = 1         # a marker never crosses its partner
+MIN_VIEW_SECONDS = 0.002   # the closest zoom: 2 ms across the plot
+ZOOM_STEP = 1.25           # per wheel notch
+PAN_FRACTION = 0.1         # of the view per wheel notch
 
 
 @dataclass
 class Envelope:
     mins: np.ndarray
     maxs: np.ndarray
+    rms: np.ndarray
     duration_s: float
     peak_column: int
+    samples: np.ndarray | None = None   # mono float32 — files up to KEEP_SAMPLES_SECONDS
+    sample_rate: int = 0
 
     @property
     def columns(self) -> int:
         return int(self.mins.size)
 
 
-def envelope_columns(path: Path | str, columns: int = DEFAULT_COLUMNS) -> Envelope:
-    """Per-column min/max of the mono mix, at most `columns` columns."""
+def envelope_columns(
+    path: Path | str, columns: int = OVERVIEW_COLUMNS, keep_samples_s: float = KEEP_SAMPLES_SECONDS
+) -> Envelope:
+    """Per-column min/max/RMS of the mono mix, at most `columns` columns —
+    and, for a file up to `keep_samples_s`, the mono samples themselves."""
     with sf.SoundFile(str(path)) as handle:
         frames, sr = handle.frames, handle.samplerate
         if frames <= 0:
-            return Envelope(np.zeros(0), np.zeros(0), 0.0, 0)
+            return Envelope(np.zeros(0), np.zeros(0), np.zeros(0), 0.0, 0, None, sr)
         per = max(1, -(-frames // columns))
         n = -(-frames // per)
         mins = np.full(n, np.nan)
         maxs = np.full(n, np.nan)
+        squares = np.zeros(n)
+        counts = np.zeros(n)
+        keep = frames / sr <= keep_samples_s
+        kept: list[np.ndarray] = []
         col = 0
         for block in handle.blocks(blocksize=per * 64, dtype="float32", always_2d=True):
             mono = block.mean(axis=1)
+            if keep:
+                kept.append(mono)
             k = -(-len(mono) // per)
             padded = np.full(k * per, np.nan, dtype=np.float32)
             padded[: len(mono)] = mono
             chunk = padded.reshape(k, per)
             mins[col : col + k] = np.nanmin(chunk, axis=1)
             maxs[col : col + k] = np.nanmax(chunk, axis=1)
+            squares[col : col + k] = np.nansum(chunk * chunk, axis=1)
+            counts[col : col + k] = np.sum(~np.isnan(chunk), axis=1)
             col += k
     mins = np.nan_to_num(mins[:col])
     maxs = np.nan_to_num(maxs[:col])
+    rms = np.sqrt(squares[:col] / np.maximum(counts[:col], 1))
     amplitude = np.maximum(np.abs(mins), np.abs(maxs))
     peak = int(np.argmax(amplitude)) if amplitude.size else 0
-    return Envelope(mins, maxs, frames / sr, peak)
+    samples = np.concatenate(kept).astype(np.float32) if keep and kept else None
+    return Envelope(mins, maxs, rms, frames / sr, peak, samples, sr)
+
+
+def peaks_for_view(env: Envelope, start_s: float, end_s: float, width_px: int):
+    """Per-pixel (min, max, rms) across [start_s, end_s] of the plot — from
+    the samples when they are kept, else from the overview columns. None
+    when there is nothing to draw."""
+    if width_px <= 0 or end_s <= start_s:
+        return None
+    if env.samples is not None and env.sample_rate and env.samples.size:
+        y = env.samples
+        edges = np.linspace(start_s * env.sample_rate, end_s * env.sample_rate, width_px + 1)
+        idx = np.clip(np.floor(edges).astype(np.int64), 0, y.size)
+        starts = np.minimum(idx[:-1], y.size - 1)
+        counts = np.maximum(np.diff(idx), 1)
+        mins = np.minimum.reduceat(y, starts)
+        maxs = np.maximum.reduceat(y, starts)
+        rms = np.sqrt(np.add.reduceat(y.astype(np.float64) ** 2, starts) / counts)
+        return mins, maxs, rms
+    if env.columns == 0 or env.duration_s <= 0:
+        return None
+    per_col = env.duration_s / env.columns
+    edges = np.linspace(start_s / per_col, end_s / per_col, width_px + 1)
+    idx = np.clip(np.floor(edges).astype(np.int64), 0, env.columns)
+    starts = np.minimum(idx[:-1], env.columns - 1)
+    counts = np.maximum(np.diff(idx), 1)
+    mins = np.minimum.reduceat(env.mins, starts)
+    maxs = np.maximum.reduceat(env.maxs, starts)
+    rms = np.sqrt(np.add.reduceat(env.rms ** 2, starts) / counts)
+    return mins, maxs, rms
 
 
 def _alpha(colour: QColor, alpha: int) -> QColor:
@@ -98,6 +164,16 @@ def _tick_step(duration_s: float, width_px: float, min_px: float = 70.0) -> floa
         if duration_s <= 0 or width_px * step / duration_s >= min_px:
             return step
     return _TICK_STEPS[-1]
+
+
+def _tick_label(t: float, step: float) -> str:
+    if step < 0.01:
+        return f"{t:.3f}"
+    if step < 1:
+        return f"{t:.2f}"
+    if step < 60:
+        return f"{t:.0f}"
+    return f"{int(t // 60)}:{int(t % 60):02d}"
 
 
 class _EnvelopeThread(QThread):
@@ -122,12 +198,13 @@ class WaveformView(QWidget):
     staged_changed = Signal()          # unsaved markers came, went or moved
     selection_changed = Signal(object) # the selected segment id, or None
     delete_requested = Signal(int)     # Del on the selected segment
+    view_changed = Signal()            # zoomed, panned, fitted or loaded
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setMinimumHeight(110)
         self.setMouseTracking(True)                     # the cursor says when a marker is under it
-        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)  # Esc / Del after a click on the plot
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)  # Esc / Del / Home after a click on the plot
         self._env: Envelope | None = None
         self._title = ""
         self._error: str | None = None
@@ -142,6 +219,9 @@ class WaveformView(QWidget):
         self._edits: dict[int, tuple[int, int]] = {}    # segment id → staged (start_ms, end_ms), unsaved
         self._drafts: list[tuple[int, int]] = []         # segments drawn by hand, unsaved
         self._drag: tuple | None = None                  # ("move", key, edge) | ("press", ms, x)
+        self._view: tuple[float, float] = (0.0, 0.0)     # the seconds across the plot
+        self._layer: QPixmap | None = None               # the rasterised waveform body
+        self._layer_key: tuple | None = None
 
     # --- data in ---
 
@@ -154,6 +234,8 @@ class WaveformView(QWidget):
         decay_ms: float | None,
         windows: list[SegmentRow] = (),
     ) -> None:
+        """Show `path`: the audio is read on a thread — the preview never
+        waits for the graphics — and lands through `_on_envelope_ready`."""
         self._title = title
         self._segments = list(segments)
         self._windows = list(windows)
@@ -164,28 +246,17 @@ class WaveformView(QWidget):
         self._reset_staging()                       # another sample: an unsaved drag is dropped
         self.selection_changed.emit(None)
         self._generation += 1
+        self._env = None
+        self._layer = None
+        self._view = (0.0, 0.0)
         try:
             seconds = sf.info(str(path)).duration
         except Exception as exc:  # noqa: BLE001 - an unreadable file is shown, not raised
-            self._env = None
             self._error = f"{type(exc).__name__}: {exc}"
             log.warning("waveform unavailable for %s: %s", path, exc)
             self.update()
             return
-        if seconds <= INLINE_MAX_SECONDS:
-            try:
-                self._env = envelope_columns(path)
-                self._error = None
-            except Exception as exc:  # noqa: BLE001
-                self._env = None
-                self._error = f"{type(exc).__name__}: {exc}"
-                log.warning("waveform unavailable for %s: %s", path, exc)
-            self.update()
-            return
-        # A long file: read it on a thread and show it when it lands; a newer
-        # load in the meantime wins (generation counter).
-        self._env = None
-        self._error = f"reading {seconds / 60:.1f} min of audio…"
+        self._error = f"reading {seconds / 60:.1f} min of audio…" if seconds > INLINE_MAX_SECONDS else None
         self.update()
         thread = _EnvelopeThread(self._generation, path, self)
         thread.done.connect(self._on_envelope_ready)
@@ -200,6 +271,9 @@ class WaveformView(QWidget):
         self._env = env
         self._error = None
         self._thread = None
+        self._view = (0.0, env.duration_s)
+        self._layer = None
+        self.view_changed.emit()
         self.update()
 
     def _on_envelope_failed(self, generation: int, error: str) -> None:
@@ -213,22 +287,28 @@ class WaveformView(QWidget):
     def loading(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
 
-    def wait_for_load(self, timeout_ms: int = 60_000) -> None:
-        """Block until a threaded read lands (tests; window close)."""
+    def wait_for_load(self, timeout_ms: int = 60_000, deliver: bool = True) -> None:
+        """Block until the threaded read lands; with `deliver`, hand the
+        result over too (tests). The window's close passes False."""
         if self._thread is not None:
             self._thread.wait(timeout_ms)
+            if deliver:
+                QCoreApplication.processEvents()
 
     def clear(self) -> None:
         self._generation += 1
         self._env = None
+        self._layer = None
         self._title = ""
         self._error = None
         self._segments = []
         self._windows = []
         self._selected_segment = None
         self._position_ms = None
+        self._view = (0.0, 0.0)
         self._reset_staging()
         self.selection_changed.emit(None)
+        self.view_changed.emit()
         self.update()
 
     def set_segments(self, segments: list[SegmentRow]) -> None:
@@ -256,22 +336,67 @@ class WaveformView(QWidget):
     def duration_s(self) -> float:
         return self._env.duration_s if self._env is not None else 0.0
 
+    # --- the view: zoom and pan (2026-09-08) ---
+
+    @property
+    def view(self) -> tuple[float, float]:
+        """The seconds across the plot: (start, end)."""
+        return self._view
+
+    @property
+    def zoomed(self) -> bool:
+        return self._env is not None and (self._view[1] - self._view[0]) < self._env.duration_s - 1e-9
+
+    def set_view(self, start_s: float, end_s: float) -> None:
+        """Show [start_s, end_s]: clipped to the file, never narrower than
+        MIN_VIEW_SECONDS."""
+        duration = self.duration_s
+        if duration <= 0:
+            return
+        span = min(max(end_s - start_s, MIN_VIEW_SECONDS), duration)
+        start = min(max(start_s, 0.0), duration - span)
+        view = (start, start + span)
+        if view != self._view:
+            self._view = view
+            self.view_changed.emit()
+            self.update()
+
+    def zoom(self, factor: float, about_s: float | None = None) -> None:
+        """Zoom by `factor` (> 1 in) keeping `about_s` where it is."""
+        start, end = self._view
+        if end <= start:
+            return
+        about = (start + end) / 2 if about_s is None else about_s
+        fraction = (about - start) / (end - start)
+        span = (end - start) / factor
+        self.set_view(about - fraction * span, about - fraction * span + span)
+
+    def pan(self, delta_s: float) -> None:
+        start, end = self._view
+        self.set_view(start + delta_s, end + delta_s)
+
+    def fit(self) -> None:
+        self.set_view(0.0, self.duration_s)
+
     # --- geometry ---
 
     def _plot_rect(self) -> QRectF:
         return QRectF(_SIDE, _TOP, max(self.width() - 2 * _SIDE, 1.0), max(self.height() - _TOP - _BOTTOM, 1.0))
 
     def _x_of(self, seconds: float, rect: QRectF) -> float:
-        if self._env is None or self._env.duration_s <= 0:
+        start, end = self._view
+        if self._env is None or end <= start:
             return rect.left()
-        return rect.left() + rect.width() * seconds / self._env.duration_s
+        return rect.left() + rect.width() * (seconds - start) / (end - start)
 
     def time_at_x(self, x: float) -> float:
-        """Seconds at a widget x — the inverse of `_x_of`, for clicks."""
+        """Seconds at a widget x — the inverse of `_x_of`, for clicks;
+        clamped to the view."""
         rect = self._plot_rect()
-        if self._env is None or rect.width() <= 0:
+        start, end = self._view
+        if self._env is None or rect.width() <= 0 or end <= start:
             return 0.0
-        return float(np.clip((x - rect.left()) / rect.width(), 0.0, 1.0) * self._env.duration_s)
+        return float(start + np.clip((x - rect.left()) / rect.width(), 0.0, 1.0) * (end - start))
 
     def segment_at(self, seconds: float) -> SegmentRow | None:
         """The shortest segment spanning `seconds` (nested manual ones win)."""
@@ -280,6 +405,38 @@ class WaveformView(QWidget):
         return min(inside, key=lambda s: s.length_ms) if inside else None
 
     # --- painting ---
+
+    def _layer_for(self, rect: QRectF) -> QPixmap | None:
+        """The waveform body for the current view, rasterised once per
+        (file, view, size, scale) and reused by every repaint after."""
+        if self._env is None:
+            return None
+        dpr = float(self.devicePixelRatioF())
+        width = max(1, int(round(rect.width() * dpr)))
+        height = max(1, int(round(rect.height() * dpr)))
+        key = (self._generation, self._view, width, height, dpr)
+        if self._layer is not None and self._layer_key == key:
+            return self._layer
+        image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        peaks = peaks_for_view(self._env, self._view[0], self._view[1], width)
+        if peaks is not None:
+            mins, maxs, rms = peaks
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            mid = height / 2
+            half = max(height / 2 - 2 * dpr, 1.0)
+            xs = np.arange(width) + 0.5
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_alpha(ACCENT, 110))
+            painter.drawPath(_band_path(xs, mid - maxs * half, mid - mins * half))
+            painter.setBrush(_alpha(ACCENT, 210))
+            painter.drawPath(_band_path(xs, mid - rms * half, mid + rms * half))
+            painter.end()
+        pixmap = QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(dpr)
+        self._layer, self._layer_key = pixmap, key
+        return pixmap
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -290,37 +447,28 @@ class WaveformView(QWidget):
         painter.drawText(QRectF(_SIDE, 2, self.width() - 2 * _SIDE, _TOP - 2), Qt.AlignmentFlag.AlignLeft, self._header_text())
         if self._env is None:
             painter.setPen(TEXT_DIM)
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._error or "select a sample to see its waveform")
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._error or ("" if self._title else "select a sample to see its waveform"))
             painter.end()
             return
-        env = self._env
         mid = rect.center().y()
         half = rect.height() / 2 - 2
         painter.setPen(QPen(BORDER, 1))
         painter.drawLine(QPointF(rect.left(), mid), QPointF(rect.right(), mid))
 
+        painter.save()
+        painter.setClipRect(rect)
         self._paint_windows(painter, rect)
         self._paint_segments(painter, rect)
-
-        if env.columns:
-            path = QPainterPath()
-            xs = rect.left() + (np.arange(env.columns) + 0.5) / env.columns * rect.width()
-            path.moveTo(xs[0], mid - float(env.maxs[0]) * half)
-            for x, v in zip(xs[1:], env.maxs[1:]):
-                path.lineTo(float(x), mid - float(v) * half)
-            for x, v in zip(xs[::-1], env.mins[::-1]):
-                path.lineTo(float(x), mid - float(v) * half)
-            path.closeSubpath()
-            painter.setPen(QPen(ACCENT, 1))
-            painter.setBrush(_alpha(ACCENT, 150))
-            painter.drawPath(path)
-
+        layer = self._layer_for(rect)
+        if layer is not None:
+            painter.drawPixmap(rect.topLeft(), layer)
         self._paint_envelope(painter, rect, mid, half)
-        self._paint_axis(painter, rect)
         if self._position_ms is not None:
             x = self._x_of(self._position_ms / 1000, rect)
             painter.setPen(QPen(WHITE, 1.5))
             painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+        painter.restore()
+        self._paint_axis(painter, rect)
         painter.end()
 
     def _header_text(self) -> str:
@@ -338,6 +486,9 @@ class WaveformView(QWidget):
             parts.append(f"{len(self._edits) + len(self._drafts)} unsaved")
         if self._windows:
             parts.append(f"{len(self._windows)} CLAP windows")
+        if self.zoomed:
+            start, end = self._view
+            parts.append(f"zoom ×{self._env.duration_s / (end - start):.0f} ({start:.3f}–{end:.3f} s)")
         return "  ·  ".join(parts)
 
     def _paint_windows(self, painter: QPainter, rect: QRectF) -> None:
@@ -348,6 +499,8 @@ class WaveformView(QWidget):
         for win in self._windows:
             x0 = self._x_of(win.start_ms / 1000, rect)
             x1 = self._x_of(win.end_ms / 1000, rect)
+            if x1 < rect.left() or x0 > rect.right():
+                continue
             selected = win.id == self._selected_segment
             painter.setPen(Qt.PenStyle.NoPen)
             if selected:
@@ -390,6 +543,8 @@ class WaveformView(QWidget):
     ) -> None:
         x0 = self._x_of(start_ms / 1000, rect)
         x1 = self._x_of(end_ms / 1000, rect)
+        if x1 < rect.left() or x0 > rect.right():
+            return
         strong, weak = (80, 40) if colour is GREEN else (90, 45)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(_alpha(colour, strong if selected else weak))
@@ -400,9 +555,10 @@ class WaveformView(QWidget):
         painter.setPen(pen)
         painter.drawLine(QPointF(x0, rect.top()), QPointF(x0, rect.bottom()))
         painter.drawLine(QPointF(x1, rect.top()), QPointF(x1, rect.bottom()))
-        if label and x1 - x0 > painter.fontMetrics().horizontalAdvance(label) + 6:   # only when it fits
+        left = max(x0, rect.left())
+        if label and min(x1, rect.right()) - left > painter.fontMetrics().horizontalAdvance(label) + 6:
             painter.setPen(colour)
-            painter.drawText(QRectF(x0 + 2, rect.top() + 1, x1 - x0 - 4, 14), Qt.AlignmentFlag.AlignLeft, label)
+            painter.drawText(QRectF(left + 2, rect.top() + 1, x1 - left - 4, 14), Qt.AlignmentFlag.AlignLeft, label)
 
     def _paint_envelope(self, painter: QPainter, rect: QRectF, mid: float, half: float) -> None:
         if self._env is None or self._attack_ms is None or self._env.columns == 0:
@@ -423,14 +579,14 @@ class WaveformView(QWidget):
     def _paint_axis(self, painter: QPainter, rect: QRectF) -> None:
         if self._env is None or self._env.duration_s <= 0:
             return
-        step = _tick_step(self._env.duration_s, rect.width())
+        start, end = self._view
+        step = _tick_step(end - start, rect.width())
         painter.setPen(TEXT_DIM)
-        t = 0.0
-        while t <= self._env.duration_s + 1e-9:
+        t = math.ceil(start / step - 1e-9) * step
+        while t <= end + 1e-9:
             x = self._x_of(t, rect)
             painter.drawLine(QPointF(x, rect.bottom()), QPointF(x, rect.bottom() + 4))
-            label = f"{t:.2f}" if step < 1 else (f"{t:.0f}" if step < 60 else f"{int(t // 60)}:{int(t % 60):02d}")
-            painter.drawText(QRectF(x - 30, rect.bottom() + 3, 60, 13), Qt.AlignmentFlag.AlignHCenter, label)
+            painter.drawText(QRectF(x - 30, rect.bottom() + 3, 60, 13), Qt.AlignmentFlag.AlignHCenter, _tick_label(t, step))
             t += step
 
     # --- staged edits (§9.2: staged on drag, committed only via Save) ---
@@ -546,7 +702,12 @@ class WaveformView(QWidget):
     # --- interaction ---
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if event.button() != Qt.MouseButton.LeftButton or self._env is None:
+        if self._env is None:
+            return
+        if event.button() == Qt.MouseButton.RightButton:
+            self.fit()
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
             return
         x = event.position().x()
         marker = self.marker_at(x)
@@ -589,26 +750,86 @@ class WaveformView(QWidget):
                 self.position_clicked.emit(ms)
         self.update()
 
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        """The wheel zooms about the cursor; Shift+wheel or a horizontal
+        wheel pans by a tenth of the view per notch."""
+        if self._env is None:
+            return
+        delta = event.angleDelta()
+        horizontal = bool(delta.x()) and not delta.y()
+        if horizontal or event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            notches = (delta.x() if horizontal else delta.y()) / 120.0
+            start, end = self._view
+            self.pan(-notches * (end - start) * PAN_FRACTION)
+        elif delta.y():
+            self.zoom(ZOOM_STEP ** (delta.y() / 120.0), self.time_at_x(event.position().x()))
+        event.accept()
+
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape and self.has_staged:
             self.discard()
         elif event.key() == Qt.Key.Key_Delete and self.can_delete:
             self.delete_requested.emit(self._selected_segment)
+        elif event.key() == Qt.Key.Key_Home:
+            self.fit()
         else:
             super().keyPressEvent(event)
 
 
+def _band_path(xs: np.ndarray, top: np.ndarray, bottom: np.ndarray) -> QPainterPath:
+    """A closed path along `top` left to right and `bottom` back."""
+    path = QPainterPath()
+    path.moveTo(float(xs[0]), float(top[0]))
+    for x, y in zip(xs[1:].tolist(), top[1:].tolist()):
+        path.lineTo(x, y)
+    for x, y in zip(xs[::-1].tolist(), bottom[::-1].tolist()):
+        path.lineTo(x, y)
+    path.closeSubpath()
+    return path
+
+
 class WaveformPanel(QWidget):
-    """The bottom panel: the view and its segment buttons (§9.2). *Save
-    segment* writes the staged markers, *Discard* drops them, *Delete
+    """The bottom panel: the caption line on top (the selected sample's
+    Qwen2-Audio sentence, "—" without one, and its Caption / Recaption
+    button), the view, its pan scrollbar, and the segment buttons (§9.2).
+    *Save segment* writes the staged markers, *Discard* drops them, *Delete
     segment* removes the selected one; the window does the writing."""
 
     save_requested = Signal()
     delete_requested = Signal(int)     # the selected segment's id
+    caption_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.view = WaveformView()
+
+        # the caption line (2026-09-08, the user's steer: at the top of the waveform)
+        self._caption_label = ElidedLabel("—")
+        self._caption_label.setToolTip(
+            "One sentence from Qwen2-Audio (§5.2) — written by the Recompute tab's Captions "
+            "step (a batch per Run) or by the button next to it (this sample only), about "
+            "10 s per file. “—” = none yet."
+        )
+        self._caption_button = QPushButton("Caption")
+        self._caption_button.setToolTip(
+            "Write (or rewrite) this sample's Qwen2-Audio sentence now — about 10 s, plus a few "
+            "seconds the first time while the model loads. Runs as a job on the Recompute tab."
+        )
+        self._caption_button.setEnabled(False)
+        self._caption_button.clicked.connect(self.caption_requested)
+        caption_row = QHBoxLayout()
+        caption_row.setContentsMargins(6, 2, 4, 0)
+        caption_row.setSpacing(6)
+        caption_row.addWidget(self._caption_label, stretch=1)
+        caption_row.addWidget(self._caption_button)
+
+        self._scroll = QScrollBar(Qt.Orientation.Horizontal)
+        self._scroll.setToolTip("Pan the zoomed waveform (Shift+wheel does too; right-click or Home fits the file).")
+        self._scroll.setEnabled(False)
+        self._syncing = False
+        self._scroll.valueChanged.connect(self._on_scroll)
+        self.view.view_changed.connect(self._sync_scroll)
+
         self._save = QPushButton("Save segment")
         self._save.setToolTip(
             "Write the moved or drawn markers to the index as manual segments (§6.3): exempt "
@@ -620,7 +841,7 @@ class WaveformPanel(QWidget):
         self._delete.setToolTip("Remove the selected segment, automatic or manual, from the index (Del).")
         hint = ElidedLabel(
             "drag a marker to move it  ·  drag on the waveform to draw a segment  ·  "
-            "nothing is written until Save"
+            "nothing is written until Save  ·  wheel zooms, Shift+wheel pans, right-click fits"
         )
         hint.setObjectName("caption")
         row = QHBoxLayout()
@@ -633,7 +854,9 @@ class WaveformPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
+        layout.addLayout(caption_row)
         layout.addWidget(self.view, stretch=1)
+        layout.addWidget(self._scroll)
         layout.addLayout(row)
         self._save.clicked.connect(self.save_requested)
         self._discard.clicked.connect(self.view.discard)
@@ -642,6 +865,48 @@ class WaveformPanel(QWidget):
         self.view.selection_changed.connect(self._refresh)
         self.view.delete_requested.connect(self.delete_requested)
         self._refresh()
+
+    # --- the caption line ---
+
+    def set_caption(self, text: str | None, can_caption: bool = True) -> None:
+        """The selected sample's sentence — "—" without one — and the button
+        that writes or rewrites it."""
+        self._caption_label.setText(text if text else "—")
+        self._caption_button.setText("Recaption" if text else "Caption")
+        self._caption_button.setEnabled(can_caption)
+
+    @property
+    def caption_text(self) -> str:
+        return self._caption_label.text()
+
+    # --- the scrollbar ---
+
+    def _sync_scroll(self) -> None:
+        """The scrollbar follows the view (in milliseconds)."""
+        start, end = self.view.view
+        duration = self.view.duration_s
+        self._syncing = True
+        try:
+            if duration <= 0 or end - start >= duration - 1e-9:
+                self._scroll.setRange(0, 0)
+                self._scroll.setEnabled(False)
+            else:
+                span_ms = int(round((end - start) * 1000))
+                self._scroll.setRange(0, max(0, int(round(duration * 1000)) - span_ms))
+                self._scroll.setPageStep(span_ms)
+                self._scroll.setSingleStep(max(1, span_ms // 10))
+                self._scroll.setValue(int(round(start * 1000)))
+                self._scroll.setEnabled(True)
+        finally:
+            self._syncing = False
+
+    def _on_scroll(self, value_ms: int) -> None:
+        if self._syncing:
+            return
+        start, end = self.view.view
+        self.view.set_view(value_ms / 1000, value_ms / 1000 + (end - start))
+
+    # --- the buttons ---
 
     def _emit_delete(self) -> None:
         if self.view.can_delete:

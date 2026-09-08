@@ -367,7 +367,7 @@ class MainWindow(QMainWindow):
         self._search_panel.search_cleared.connect(self._clear_search)
         self._search_panel.criteria_changed.connect(self._proxy.set_criteria)
         self._attributes.search_requested.connect(self._search_panel.search_for)   # a chip → the Search tab's box
-        self._attributes.caption_requested.connect(self._caption_current)
+        self._waveform_panel.caption_requested.connect(self._caption_current)   # the caption line's button
         self._recompute = RecomputePanel(
             self._db_path, self._settings, encoder_factory, captioner_factory, parent=self
         )
@@ -547,7 +547,7 @@ class MainWindow(QMainWindow):
         self._segments.set_rows(segments)
         self._segment_table.resizeColumnsToContents()
         self._attributes.show_tags(load_tags(self._conn, row.id))
-        self._attributes.show_caption(load_caption(self._conn, row.id))
+        self._waveform_panel.set_caption(load_caption(self._conn, row.id))
         attack_ms, decay_ms = self._envelope_marks(row.id)
         # The CLAP windows of a long file (§6.4) are drawn on the waveform as a
         # strip, not listed with the segments: a hit can land on one.
@@ -721,7 +721,7 @@ class MainWindow(QMainWindow):
     # --- anchor (§9.2) and ranking (§9.6) ---
 
     def _caption_current(self) -> None:
-        """The Attributes tab's button: caption the selected sample (a hit's
+        """The waveform panel's button: caption the selected sample (a hit's
         parent) as a job; the reload afterwards shows the sentence."""
         if self._current_item is None:
             self.statusBar().showMessage("select a sample first")
@@ -1080,7 +1080,7 @@ class MainWindow(QMainWindow):
             return
         self._preview.stop()
         self._playhead.stop()
-        self._waveform.wait_for_load()
+        self._waveform.wait_for_load(deliver=False)
         if self._search_thread is not None:
             self._search_thread.wait()           # a model load cannot be interrupted
         if self._feature_thread is not None:
