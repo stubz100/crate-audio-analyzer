@@ -1108,7 +1108,7 @@ The user: the quick filter should live at each column header — a text field fo
 
 ## 2026-09-08 — The segments table out, the weights to the Search tab
 
-**Phase:** 7 polish (the tabs) · `RESHUFFLE_HASH`
+**Phase:** 7 polish (the tabs) · `7aa5310`
 
 The user: "Segments of the selected sample" is not needed; the weights belong on the Search tab.
 
