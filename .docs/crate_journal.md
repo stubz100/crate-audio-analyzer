@@ -1148,7 +1148,7 @@ The user: the list and the waveform should split 50/50 vertically, and the list/
 
 ## 2026-09-08 — The window rearranged: list right, waveform and tabs left
 
-**Phase:** 7 polish (the window) · `LAYOUT_HASH`
+**Phase:** 7 polish (the window) · `0d9a645`
 
 The user: the list/map where the tabs are, the waveform where the list/map is, the tabs where the waveform is; the CLAP tags and embedding squeezed to 50 % so the list/map takes the whole right half.
 
