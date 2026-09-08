@@ -1105,3 +1105,24 @@ The user: the quick filter should live at each column header — a text field fo
 **Next**
 
 - The segments table out of the Attributes tab and the weights over to the Search tab (the last of the user's list).
+
+## 2026-09-08 — The segments table out, the weights to the Search tab
+
+**Phase:** 7 polish (the tabs) · `RESHUFFLE_HASH`
+
+The user: "Segments of the selected sample" is not needed; the weights belong on the Search tab.
+
+**Done**
+
+- **The segments table is gone** from the Attributes tab, with `host_segments` and the window's `QTableView`. The window keeps the selected sample's segments as a plain list (`_segment_rows`); a click inside a segment on the waveform goes to `_select_segment`, which does what the table's row selection did — render, current item, transport caption, the waveform's selection, preview on auto-play. `SegmentTableModel` stays in `listmodel.py` (tested) for a drill-down should one come back.
+- **Drag into Bitwig ↗** (`DragHandle`, `main.py`) replaces the static label in the transport row: press and drag it to hand the OS the current item's file — the sample, or the rendered segment — so a segment that is not a search hit can still be dragged out now that the table is gone (`mime_data()` for the tests).
+- **The weights** (`search.py`): the group, `weights()`, `weights_changed` and the `weights/` settings keys moved as they were; the window re-ranks from the Search tab's signal. **Attributes** keeps the difference bars, the chips, the tag-score bars and the stripes; its docstring says where everything went.
+
+**Verified**
+
+- `uv run pytest tests -q` → **199 passed, 3 skipped**; pyflakes clean. The GUI tests select segments through `_select_segment`, read the drag handle's URLs for the sample and for a rendered segment, and drive the weights on the Search tab (they still persist across a restart).
+- Offscreen on the user's index: a vowel's first segment selected from the waveform, the drag handle carrying its rendered clip; the Attributes tab with four groups, the Search tab with the weights under its filters.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.

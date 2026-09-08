@@ -1,9 +1,10 @@
 """The Search tab (2026-09-08, the user's steer: the Attributes tab was
 crammed, so everything that narrows or searches the list moved here).
 
-The CLAP text search box (§5.2) and the filters that have no column of
+The CLAP text search box (§5.2), the filters that have no column of
 their own (§9.5): minimum CLAP scores and — once there is an anchor — the
-per-axis distance ranges. Type, length and tempo are filtered from the
+per-axis distance ranges; and the weight bars (the ranking's blend, §5.1),
+here since 2026-09-08 because they shape what a search and a ranking mean. Type, length and tempo are filtered from the
 list's own header since later that day (`headerfilter.py`). The panel owns
 no data: it emits what the user asked for and the window applies it.
 Filters are view state, never persisted (§9.4).
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -32,11 +34,14 @@ from .embedding import CONTENT_CLASSES
 from .similarity import AXES, AXIS_LABELS
 from .theme import SqueezableWidget
 
+_KEY_WEIGHT = "weights/"
+
 
 class SearchPanel(QWidget):
     search_requested = Signal(str)
     search_cleared = Signal()
     criteria_changed = Signal(object)   # a Criteria
+    weights_changed = Signal(object)    # {axis: 0..1}
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(parent)
@@ -110,11 +115,39 @@ class SearchPanel(QWidget):
         self._ranges_group.setToolTip("Press ⚓ on a row to unlock these: a hard cutoff per axis.")
         filters_layout.addWidget(self._ranges_group)
 
+        # (3) the weights (2026-09-08, the user's steer: they belong with the search)
+        weights_group = QGroupBox("Weights — the list re-ranks as you move them")
+        weights_group.setToolTip(
+            "How much each axis counts in the ranking against the anchor — the anchored list "
+            "re-ranks when a bar moves (a 25 ms pass, §9.6) — and in the map layout on its next "
+            "Run. They are not the differences above."
+        )
+        weights_layout = QGridLayout(weights_group)
+        self._weight_sliders: dict[str, QSlider] = {}
+        self._weight_values: dict[str, QLabel] = {}
+        for row, axis in enumerate(AXES):
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, 100)
+            slider.setValue(int(settings.value(_KEY_WEIGHT + axis, 100, type=int)))
+            slider.setToolTip(AXIS_HELP[axis])
+            slider.setMinimumWidth(60)
+            value = QLabel(f"{slider.value()} %")
+            value.setMinimumWidth(40)
+            slider.valueChanged.connect(lambda v, a=axis, lbl=value: self._on_weight(a, v, lbl))
+            label = QLabel(AXIS_LABELS[axis])
+            label.setToolTip(AXIS_HELP[axis])
+            weights_layout.addWidget(label, row, 0)
+            weights_layout.addWidget(slider, row, 1)
+            weights_layout.addWidget(value, row, 2)
+            self._weight_sliders[axis] = slider
+            self._weight_values[axis] = value
+
         controls = SqueezableWidget()
         self._controls_layout = QVBoxLayout(controls)
         self._controls_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         self._controls_layout.addWidget(search_group)
         self._controls_layout.addWidget(filters_group)
+        self._controls_layout.addWidget(weights_group)
         self._controls_layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -151,6 +184,9 @@ class SearchPanel(QWidget):
                     ranges.append((axis, low / 100.0, high / 100.0))
         return Criteria(clap_min=clap_min, axis_ranges=tuple(ranges))
 
+    def weights(self) -> dict[str, float]:
+        return {axis: slider.value() / 100.0 for axis, slider in self._weight_sliders.items()}
+
     def search_text(self) -> str:
         return self._search.text().strip()
 
@@ -180,3 +216,8 @@ class SearchPanel(QWidget):
 
     def _emit_criteria(self, *_args) -> None:
         self.criteria_changed.emit(self.criteria())
+
+    def _on_weight(self, axis: str, value: int, label: QLabel) -> None:
+        label.setText(f"{value} %")
+        self._settings.setValue(_KEY_WEIGHT + axis, value)
+        self.weights_changed.emit(self.weights())

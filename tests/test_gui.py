@@ -186,21 +186,22 @@ def test_main_window_loads_the_index_and_drills_into_segments(app, index, tmp_pa
         # Select the loop: its segments appear, the preview target is set.
         window._autoplay.setChecked(False)
         window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
-        assert window._segments.rowCount() > 0
+        assert window._segment_rows
         assert window._current is not None and window._current.name == "loop.wav"
         assert window._attributes._tag_buttons                            # the chips
         assert "a click loop" in window._waveform_panel.caption_text     # the §5.2 sentence, at the top of the waveform
         assert window._attributes._strip.dimensions == 32                 # the fake model's vector
         window._waveform.wait_for_load()                                  # read on a thread: the preview never waits
         assert window._waveform.loaded and window._waveform.duration_s == pytest.approx(4.0, abs=0.01)
-        assert window._attributes.isAncestorOf(window._segment_table)     # the table lives in the tab
+        assert window._drag_handle.mime_data().urls()[0].toLocalFile().endswith("loop.wav")
 
-        window._segment_table.selectRow(0)
+        window._select_segment(window._segment_rows[0].id)                # a click inside a segment on the waveform
         assert window._current is not None and window._current.name.startswith("seg_")
         assert window._current.exists()
-        first = window._segments.row_at(window._segments.index(0, 0)).id
+        first = window._segment_rows[0].id
         assert window._waveform._selected_segment == first               # mirrored on the waveform
-        assert window._current_offset_ms == window._segments.row_at(window._segments.index(0, 0)).start_ms
+        assert window._current_offset_ms == window._segment_rows[0].start_ms
+        assert window._drag_handle.mime_data().urls()[0].toLocalFile().endswith(window._current.name)   # the segment drags out
 
         window._on_column_filter(0, ColumnFilter(text="hit"))         # the File header's filter
         assert window._proxy.rowCount() == 1 and 0 in window._header.filters
@@ -240,7 +241,7 @@ def test_text_search_scores_the_list_and_nests_a_sub_hit(app, index, tmp_path):
         window._table.setCurrentIndex(sub_hit)
         assert window._current is not None and window._current.name.startswith("seg_")
         assert window._current_item[0] == "segment"
-        assert window._segments.rowCount() > 0                  # the drill-down shows the parent's segments
+        assert window._segment_rows                             # the parent's segments, on the waveform
         assert window._attributes._tag_buttons                    # ... and the chips are the parent's
         mime = window._samples.mimeData([window._proxy.mapToSource(sub_hit)])
         assert [Path(u.toLocalFile()) for u in mime.urls()] == [window._current]
@@ -271,7 +272,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         assert not window._search_panel._ranges_group.isEnabled()
         assert not window._recompute._layout_anchored.isEnabled()
 
-        for slider in window._attributes._weight_sliders.values():
+        for slider in window._search_panel._weight_sliders.values():
             slider.setValue(0)
         window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
         _anchor_current(app, window)                               # anchors, then ranks at once…
@@ -284,7 +285,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         assert "loop.wav" in window._recompute._anchor_note.text()
         assert "weight" in window.statusBar().currentMessage()        # … but nothing to blend: told
         assert window._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
-        for slider in window._attributes._weight_sliders.values():
+        for slider in window._search_panel._weight_sliders.values():
             slider.setValue(100)
 
         _rerank(app, window)                                       # the bars re-rank on release
@@ -377,14 +378,14 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
         panel._clap_min["rhythmic"].setValue(0)
         assert window._proxy.rowCount() == 2
 
-        window._attributes._weight_sliders["pitch"].setValue(30)
-        assert window._attributes.weights()["pitch"] == pytest.approx(0.3)
+        window._search_panel._weight_sliders["pitch"].setValue(30)
+        assert window._search_panel.weights()["pitch"] == pytest.approx(0.3)
     finally:
         window.close()
 
     reopened = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path))
     try:
-        assert reopened._attributes.weights()["pitch"] == pytest.approx(0.3)   # weights persist (§9.4)
+        assert reopened._search_panel.weights()["pitch"] == pytest.approx(0.3)   # weights persist (§9.4)
     finally:
         reopened.close()
 
@@ -704,7 +705,7 @@ def test_a_search_can_land_on_a_window_inside_a_long_file(app, tmp_path):
         assert window._current is not None and window._current.name.startswith("seg_") and window._current.exists()
         assert window._current_offset_ms == 20000
         assert window._current_item[0] == "segment"
-        assert all(r.detection_method != "window" for r in window._segments._rows)   # not in the drill-down
+        assert all(r.detection_method != "window" for r in window._segment_rows)    # not among the segments
         window._waveform.wait_for_load()
         assert len(window._waveform._windows) == 3
         assert "3 CLAP windows" in window._waveform._header_text()
@@ -925,11 +926,11 @@ def test_save_and_delete_segments_from_the_waveform(app, index, tmp_path):
         ).fetchone()
         assert tuple(moved) == (first.start_ms + 20, first.end_ms + 40, "manual", 1, 0, None)
         assert conn.execute("SELECT COUNT(*) FROM segment_analysis WHERE segment_id = ?", (new_id,)).fetchone()[0] == 1
-        _wait_until(app, lambda: window._segments.index_of(new_id) is not None)   # the reload shows it
+        _wait_until(app, lambda: any(s.id == new_id for s in window._segment_rows))   # the reload shows it
         view.wait_for_load()
         assert window._current_sample == loop_id and "2 manual" in view._header_text()
 
-        window._segment_table.selectRow(window._segments.index_of(new_id))
+        window._select_segment(new_id)
         assert view.selected_segment == new_id and panel._delete.isEnabled()
         asked: list[str] = []
         window._confirm = lambda question: asked.append(question) is None and False
@@ -940,7 +941,7 @@ def test_save_and_delete_segments_from_the_waveform(app, index, tmp_path):
         panel._delete.click()
         _wait_until(app, lambda: not jobs.running
                     and conn.execute("SELECT COUNT(*) FROM segments WHERE id = ?", (new_id,)).fetchone()[0] == 0)
-        _wait_until(app, lambda: window._segments.index_of(new_id) is None)
+        _wait_until(app, lambda: all(s.id != new_id for s in window._segment_rows))
         assert "deleted" in jobs.log_text() and window._current_sample == loop_id
     finally:
         window.close()

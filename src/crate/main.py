@@ -18,8 +18,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSettings, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QMimeData, QSettings, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QDrag, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
-    QTableView,
     QTabWidget,
     QTreeView,
     QVBoxLayout,
@@ -54,7 +53,7 @@ from .db import default_db_path, open_db
 from .embedding import ClapEncoder, EmbedSettings
 from .layout import LayoutSettings, fit_layout, load_current_layout, place_anchor
 from .headerfilter import ColumnSpec, FilterHeader
-from .listmodel import AnchorDelegate, ListProxy, SampleTreeModel, SegmentTableModel
+from .listmodel import AnchorDelegate, ListProxy, SampleTreeModel
 from .mapview import MapView
 from .library import scope_paths
 from .recompute import EncoderFactory, RecomputePanel, RunPlan
@@ -144,6 +143,48 @@ class Preview:
         from PySide6.QtMultimedia import QMediaPlayer
 
         return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
+
+class DragHandle(QLabel):
+    """*Drag into Bitwig ↗* in the transport row: hands the OS the current
+    item's file — the sample, or the rendered segment (§11) — the way a list
+    row does, so any segment on the waveform can be dragged out (the
+    drill-down table left the Attributes tab, 2026-09-08)."""
+
+    def __init__(self, current, parent=None) -> None:
+        super().__init__("Drag into Bitwig ↗", parent)
+        self._current = current
+        self._press = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("Drag this into Bitwig: the selected sample, or the selected hit / segment as a rendered clip.")
+
+    def mime_data(self) -> QMimeData | None:
+        path = self._current()
+        if path is None:
+            return None
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path))])
+        return mime
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = event.position()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._press is None:
+            return
+        if (event.position() - self._press).manhattanLength() < QApplication.startDragDistance():
+            return
+        self._press = None
+        mime = self.mime_data()
+        if mime is None:
+            return
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
+
+    def mouseReleaseEvent(self, _event) -> None:  # noqa: N802
+        self._press = None
 
 
 class _Outcome:
@@ -300,13 +341,7 @@ class MainWindow(QMainWindow):
         self._table.doubleClicked.connect(lambda _index: self._play_current())
 
         # --- the selected sample's segments (§6.4 drill-down) ---
-        self._segments = SegmentTableModel(self._render)
-        self._segment_table = QTableView()
-        self._segment_table.setModel(self._segments)
-        self._configure_drag_view(self._segment_table)
-        self._segment_table.verticalHeader().setVisible(False)
-        self._segment_table.selectionModel().currentRowChanged.connect(self._on_segment_selected)
-        self._segment_table.doubleClicked.connect(lambda _index: self._play_current())
+        self._segment_rows: list = []                # the selected sample's segments (shown on the waveform)
 
         # --- the map (§9.3): the same filtered set, one point per sample ---
         self._map = MapView()
@@ -322,7 +357,7 @@ class MainWindow(QMainWindow):
         # its markers editable since 2026-09-08, Phase 9) ---
         self._waveform_panel = WaveformPanel()
         self._waveform = self._waveform_panel.view
-        self._waveform.segment_clicked.connect(self._select_segment_row)
+        self._waveform.segment_clicked.connect(self._select_segment)
         self._waveform.position_clicked.connect(self._seek)
         self._waveform_panel.save_requested.connect(self._save_segments)
         self._waveform_panel.delete_requested.connect(self._delete_segment)
@@ -364,7 +399,8 @@ class MainWindow(QMainWindow):
         transport.addWidget(QLabel("⚓"))
         transport.addWidget(self._anchor_label, stretch=1)
         transport.addWidget(clear_anchor)
-        transport.addWidget(QLabel("Drag a row into Bitwig ↗"))
+        self._drag_handle = DragHandle(lambda: self._current)
+        transport.addWidget(self._drag_handle)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self._toggle_play)
         QShortcut(QKeySequence(Qt.Key.Key_A), self, activated=self._anchor_current)
 
@@ -376,7 +412,6 @@ class MainWindow(QMainWindow):
 
         # --- right panel: Attributes (§9.5) and Recompute (§9.6) ---
         self._attributes = AttributesPanel(self._settings)
-        self._attributes.host_segments(self._segment_table)
         self._search_panel = SearchPanel(self._settings)
         self._search_panel.search_requested.connect(self._search)
         self._search_panel.search_cleared.connect(self._clear_search)
@@ -400,7 +435,7 @@ class MainWindow(QMainWindow):
         self._rerank_timer.setSingleShot(True)
         self._rerank_timer.setInterval(150)
         self._rerank_timer.timeout.connect(self._rerank_for_weights)
-        self._attributes.weights_changed.connect(self._on_weights_changed)
+        self._search_panel.weights_changed.connect(self._on_weights_changed)
         tabs = QTabWidget()
         tabs.addTab(self._attributes, "Attributes")
         tabs.addTab(self._search_panel, "Search")
@@ -465,7 +500,7 @@ class MainWindow(QMainWindow):
         self._samples.set_rows(rows)
         self._samples.set_similarity(None)
         self._samples.set_match(None)
-        self._segments.set_rows([])
+        self._segment_rows = []
         self._features = None
         self._feature_generation += 1
         self._axis = None                                # the anchor's distances are redone below
@@ -584,8 +619,7 @@ class MainWindow(QMainWindow):
         # The drill-down and the chips are the sample's either way — a sub-hit
         # is a segment *of* that sample (2026-09-07 review).
         segments = load_segments(self._conn, row.id)
-        self._segments.set_rows(segments)
-        self._segment_table.resizeColumnsToContents()
+        self._segment_rows = segments
         tags = load_tags(self._conn, row.id)
         self._attributes.show_tags(tags)
         self._tag_bars.show_tags(tags)
@@ -618,10 +652,13 @@ class MainWindow(QMainWindow):
         if self._autoplay.isChecked() and not self._quiet_select:
             self._play_current()
 
-    def _on_segment_selected(self, current, _previous) -> None:
-        if not current.isValid():
+    def _select_segment(self, segment_id: int) -> None:
+        """A click inside a segment on the waveform: preview it and make it
+        the current item — what the drill-down table did until it left the
+        Attributes tab (2026-09-08)."""
+        seg = next((s for s in self._segment_rows if s.id == segment_id), None)
+        if seg is None:
             return
-        seg = self._segments.row_at(current)
         try:
             self._current = self._render(seg.id)
         except (ValueError, LookupError, OSError) as exc:
@@ -686,12 +723,6 @@ class MainWindow(QMainWindow):
         vector = load_vector(self._conn, kind, item_id)
         self._attributes.show_vector(vector, self._anchor_vector)
         self._header_strip.show_vectors(vector, self._anchor_vector)
-
-    def _select_segment_row(self, segment_id: int) -> None:
-        """A click inside a segment on the waveform selects it in the table."""
-        row = self._segments.index_of(segment_id)
-        if row is not None:
-            self._segment_table.selectRow(row)
 
     def _seek(self, position_ms: int) -> None:
         """A click on the waveform outside any segment seeks the sample."""
@@ -889,7 +920,7 @@ class MainWindow(QMainWindow):
         if self._anchor is None or self._axis is None:
             self.statusBar().showMessage("ranking needs an anchor (⚓)")
             return
-        weights = self._attributes.weights()
+        weights = self._search_panel.weights()
         if not any(weights.values()):
             self.statusBar().showMessage(
                 "ranking needs at least one weight above zero (Attributes tab)"
@@ -996,7 +1027,7 @@ class MainWindow(QMainWindow):
                 f"layout #{info.id}: {len(ids)} samples · {info.scope_description} · "
                 f"{info.reducer} · {info.computed_at[:16].replace('T', ' ')}"
             )
-            bars = {k: round(v, 2) for k, v in self._attributes.weights().items()}
+            bars = {k: round(v, 2) for k, v in self._search_panel.weights().items()}
             if {k: round(v, 2) for k, v in info.weights.items()} != bars:
                 caption += " · fit under other weights than the bars show"
         self._map.set_caption(caption)
@@ -1089,7 +1120,7 @@ class MainWindow(QMainWindow):
                 lambda conn, _stop: place_anchor(conn, kind, item_id),
             )
             return True
-        weights = self._attributes.weights()
+        weights = self._search_panel.weights()
         if not any(weights.values()):
             self.statusBar().showMessage(
                 "a layout needs at least one weight above zero (Attributes tab)"
