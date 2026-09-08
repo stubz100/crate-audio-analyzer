@@ -1192,7 +1192,7 @@ The user: the tags, CLAP scores and CLAP embedding groups leave the Attributes t
 
 ## 2026-09-08 — Every section under its sample; Folder first, a Caption column; a bigger play icon
 
-**Phase:** 7 polish (the list) · `SECTIONS_HASH`
+**Phase:** 7 polish (the list) · `55b9a99`
 
 The user: the play icon twice as big; a sample should keep all its sections underneath it, and a ranking should order them under the sample by descending similarity; the Folder column to the far left, the Qwen2-Audio caption in its old place.
 
