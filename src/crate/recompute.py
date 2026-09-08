@@ -12,12 +12,16 @@ Recompute; off = dormant, rows kept). *Add folder* scans a folder in,
 *Remove folder* deletes its samples from the index (asked first), *Rescan*
 walks the folders in scope.
 
-**Recompute** — the two things worth a job, as ticked steps run in order by
-one *Run*: **Attributes** (analysis, segmentation, CLAP embedding — the
-expensive stage, with its settings below) and **Map layout** (the
-projection, whole scope or the anchor alone). *Stop* ends the current step
-after its current file and drops the rest. Ranking is not here: the ⚓ on a
-list row ranks at once and the weight bars re-rank on release (2026-09-08).
+**Recompute** — the things worth a job, as ticked steps run in order by one
+*Run*: **Attributes** (analysis, segmentation, CLAP embedding — the
+expensive stage, with its settings below), **Map layout** (the projection,
+whole scope or the anchor alone) and **Captions** (one Qwen2-Audio sentence
+per sample in scope that has none — ~10 s a file, so it runs in parts: at
+most N files per Run, the next Run continues; the Attributes tab's *Caption
+this sample* button does one file through the same job). *Stop* ends the
+current step after its current file and drops the rest. Ranking is not
+here: the ⚓ on a list row ranks at once and the weight bars re-rank on
+release (2026-09-08).
 
 The work runs on a `QThread` with its own SQLite connection — one process
 (§10); WAL lets the window keep reading meanwhile (`db.open_db`). Progress is
@@ -66,7 +70,7 @@ from .config import DEFAULT_LIBRARY_PATH
 from .db import open_db
 from .embedding import EmbedSettings, Encoder
 from .jobs import RecomputeSettings, recompute_attributes
-from .qwen_audio import Captioner
+from .qwen_audio import Captioner, QwenAudio, caption_pending
 from .library import (
     add_library,
     is_inside,
@@ -111,10 +115,11 @@ class RunPlan:
 
     attributes: bool = False
     layout: str | None = None    # "library" (re-fit over the scope) | "anchored" (place the anchor)
+    captions: int | None = None  # None = not ticked; 0 = every sample in scope without one; N = at most N
 
     @property
     def empty(self) -> bool:
-        return not (self.attributes or self.layout)
+        return not (self.attributes or self.layout or self.captions is not None)
 
 
 class _LogRelay(QObject):
@@ -215,6 +220,7 @@ class RecomputePanel(QWidget):
         self._settings = settings
         self._encoder_factory = encoder_factory
         self._captioner_factory = captioner_factory
+        self._captioner_instance: Captioner | None = None   # loaded once, kept: 16 GB memory-mapped
         self._thread: JobThread | None = None
         self._anchor_available = False
         self._refreshing = False
@@ -297,6 +303,17 @@ class RecomputePanel(QWidget):
         self._anchor_note = QLabel("")
         self._anchor_note.setObjectName("caption")
         self._anchor_note.setWordWrap(True)
+        self._step_captions = QCheckBox("Captions")
+        self._step_captions.setChecked(v(_KEY + "step_captions", False, type=bool))
+        self._caption_batch = QSpinBox()
+        self._caption_batch.setRange(0, 100_000)
+        self._caption_batch.setSpecialValueText("all")
+        self._caption_batch.setSuffix(" files per Run")
+        self._caption_batch.setValue(v(_KEY + "caption_batch", 100, type=int))
+        self._caption_batch.setToolTip(
+            "How many samples one Run captions before it stops; the next Run carries on with "
+            "the ones still without a sentence. 0 = all of them in one go."
+        )
 
         steps = QVBoxLayout()
         steps.setSpacing(2)
@@ -313,9 +330,15 @@ class RecomputePanel(QWidget):
             [self._layout_library, self._layout_anchored],
         ))
         steps.addWidget(self._anchor_note)
+        steps.addLayout(_step(
+            self._step_captions,
+            "one Qwen2-Audio sentence per sample in scope that has none (§5.2) — about 10 s a "
+            "file, measured 2026-09-08; run in parts, a batch per Run",
+            [self._caption_batch],
+        ))
 
         self._run_button = QPushButton("Run")
-        self._run_button.setToolTip("Run the ticked steps, in order: Attributes → Map layout.")
+        self._run_button.setToolTip("Run the ticked steps, in order: Attributes → Map layout → Captions.")
         self._run_button.clicked.connect(self.run)
         self._stop_button = QPushButton("Stop")
         self._stop_button.setEnabled(False)
@@ -387,14 +410,6 @@ class RecomputePanel(QWidget):
             "Worker processes for analysis and segmentation (this machine has "
             f"{os.cpu_count() or 1} cores). Embedding uses the model's own threads."
         )
-        self._qwen = QCheckBox()
-        self._qwen.setChecked(v(_KEY + "captions", False, type=bool))
-        self._qwen.setToolTip(
-            "Qwen2-Audio writes one sentence per sample in scope that has none (§5.2). Measured "
-            "2026-09-08 on this machine: about 10 s per file (6–20 s), so a few hundred files an "
-            "hour — for a folder in scope, not the library (12 days). Needs the ml extra and the "
-            "16 GB checkpoint; runs after embedding."
-        )
 
         form = QFormLayout()
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -409,7 +424,6 @@ class RecomputePanel(QWidget):
         form.addRow("Max segments per sample", self._max_segments)
         form.addRow("One-shot max duration", _pair(self._one_shot_cap, self._one_shot_seconds))
         form.addRow("Worker processes", self._workers)
-        form.addRow("Qwen2-Audio captioning", self._qwen)
         settings_label = QLabel("Settings for the Attributes step")
         settings_label.setObjectName("caption")
 
@@ -494,7 +508,8 @@ class RecomputePanel(QWidget):
         layout = None
         if self._step_layout.isChecked():
             layout = "anchored" if self._layout_anchored.isChecked() and self._anchor_available else "library"
-        return RunPlan(self._step_attributes.isChecked(), layout)
+        captions = self._caption_batch.value() if self._step_captions.isChecked() else None
+        return RunPlan(self._step_attributes.isChecked(), layout, captions)
 
     def collect_settings(self) -> RecomputeSettings:
         """The controls as one settings object; raises ValueError on a
@@ -519,7 +534,6 @@ class RecomputePanel(QWidget):
             force_full=self._force_full.isChecked(),
             one_shot_max_duration_s=cap,
             workers=self._workers.value(),
-            captions=self._qwen.isChecked(),
             segmentation=segmentation,
             embedding=embedding,
         )
@@ -543,7 +557,8 @@ class RecomputePanel(QWidget):
         s(_KEY + "one_shot_cap", self._one_shot_cap.isChecked())
         s(_KEY + "one_shot_max_duration_s", self._one_shot_seconds.value())
         s(_KEY + "workers", self._workers.value())
-        s(_KEY + "captions", self._qwen.isChecked())
+        s(_KEY + "step_captions", self._step_captions.isChecked())
+        s(_KEY + "caption_batch", self._caption_batch.value())
 
     # --- the folder list ---
 
@@ -660,7 +675,7 @@ class RecomputePanel(QWidget):
         """Run: hand the ticked steps to the window, which runs them in order."""
         plan = self.plan()
         if plan.empty:
-            self._append_log("tick at least one step: Attributes or Map layout")
+            self._append_log("tick at least one step: Attributes, Map layout or Captions")
             return
         if self.running:
             self._append_log("a job is already running")
@@ -684,12 +699,49 @@ class RecomputePanel(QWidget):
             return False
         self.save_settings()
         encoder = self._encoder_factory(settings.embedding) if self._encoder_factory else None
-        captioner = self._captioner_factory() if (self._captioner_factory and settings.captions) else None
         self._start(
             "recompute attributes",
             lambda conn, stop: recompute_attributes(
-                conn, settings, should_stop=stop, encoder=encoder, captioner=captioner
+                conn, settings, should_stop=stop, encoder=encoder
             ),
+        )
+        return True
+
+    def _captioner(self) -> Captioner:
+        if self._captioner_instance is None:
+            self._captioner_instance = self._captioner_factory() if self._captioner_factory else QwenAudio()
+        return self._captioner_instance
+
+    def run_captions(self, limit: int = 0) -> bool:
+        """The Captions step: at most `limit` samples in scope without a
+        sentence (0 = all). False (with a log line) if nothing started."""
+        scope = tuple(self.scope_folders())
+        if not scope:
+            self._append_log("nothing in scope: tick a folder (or add one) before captioning")
+            return False
+        if self.running:
+            self._append_log("a job is already running")
+            return False
+        self.save_settings()
+        captioner = self._captioner()
+        self._start(
+            f"captions ({limit or 'all'} per run)",
+            lambda conn, stop: caption_pending(
+                conn, captioner, limit=limit or None, scope=scope, should_stop=stop
+            ),
+        )
+        return True
+
+    def caption_sample(self, sample_id: int, name: str = "") -> bool:
+        """The Attributes tab's *Caption this sample*: one file, written or
+        rewritten, through the same job machinery (log, Stop, reload)."""
+        if self.running:
+            self._append_log("a job is already running")
+            return False
+        captioner = self._captioner()
+        self._start(
+            f"caption {name or sample_id}",
+            lambda conn, _stop: caption_pending(conn, captioner, recaption=True, sample_ids=[sample_id]),
         )
         return True
 

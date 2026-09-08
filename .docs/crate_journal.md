@@ -956,3 +956,25 @@ The user: the right panel's width became variable — every click on a sample re
 **Next**
 
 - Anchored-only Recompute attributes (the rest of Phase 8); Phase 9's marker editing; Phase 10 (Bitwig: reveal, crate export).
+
+## 2026-09-08 — Captions in parts and per sample; a Search tab
+
+**Phase:** 5 / 7 (captioning made usable; the right panel re-cut) · SPLIT_HASH
+
+The user: captioning is laborious — do it in parts, and for a single sample; and the Attributes tab is crammed — move everything search-related to a third tab.
+
+**Done**
+
+- **Captions as their own step** under Run (`recompute.py`): *Captions* with a *files per Run* batch (default 100, 0 = all) — each Run captions that many samples in scope without a sentence, the next Run continues; `RunPlan.captions`; the window's plan runs it after Attributes and Map layout (`run_captions`). The toggle inside the Attributes settings, and the captions stage inside `recompute_attributes`, are gone again (one way, not two). The model instance is created once by the panel and kept across jobs (16 GB memory-mapped; a job thread reuses it).
+- **Caption this sample**: a button next to the sentence on the Attributes tab (`caption_requested`) → `RecomputePanel.caption_sample` → `caption_pending(sample_ids=[…], recaption=True)` as a job, so it shares the log and Stop; a hit's parent is captioned. `caption_pending` gained `sample_ids`.
+- **A reload keeps the selection**: `reload()` re-selects the sample that was current (a hit's parent) without replaying the preview (`_quiet_select`), so the sentence appears in place after the job — and any recompute stops throwing the selection away.
+- **The Search tab** (`search.py`): the CLAP text search box with Clear, and the filters — type, minimum CLAP scores, length, tempo, the anchor-distance ranges (unlocked by an anchor). **Attributes** keeps the difference bars, the chips (a click hands the tag to the Search tab's box and searches), the caption and its button, the CLAP scores, the stripes, the segments and the weights.
+
+**Verified**
+
+- `uv run pytest tests -q` → **185 passed, 3 skipped**; pyflakes clean. New: a Run with Captions ticked at one file per Run captions one, then the other, then is idle, on one model instance; the button rewrites the selected sample only and leaves the other untouched; the selection survives the reload; `sample_ids` on the stage; the settings round trip persists the step and its batch; every search and filter test now drives the Search tab.
+- Offscreen on the user's index: the three tabs, the caption and its button on Attributes, the box and filters on Search, the Captions step on Recompute.
+
+**Next**
+
+- Captions as a search channel (CLAP's text encoder against the sentences — measured complementary to the audio vectors); anchored-only Recompute attributes; Phase 9's marker editing.

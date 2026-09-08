@@ -1,18 +1,17 @@
-"""The Attributes tab (spec §9.5, Phase 7; reshaped 2026-09-07 on the
-user's steer).
+"""The Attributes tab (spec §9.5, Phase 7; reshaped 2026-09-07 and again
+2026-09-08 on the user's steer): everything about the **selected** sample.
 
-What the user wants to see first is how the **selected** sample differs
-from the **anchor**, axis by axis — so that is the top block: read-only
-bars, in % of the library's spread, with a tooltip on every axis saying what
-it measures. Then the CLAP search with the selected sample's chips, the
-selected sample's **segments** (moved here from the bottom panel, which now
-shows the waveform), the filters, and — last, because they only matter when
-you press Recompute — the **weights** for the next ranking or map layout.
-Weight (blend importance) and range (hard cutoff) stay separate controls on
-the same axis.
+Top: how it differs from the **anchor**, axis by axis — read-only bars in %
+of the library's spread, a tooltip on every axis saying what it measures.
+Then its CLAP chips (click one to search), its Qwen2-Audio caption with a
+button to write one, its four CLAP scores, its embedding as stripes, its
+**segments**, and — last — the **weights** that re-rank the anchored list.
+The search box and every filter live on the Search tab (`search.py`) since
+2026-09-08. Weight (blend importance) and range (hard cutoff) stay
+separate controls on the same axis, on different tabs.
 
 The panel owns no data: it emits what the user asked for and the window
-applies it. Weights persist (§9.4); filters are view state.
+applies it. Weights persist (§9.4).
 """
 
 from __future__ import annotations
@@ -21,25 +20,19 @@ from collections.abc import Mapping
 
 from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QDoubleSpinBox,
-    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLayout,
-    QLineEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from .catalog import Criteria
 from .embedding import CLASS_PROMPTS, CONTENT_CLASSES, TAG_PROMPT
 from .similarity import AXES, AXIS_LABELS
 from .theme import SqueezableWidget
@@ -72,23 +65,11 @@ CLAP_CAPTION = (
 
 def _prompts_text(name: str) -> str:
     return "Best of these prompts:\n" + "\n".join(f"• {p}" for p in CLASS_PROMPTS[name])
-TYPE_HELP = (
-    "Facet B (spec §4), from the audio itself: one-shot = one dominant onset (up to the "
-    "one-shot max duration), loop = a whole number of beats at a detectable tempo, "
-    "multi-hit = everything else with several transients."
-)
-
-TYPE_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("One-shot", "one-shot"),
-    ("Multi-hit", "multi-hit"),
-    ("Loop", "loop"),
-)
 
 
 class AttributesPanel(QWidget):
-    search_requested = Signal(str)
-    search_cleared = Signal()
-    criteria_changed = Signal(object)   # a Criteria
+    search_requested = Signal(str)      # a chip was clicked: search for its tag
+    caption_requested = Signal()        # "Caption this sample"
     weights_changed = Signal(object)    # {axis: 0..1}
 
     def __init__(self, settings: QSettings, parent=None) -> None:
@@ -119,23 +100,10 @@ class AttributesPanel(QWidget):
         diff_layout.setColumnStretch(1, 1)
         self.show_difference(None, None, None)
 
-        # (2) free-text search + the selected sample's chips
-        search_group = QGroupBox("Search")
+        # (2) the selected sample's chips and its caption
+        search_group = QGroupBox("Tags and caption of the selected sample")
         search_layout = QVBoxLayout(search_group)
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("Describe a sound… (CLAP text search)")
-        self._search.setClearButtonEnabled(True)
-        self._search.returnPressed.connect(self._emit_search)
-        self._search_button = QPushButton("Search")
-        self._search_button.clicked.connect(self._emit_search)
-        clear_button = QPushButton("Clear")
-        clear_button.clicked.connect(self._clear_search)
-        search_row = QHBoxLayout()
-        search_row.addWidget(self._search, stretch=1)
-        search_row.addWidget(self._search_button)
-        search_row.addWidget(clear_button)
-        search_layout.addLayout(search_row)
-        self._tags_label = QLabel("Tags of the selected sample (CLAP zero-shot; click one to search):")
+        self._tags_label = QLabel("CLAP zero-shot chips — click one to search for it (Search tab):")
         self._tags_label.setWordWrap(True)
         self._tags_grid = QGridLayout()
         self._tags_grid.setHorizontalSpacing(4)
@@ -147,10 +115,21 @@ class AttributesPanel(QWidget):
         self._caption_label.setWordWrap(True)
         self._caption_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._caption_label.setToolTip(
-            "One sentence from Qwen2-Audio (§5.2) — written by the Recompute tab's "
-            "Qwen2-Audio captioning toggle, about 10 s per file."
+            "One sentence from Qwen2-Audio (§5.2) — written by the Recompute tab's Captions "
+            "step (a batch per Run) or by the button next to it (this sample only), about "
+            "10 s per file."
         )
-        search_layout.addWidget(self._caption_label)
+        self._caption_button = QPushButton("Caption this sample")
+        self._caption_button.setToolTip(
+            "Write (or rewrite) this sample's Qwen2-Audio sentence now — about 10 s, plus a few "
+            "seconds the first time while the model loads. Runs as a job on the Recompute tab."
+        )
+        self._caption_button.setEnabled(False)
+        self._caption_button.clicked.connect(self.caption_requested.emit)
+        caption_row = QHBoxLayout()
+        caption_row.addWidget(self._caption_label, stretch=1)
+        caption_row.addWidget(self._caption_button, alignment=Qt.AlignmentFlag.AlignTop)
+        search_layout.addLayout(caption_row)
 
         # (2b) CLAP's numbers for the selected sample — the four prompt sets
         clap_group = QGroupBox("CLAP scores of the selected sample")
@@ -193,56 +172,6 @@ class AttributesPanel(QWidget):
             "auto or manual. Select one to preview it; drag one into Bitwig."
         )
 
-        # (4) filters
-        filters_group = QGroupBox("Filters")
-        filters_layout = QVBoxLayout(filters_group)
-        self._type_boxes: dict[str, QCheckBox] = {}
-        filters_layout.addLayout(self._checkbox_grid("Type", TYPE_HELP, TYPE_OPTIONS, self._type_boxes))
-        self._clap_min: dict[str, QSpinBox] = {}
-        clap_row = QGridLayout()
-        clap_label = QLabel("CLAP score at least:")
-        clap_label.setToolTip(CLASS_HELP)
-        clap_row.addWidget(clap_label, 0, 0, 1, 4)
-        for n, name in enumerate(CONTENT_CLASSES):
-            box = self._percent_box(0)
-            box.setSpecialValueText("any")
-            box.setToolTip(_prompts_text(name))
-            clap_row.addWidget(QLabel(name.capitalize()), 1 + n // 2, 2 * (n % 2))
-            clap_row.addWidget(box, 1 + n // 2, 1 + 2 * (n % 2))
-            self._clap_min[name] = box
-        clap_row.setColumnStretch(4, 1)
-        filters_layout.addLayout(clap_row)
-
-        absolute = QFormLayout()
-        absolute.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self._duration_min = self._seconds_box()
-        self._duration_max = self._seconds_box()
-        absolute.addRow("Length (s)", _pair(self._duration_min, self._duration_max))
-        self._tempo_min = self._bpm_box()
-        self._tempo_max = self._bpm_box()
-        absolute.addRow("Tempo (BPM)", _pair(self._tempo_min, self._tempo_max))
-        filters_layout.addLayout(absolute)
-
-        self._ranges_group = QGroupBox("Distance from the anchor (% of spread)")
-        ranges_layout = QGridLayout(self._ranges_group)
-        self._range_min: dict[str, QSpinBox] = {}
-        self._range_max: dict[str, QSpinBox] = {}
-        for row, axis in enumerate(AXES):
-            low = self._percent_box(0)
-            high = self._percent_box(100)
-            label = QLabel(AXIS_LABELS[axis])
-            label.setToolTip(AXIS_HELP[axis])
-            ranges_layout.addWidget(label, row, 0)
-            ranges_layout.addWidget(low, row, 1)
-            ranges_layout.addWidget(QLabel("to"), row, 2)
-            ranges_layout.addWidget(high, row, 3)
-            self._range_min[axis] = low
-            self._range_max[axis] = high
-        ranges_layout.setColumnStretch(4, 1)
-        self._ranges_group.setEnabled(False)
-        self._ranges_group.setToolTip("Pin an anchor (⚓) to unlock these: a hard cutoff per axis.")
-        filters_layout.addWidget(self._ranges_group)
-
         # (5) weights — for the next Recompute ranking / map layout only
         weights_group = QGroupBox("Weights — the list re-ranks as you move them")
         weights_group.setToolTip(
@@ -280,7 +209,6 @@ class AttributesPanel(QWidget):
         controls_layout.addWidget(clap_group)
         controls_layout.addWidget(strip_group)
         controls_layout.addWidget(self._segments_group)
-        controls_layout.addWidget(filters_group)
         controls_layout.addWidget(weights_group)
         controls_layout.addStretch(1)
         scroll = QScrollArea()
@@ -294,50 +222,6 @@ class AttributesPanel(QWidget):
 
     # --- widgets ---
 
-    def _checkbox_grid(self, title: str, help_text: str, options, boxes: dict, per_row: int = 3) -> QGridLayout:
-        """A labelled row of checkboxes that wraps — a single row of five
-        was what pushed the panel past its pane (2026-09-07)."""
-        grid = QGridLayout()
-        label = QLabel(title + ":")
-        label.setToolTip(help_text)
-        grid.addWidget(label, 0, 0)
-        for n, (text, key) in enumerate(options):
-            box = QCheckBox(text)
-            box.setChecked(True)
-            box.setToolTip(help_text)
-            box.toggled.connect(self._emit_criteria)
-            grid.addWidget(box, n // per_row, 1 + n % per_row)
-            boxes[key] = box
-        grid.setColumnStretch(per_row + 1, 1)
-        return grid
-
-    def _seconds_box(self) -> QDoubleSpinBox:
-        box = QDoubleSpinBox()
-        box.setRange(0.0, 9_999.99)
-        box.setDecimals(2)
-        box.setSingleStep(0.1)
-        box.setSpecialValueText("any")
-        box.setMaximumWidth(84)
-        box.valueChanged.connect(self._emit_criteria)
-        return box
-
-    def _bpm_box(self) -> QSpinBox:
-        box = QSpinBox()
-        box.setRange(0, 1000)
-        box.setSpecialValueText("any")
-        box.setMaximumWidth(72)
-        box.valueChanged.connect(self._emit_criteria)
-        return box
-
-    def _percent_box(self, value: int) -> QSpinBox:
-        box = QSpinBox()
-        box.setRange(0, 100)
-        box.setSuffix(" %")
-        box.setValue(value)
-        box.setMaximumWidth(68)
-        box.valueChanged.connect(self._emit_criteria)
-        return box
-
     def host_segments(self, widget: QWidget) -> None:
         """The window's segments table lives in this tab (§6.4 drill-down)."""
         widget.setMinimumHeight(120)
@@ -348,35 +232,6 @@ class AttributesPanel(QWidget):
     def weights(self) -> dict[str, float]:
         return {axis: slider.value() / 100.0 for axis, slider in self._weight_sliders.items()}
 
-    def criteria(self) -> Criteria:
-        types = frozenset(k for k, box in self._type_boxes.items() if box.isChecked())
-        clap_min = tuple(
-            (name, box.value() / 100.0) for name, box in self._clap_min.items() if box.value() > 0
-        )
-        ranges: list[tuple[str, float, float]] = []
-        if self._ranges_group.isEnabled():
-            for axis in AXES:
-                low = self._range_min[axis].value()
-                high = self._range_max[axis].value()
-                if (low, high) != (0, 100):
-                    ranges.append((axis, low / 100.0, high / 100.0))
-        return Criteria(
-            types=None if len(types) == len(self._type_boxes) else types,
-            clap_min=clap_min,
-            duration_s=(
-                self._duration_min.value() or None,
-                self._duration_max.value() or None,
-            ),
-            tempo_bpm=(
-                float(self._tempo_min.value()) or None,
-                float(self._tempo_max.value()) or None,
-            ),
-            axis_ranges=tuple(ranges),
-        )
-
-    def search_text(self) -> str:
-        return self._search.text().strip()
-
     def difference_values(self) -> dict[str, int | None]:
         """What the difference bars show (tests read this)."""
         return {
@@ -385,10 +240,6 @@ class AttributesPanel(QWidget):
         }
 
     # --- state in ---
-
-    def set_anchor_state(self, has_anchor: bool) -> None:
-        self._ranges_group.setEnabled(has_anchor)
-        self._emit_criteria()
 
     def show_difference(
         self,
@@ -448,15 +299,18 @@ class AttributesPanel(QWidget):
             self._tags_grid.addWidget(button, n // 3, n % 3)   # three per row: the row wraps
             self._tag_buttons.append(button)
 
-    def show_caption(self, text: str | None) -> None:
+    def show_caption(self, text: str | None, can_caption: bool = True) -> None:
         self._caption_label.setText(
             f"Qwen2-Audio: {text}" if text
-            else "no caption — Recompute tab → Qwen2-Audio captioning (opt-in, about 10 s per file)"
+            else "no caption yet — the button writes one for this sample; the Recompute tab's "
+                 "Captions step does a batch"
         )
+        self._caption_button.setText("Recaption" if text else "Caption this sample")
+        self._caption_button.setEnabled(can_caption)
 
     def search_for(self, text: str) -> None:
-        self._search.setText(text)
-        self._emit_search()
+        """A chip: hand the tag to the Search tab (the window routes it)."""
+        self.search_requested.emit(text)
 
     # --- plumbing ---
 
@@ -465,25 +319,4 @@ class AttributesPanel(QWidget):
         self._settings.setValue(_KEY_WEIGHT + axis, value)
         self.weights_changed.emit(self.weights())
 
-    def _emit_search(self) -> None:
-        text = self.search_text()
-        if text:
-            self.search_requested.emit(text)
 
-    def _clear_search(self) -> None:
-        self._search.clear()
-        self.search_cleared.emit()
-
-    def _emit_criteria(self, *_args) -> None:
-        self.criteria_changed.emit(self.criteria())
-
-
-def _pair(left: QWidget, right: QWidget) -> QWidget:
-    box = QWidget()
-    row = QHBoxLayout(box)
-    row.setContentsMargins(0, 0, 0, 0)
-    row.addWidget(left)
-    row.addWidget(QLabel("to"))
-    row.addWidget(right)
-    row.addStretch(1)
-    return box

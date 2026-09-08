@@ -217,7 +217,7 @@ def test_text_search_scores_the_list_and_nests_a_sub_hit(app, index, tmp_path):
     window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
     try:
         window._autoplay.setChecked(False)
-        window._attributes.search_for("kick drum")
+        window._search_panel.search_for("kick drum")
         assert window._search_thread is not None                # embedding runs off the GUI thread
         _wait_until(app, lambda: window._search_thread is None and window._samples.has_match)
 
@@ -247,12 +247,12 @@ def test_text_search_scores_the_list_and_nests_a_sub_hit(app, index, tmp_path):
         # The parent inherits its best hit's score for sorting.
         assert window._proxy.data(window._proxy.index(_proxy_row_named(window, "loop.wav"), SampleTreeModel.COL_MATCH)) == "100"
 
-        window._attributes.search_for("kick drum")             # a second query while one is in flight
-        window._attributes.search_for("a synth pad")            # ... is replaced by the newest
+        window._search_panel.search_for("kick drum")             # a second query while one is in flight
+        window._search_panel.search_for("a synth pad")            # ... is replaced by the newest
         _wait_until(app, lambda: window._search_thread is None and "synth pad" in window.statusBar().currentMessage())
         assert window._proxy.data(window._proxy.index(0, 0)) == "loop.wav"
 
-        window._attributes._clear_search()
+        window._search_panel._clear_search()
         assert window._table.isColumnHidden(SampleTreeModel.COL_MATCH)
         assert window._proxy.rowCount(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)) == 0
     finally:
@@ -267,7 +267,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
     window = MainWindow(db_path=db, cache_dir=cache, settings=settings, encoder_factory=_encoder)
     try:
         window._autoplay.setChecked(False)
-        assert not window._attributes._ranges_group.isEnabled()
+        assert not window._search_panel._ranges_group.isEnabled()
         assert not window._recompute._layout_anchored.isEnabled()
 
         for slider in window._attributes._weight_sliders.values():
@@ -278,7 +278,7 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         assert window._anchor_label.text().endswith("loop.wav")
         assert window._samples.anchor == ("sample", window._rows_by_id and next(
             r.id for r in window._rows_by_id.values() if r.filename == "loop.wav"))
-        assert window._attributes._ranges_group.isEnabled()
+        assert window._search_panel._ranges_group.isEnabled()
         assert window._recompute._layout_anchored.isEnabled()
         assert "loop.wav" in window._recompute._anchor_note.text()
         assert "weight" in window.statusBar().currentMessage()        # … but nothing to blend: told
@@ -312,9 +312,9 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
         assert window._map.scored                                       # coloured by the ranking
 
         # A narrowed axis range now filters on the anchor distances (§9.5).
-        window._attributes._range_max["conceptual"].setValue(10)
+        window._search_panel._range_max["conceptual"].setValue(10)
         assert window._proxy.rowCount() == 1                       # hit.wav is far in CLAP space
-        window._attributes._range_max["conceptual"].setValue(100)
+        window._search_panel._range_max["conceptual"].setValue(100)
         assert window._proxy.rowCount() == 2
 
         settings.sync()
@@ -328,10 +328,10 @@ def test_anchor_unlocks_ranges_and_ranking_and_persists(app, index, tmp_path):
     try:
         _wait_until(app, lambda: again._feature_thread is None and not again._feature_waiters)
         assert again._anchor is not None and again._anchor_label.text().endswith("loop.wav")
-        assert again._attributes._ranges_group.isEnabled()
+        assert again._search_panel._ranges_group.isEnabled()
         assert not again._table.isColumnHidden(SampleTreeModel.COL_SIMILARITY)
         again._clear_anchor()
-        assert again._anchor is None and not again._attributes._ranges_group.isEnabled()
+        assert again._anchor is None and not again._search_panel._ranges_group.isEnabled()
     finally:
         again.close()
 
@@ -342,7 +342,7 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
     db, conn, cache = index
     window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path))
     try:
-        panel = window._attributes
+        panel = window._search_panel
         assert window._proxy.rowCount() == 2
 
         panel._type_boxes["one-shot"].setChecked(False)
@@ -364,7 +364,7 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
         # itself no longer carries them, 2026-09-08).
         window._autoplay.setChecked(False)
         window._table.setCurrentIndex(window._proxy.index(0, 0))
-        values = panel.clap_values()
+        values = window._attributes.clap_values()
         assert all(values[name] is not None for name in ("rhythmic", "melodic", "vocal", "other"))
         assert sum(values.values()) == pytest.approx(100, abs=3)
         assert "Rhythmic" not in SampleTreeModel.COLUMNS
@@ -373,8 +373,8 @@ def test_attribute_filters_apply_to_the_list(app, index, tmp_path):
         panel._clap_min["rhythmic"].setValue(0)
         assert window._proxy.rowCount() == 2
 
-        panel._weight_sliders["pitch"].setValue(30)
-        assert panel.weights()["pitch"] == pytest.approx(0.3)
+        window._attributes._weight_sliders["pitch"].setValue(30)
+        assert window._attributes.weights()["pitch"] == pytest.approx(0.3)
     finally:
         window.close()
 
@@ -485,6 +485,7 @@ def test_run_executes_the_ticked_steps_in_order(app, tmp_path):
 
         panel._step_attributes.setChecked(True)
         panel._step_layout.setChecked(True)
+        panel._step_captions.setChecked(False)
         panel._layout_anchored.setChecked(True)                     # no anchor: falls back to the re-fit
         assert not panel._layout_anchored.isEnabled()
         assert panel.plan() == RunPlan(attributes=True, layout="library")
@@ -522,7 +523,8 @@ def test_recompute_settings_round_trip_and_validation(app, tmp_path):
     panel._max_segments.setValue(8)
     panel._one_shot_cap.setChecked(False)
     panel._embed_segments.setChecked(False)
-    panel._qwen.setChecked(True)                                    # §5.2 captioning, opt-in
+    panel._step_captions.setChecked(True)                           # §5.2 captioning: a step, a batch per Run
+    panel._caption_batch.setValue(25)
     (tmp_path / "a_b").mkdir()
     add_library(panel._conn, tmp_path / "a_b")                    # the scope lives in the index
     panel.refresh_folders()
@@ -531,12 +533,13 @@ def test_recompute_settings_round_trip_and_validation(app, tmp_path):
     assert collected.force_full and collected.scope == (normalize(tmp_path / "a_b"),)
     assert collected.segmentation.sensitivity == 0.4 and collected.segmentation.max_segments == 8
     assert collected.one_shot_max_duration_s is None and not collected.embedding.embed_segments
-    assert collected.captions
+    assert panel.plan().captions == 25
 
     panel.save_settings()
     settings.sync()
     again = RecomputePanel(tmp_path / "index.db", _ini(tmp_path))
     assert again.collect_settings() == collected
+    assert again.plan().captions == 25                              # the step and its batch persist
 
     again._min_length.setValue(5.0)                               # min ≥ max: refused,
     again._max_length.setValue(1.0)                               # nothing starts
@@ -632,10 +635,10 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         assert window._current is not None and window._current.name == "loop.wav"
         assert window._map._selected == loop_id
 
-        window._attributes.search_for("kick drum")               # the loop's hit is a segment
+        window._search_panel.search_for("kick drum")               # the loop's hit is a segment
         _wait_until(app, lambda: window._search_thread is None and window._samples.has_match)
         assert loop_id in window._map._badges
-        window._attributes._clear_search()
+        window._search_panel._clear_search()
         assert loop_id not in window._map._badges
 
         _anchor_current(app, window)                              # the loop is current: anchored + ranked
@@ -684,7 +687,7 @@ def test_a_search_can_land_on_a_window_inside_a_long_file(app, tmp_path):
         window._autoplay.setChecked(False)
         assert "3 CLAP windows" in window.statusBar().currentMessage()
 
-        window._attributes.search_for("a door slam")
+        window._search_panel.search_for("a door slam")
         _wait_until(app, lambda: window._search_thread is None and "door slam" in window.statusBar().currentMessage())
         parent = window._proxy.index(_proxy_row_named(window, "ambience.wav"), 0)
         assert window._proxy.rowCount(parent) == 1
@@ -754,3 +757,58 @@ def test_long_names_do_not_move_the_panes_and_their_position_persists(app, index
         assert again._body.sizes() == dragged and again._panes.sizes() == panes
     finally:
         again.close()
+
+
+# --- captioning in parts and one sample at a time (2026-09-08) ---
+
+
+def test_captions_step_runs_in_batches_and_the_button_does_one_sample(app, index, tmp_path):
+    from test_qwen_audio import FakeCaptioner
+
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    fakes: list[FakeCaptioner] = []
+
+    def factory():
+        fakes.append(FakeCaptioner())
+        return fakes[-1]
+
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), captioner_factory=factory)
+    try:
+        window._autoplay.setChecked(False)
+        panel = window._recompute
+        assert window.findChild(type(window._search_panel)) is window._search_panel   # the third tab exists
+        panel._step_attributes.setChecked(False)
+        panel._step_layout.setChecked(False)
+        panel._step_captions.setChecked(True)
+        panel._caption_batch.setValue(1)
+        assert panel.plan() == RunPlan(captions=1)
+
+        panel.run()                                                 # one file this Run…
+        _wait_until(app, lambda: not panel.running and "captioned 1 samples" in panel.log_text())
+        panel.run()                                                 # …the other the next
+        _wait_until(app, lambda: not panel.running and panel.log_text().count("captioned 1 samples") == 2)
+        assert len(fakes) == 1 and fakes[0].calls == 2               # one model instance, kept
+        assert conn.execute(
+            "SELECT COUNT(*) FROM text_tags WHERE source_model = 'qwen2audio-caption'"
+        ).fetchone()[0] == 2
+        panel.run()                                                 # nothing left: idle
+        _wait_until(app, lambda: not panel.running and "captioned 0 samples" in panel.log_text())
+
+        window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
+        assert "a clip of 4.0 s" in window._attributes._caption_label.text()
+        assert window._attributes._caption_button.text() == "Recaption"
+        conn.execute("UPDATE text_tags SET tag_or_caption = 'stale words' WHERE source_model = 'qwen2audio-caption'")
+        conn.commit()
+        window._attributes._caption_button.click()                  # this sample only, rewritten
+        _wait_until(app, lambda: not panel.running and "caption loop.wav" in panel.log_text())
+        _wait_until(app, lambda: "a clip of 4.0 s" in window._attributes._caption_label.text())
+        assert fakes[0].calls == 3
+        assert window._current is not None and window._current.name == "loop.wav"   # the selection survived the reload
+        assert conn.execute(
+            "SELECT tag_or_caption FROM text_tags t JOIN samples s ON s.id = t.sample_id "
+            "WHERE s.filename = 'hit.wav' AND t.source_model = 'qwen2audio-caption'"
+        ).fetchone()[0] == "stale words"                            # the other one untouched
+    finally:
+        window.close()

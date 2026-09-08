@@ -273,6 +273,7 @@ def caption_pending(
     progress_every: int = 10,
     scope: Sequence[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    sample_ids: Sequence[int] | None = None,
 ) -> CaptionSummary:
     """One Qwen2-Audio sentence per sample that has none, or whose content
     changed since it was written (`text_tags`, `source_model` =
@@ -294,6 +295,10 @@ def caption_pending(
     params: list = [SOURCE_CAPTION]
     if not recaption:
         sql += " AND (t.id IS NULL OR t.created_at IS NULL OR s.content_changed_at > t.created_at)"
+    if sample_ids is not None:                      # "Caption this sample": these and nothing else
+        ids = [int(i) for i in sample_ids]
+        sql += f" AND s.id IN ({','.join('?' for _ in ids) or 'NULL'})"
+        params += ids
     scope_sql, scope_params = scope_clause(scope)
     sql += scope_sql + " GROUP BY s.id ORDER BY s.id"
     params += scope_params

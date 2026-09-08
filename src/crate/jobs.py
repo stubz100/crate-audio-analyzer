@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 
 from .analysis import ONE_SHOT_MAX_DURATION_S, AnalysisSummary, analyze_pending
 from .embedding import ClapEncoder, EmbedSettings, EmbedSummary, Encoder, embed_pending
-from .qwen_audio import CaptionSummary, Captioner, QwenAudio, caption_pending
 from .segmentation import SegmentationSettings, SegmentationSummary, segment_pending
 
 log = logging.getLogger(__name__)
@@ -32,7 +31,6 @@ class RecomputeSettings:
     force_full: bool = False             # "new/changed only" vs "force full re-index"
     one_shot_max_duration_s: float | None = ONE_SHOT_MAX_DURATION_S
     workers: int = 1                     # worker processes for analysis + segmentation (parallel.py)
-    captions: bool = False               # §5.2 Qwen2-Audio captioning: opt-in, ~10 s a file
     segmentation: SegmentationSettings = field(default_factory=SegmentationSettings)
     embedding: EmbedSettings = field(default_factory=EmbedSettings)
 
@@ -46,7 +44,6 @@ class RecomputeReport:
     analysis: AnalysisSummary | None = None
     segmentation: SegmentationSummary | None = None
     embedding: EmbedSummary | None = None
-    captions: CaptionSummary | None = None   # only when the toggle was on
     notes: list[str] = field(default_factory=list)
     stopped: bool = False
     elapsed_s: float = 0.0
@@ -58,8 +55,6 @@ class RecomputeReport:
             ("segmentation", self.segmentation),
             ("embedding", self.embedding),
         )
-        if self.captions is not None:
-            stages += (("captions", self.captions),)
         for name, summary in stages:
             if summary is None:
                 lines.append(f"[{name}] not run")
@@ -79,7 +74,6 @@ def recompute_attributes(
     should_stop: Callable[[], bool] | None = None,
     encoder: Encoder | None = None,
     progress_every: int = 25,
-    captioner: Captioner | None = None,
 ) -> RecomputeReport:
     """§9.6 *Recompute attributes*, library scope: the three stages in order
     over the files under `settings.scope`.
@@ -162,39 +156,7 @@ def recompute_attributes(
         log.debug("embedding stage failure", exc_info=True)
         report.notes.append(note)
         return _finish(report, started)
-    if report.embedding.stopped or not settings.captions:
-        return _finish(report, started, stopped=report.embedding.stopped)
-    return _caption_stage(conn, settings, report, started, scope, should_stop, captioner, progress_every)
-
-
-def _caption_stage(conn, settings, report, started, scope, should_stop, captioner, progress_every) -> RecomputeReport:
-    """§5.2's opt-in stage, after everything else: one sentence per sample
-    in scope without one. Its model stack missing, or failing to load, is a
-    note on the report, never a lost run."""
-    try:
-        report.captions = caption_pending(
-            conn,
-            captioner or QwenAudio(),
-            recaption=settings.force_full,
-            progress_every=progress_every,
-            scope=scope,
-            should_stop=should_stop,
-        )
-    except ImportError as exc:
-        note = (
-            f"captions skipped: the Qwen2-Audio model stack is not installed ({exc}); "
-            "run `uv sync --extra ml` (spec §12, Phase 5)"
-        )
-        log.warning(note)
-        report.notes.append(note)
-        return _finish(report, started)
-    except Exception as exc:  # noqa: BLE001 - a failed model load must not hide the stages that ran
-        note = f"caption stage failed ({type(exc).__name__}: {exc}); everything before it is kept"
-        log.warning(note)
-        log.debug("caption stage failure", exc_info=True)
-        report.notes.append(note)
-        return _finish(report, started)
-    return _finish(report, started, stopped=report.captions.stopped)
+    return _finish(report, started, stopped=report.embedding.stopped)
 
 
 def _finish(report: RecomputeReport, started: float, stopped: bool = False) -> RecomputeReport:

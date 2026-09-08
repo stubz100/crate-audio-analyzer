@@ -152,5 +152,8 @@ def test_caption_pending_writes_one_sentence_per_sample(tmp_path):
     stopped = caption_pending(conn, FakeCaptioner(), recaption=True, should_stop=lambda: True)
     assert stopped.stopped and stopped.captioned == 0
     assert caption_pending(conn, FakeCaptioner(), recaption=True, scope=[str(lib)], limit=1).captioned == 1
+    only = caption_pending(conn, FakeCaptioner(), recaption=True, sample_ids=[ids["b.wav"]])
+    assert only.captioned == 1                                                      # "Caption this sample"
+    assert caption_pending(conn, FakeCaptioner(), recaption=True, sample_ids=[]).captioned == 0
     assert load_caption(conn, 999_999) is None
     conn.close()

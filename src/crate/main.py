@@ -57,6 +57,7 @@ from .listmodel import AnchorDelegate, ListProxy, SampleTreeModel, SegmentTableM
 from .mapview import MapView
 from .library import scope_paths
 from .recompute import EncoderFactory, RecomputePanel, RunPlan
+from .search import SearchPanel
 from .render import default_cache_dir, render_segment
 from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable, Scores
 from .theme import ElidedLabel, apply_theme
@@ -220,6 +221,7 @@ class MainWindow(QMainWindow):
         self._axis = None
         self._axis_by_sample: dict[int, dict[str, float]] = {}
         self._close_pending = False
+        self._quiet_select = False                    # a reload re-selects without replaying
         self._plan_steps: list[tuple[str, str | None]] = []   # the Recompute tab's Run, step by step
         self._feature_thread: _FeatureThread | None = None
         self._feature_generation = 0                            # bumped by reload(): a table loaded before is stale
@@ -342,9 +344,12 @@ class MainWindow(QMainWindow):
         # --- right panel: Attributes (§9.5) and Recompute (§9.6) ---
         self._attributes = AttributesPanel(self._settings)
         self._attributes.host_segments(self._segment_table)
-        self._attributes.search_requested.connect(self._search)
-        self._attributes.search_cleared.connect(self._clear_search)
-        self._attributes.criteria_changed.connect(self._proxy.set_criteria)
+        self._search_panel = SearchPanel(self._settings)
+        self._search_panel.search_requested.connect(self._search)
+        self._search_panel.search_cleared.connect(self._clear_search)
+        self._search_panel.criteria_changed.connect(self._proxy.set_criteria)
+        self._attributes.search_requested.connect(self._search_panel.search_for)   # a chip → the Search tab's box
+        self._attributes.caption_requested.connect(self._caption_current)
         self._recompute = RecomputePanel(
             self._db_path, self._settings, encoder_factory, captioner_factory, parent=self
         )
@@ -353,7 +358,7 @@ class MainWindow(QMainWindow):
         self._recompute.scope_changed.connect(self.reload)
         self._recompute.run_requested.connect(self._run_plan)
         self._recompute.job_ended.connect(self._advance_plan)
-        self._attributes.criteria_changed.connect(self._sync_map_visibility)
+        self._search_panel.criteria_changed.connect(self._sync_map_visibility)
         # The weight bars re-rank the anchored list on release (2026-09-08, the
         # user's steer, after ranking measured at ~25 ms): a short debounce so a
         # drag ranks once, at its end, not per pixel.
@@ -364,6 +369,7 @@ class MainWindow(QMainWindow):
         self._attributes.weights_changed.connect(self._on_weights_changed)
         tabs = QTabWidget()
         tabs.addTab(self._attributes, "Attributes")
+        tabs.addTab(self._search_panel, "Search")
         tabs.addTab(self._recompute, "Recompute")
         tabs.setMinimumWidth(360)
 
@@ -394,6 +400,7 @@ class MainWindow(QMainWindow):
         are view state and start over; an anchor keeps its place and its
         distances are recomputed on the fresh features."""
         scope = scope_paths(self._conn)
+        keep = self._current_item                        # re-selected below, quietly
         rows = load_samples(self._conn, scope=scope)
         self._rows_by_id = {r.id: r for r in rows}
         self._source_row_of = {r.id: i for i, r in enumerate(rows)}
@@ -420,6 +427,15 @@ class MainWindow(QMainWindow):
             f"{counts['segments']} segments · {counts['windows']} CLAP windows · "
             f"{counts['embedded']} embedded · index: {self._db_path}"
         )
+        if keep is not None:
+            kind, item_id = keep
+            sample_id = item_id if kind == KIND_SAMPLE else self._parent_of_segment(item_id)
+            if sample_id in self._rows_by_id:
+                self._quiet_select = True
+                try:
+                    self._select_sample(sample_id)
+                finally:
+                    self._quiet_select = False
         if self._anchor is not None:
             self._anchor_and_rank(*self._anchor)         # an anchored list is a ranked list (§9.2)
 
@@ -530,7 +546,7 @@ class MainWindow(QMainWindow):
             self._now_playing.setText(row.filename)
         self._update_difference()
         self._show_vector()
-        if self._autoplay.isChecked():
+        if self._autoplay.isChecked() and not self._quiet_select:
             self._play_current()
 
     def _on_segment_selected(self, current, _previous) -> None:
@@ -620,6 +636,19 @@ class MainWindow(QMainWindow):
 
     # --- anchor (§9.2) and ranking (§9.6) ---
 
+    def _caption_current(self) -> None:
+        """The Attributes tab's button: caption the selected sample (a hit's
+        parent) as a job; the reload afterwards shows the sentence."""
+        if self._current_item is None:
+            self.statusBar().showMessage("select a sample first")
+            return
+        kind, item_id = self._current_item
+        sample_id = item_id if kind == KIND_SAMPLE else self._parent_of_segment(item_id)
+        if sample_id is None:
+            return
+        row = self._rows_by_id.get(sample_id)
+        self._recompute.caption_sample(sample_id, row.filename if row else "")
+
     def _on_weights_changed(self, _weights) -> None:
         if self._anchor is not None:
             self._rerank_timer.start()
@@ -681,7 +710,7 @@ class MainWindow(QMainWindow):
         self._anchor_label.setText(label)
         self._samples.set_anchor((kind, item_id))
         self._proxy.set_axis_lookup(self._axis_by_sample.get)
-        self._attributes.set_anchor_state(True)
+        self._search_panel.set_anchor_state(True)
         self._recompute.set_anchor_available(True, label)
         self._map.set_anchor(self._anchor_sample_id())
         self._anchor_vector = load_vector(self._conn, kind, item_id)
@@ -700,7 +729,7 @@ class MainWindow(QMainWindow):
         self._anchor_label.setText("no anchor")
         self._samples.set_anchor(None)
         self._proxy.set_axis_lookup(lambda _sample_id: None)
-        self._attributes.set_anchor_state(False)
+        self._search_panel.set_anchor_state(False)
         self._recompute.set_anchor_available(False)
         # The list keeps its order, its Similarity column and the map its halo
         # (2026-09-08, the user's steer): un-anchoring changes nothing but the anchor.
@@ -848,6 +877,10 @@ class MainWindow(QMainWindow):
     def _update_badges(self) -> None:
         self._map.set_badges(self._samples.hit_sample_ids())
 
+    def _parent_of_segment(self, segment_id: int) -> int | None:
+        row = self._conn.execute("SELECT sample_id FROM segments WHERE id = ?", (segment_id,)).fetchone()
+        return None if row is None else int(row[0])
+
     def _anchor_sample_id(self) -> int | None:
         if self._anchor is None:
             return None
@@ -879,6 +912,8 @@ class MainWindow(QMainWindow):
             steps.append(("attributes", None))
         if plan.layout:
             steps.append(("layout", plan.layout))
+        if plan.captions is not None:
+            steps.append(("captions", str(plan.captions)))
         self._plan_steps = steps
         self._advance_plan("", True)
 
@@ -897,6 +932,11 @@ class MainWindow(QMainWindow):
                 return
             if step == "layout":
                 if self._run_layout(option or "library"):
+                    return
+                self._plan_steps = []
+                return
+            if step == "captions":
+                if self._recompute.run_captions(int(option or 0)):
                     return
                 self._plan_steps = []
                 return
