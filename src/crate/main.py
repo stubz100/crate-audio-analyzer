@@ -73,7 +73,7 @@ APP_NAME = "Crate"
 SETTINGS_KEY_AUTOPLAY = "preview/autoplay"
 SETTINGS_KEY_ANCHOR_KIND = "anchor/kind"
 SETTINGS_KEY_ANCHOR_ID = "anchor/id"
-SETTINGS_KEY_SPLITTER = "window/splitter"   # list | right panel, as dragged
+SETTINGS_KEY_SPLITTER = "window/splitter2"  # list | right panel, as dragged (2: the 50/50 default of 2026-09-08 shows once)
 # What each list column's header popup edits (2026-09-08, `headerfilter.py`).
 COLUMN_SPECS = {
     0: ColumnSpec("text"),
@@ -87,7 +87,7 @@ COLUMN_SPECS = {
     SampleTreeModel.COL_SIMILARITY: ColumnSpec("range", "%", maximum=100, scale=100.0),
     SampleTreeModel.COL_MATCH: ColumnSpec("range", "%", maximum=100, scale=100.0),
 }
-SETTINGS_KEY_PANES = "window/panes"         # list | waveform, as dragged
+SETTINGS_KEY_PANES = "window/panes2"        # list | waveform, as dragged (2: as above)
 HALO_NEIGHBOURS = 20               # §9.3: nearest neighbours highlighted after a ranking
 # The model stack logs every HTTP request at INFO; that is noise on a
 # multi-hour run, not progress (same list as the CLI).
@@ -365,8 +365,9 @@ class MainWindow(QMainWindow):
         tables = QSplitter(Qt.Orientation.Vertical)
         tables.addWidget(self._views)
         tables.addWidget(self._waveform_panel)
-        tables.setStretchFactor(0, 4)
+        tables.setStretchFactor(0, 1)                # list and waveform half and half (2026-09-08, the user's steer)
         tables.setStretchFactor(1, 1)
+        tables.setSizes([450, 450])
         self._panes = tables
 
         # --- transport + anchor (§9.2, the minimal slice Phase 7 needs) ---
@@ -445,9 +446,9 @@ class MainWindow(QMainWindow):
         body = QSplitter(Qt.Orientation.Horizontal)
         body.addWidget(left)
         body.addWidget(tabs)
-        body.setStretchFactor(0, 3)
+        body.setStretchFactor(0, 1)                  # list and tabs half and half (2026-09-08, the user's steer)
         body.setStretchFactor(1, 1)
-        body.setSizes([840, 560])
+        body.setSizes([800, 800])
         self._body = body
         # The panes keep the size they were dragged to (2026-09-08, the user's
         # steer): the splitter states persist across restarts.

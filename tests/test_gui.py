@@ -734,6 +734,9 @@ def test_long_names_do_not_move_the_panes_and_their_position_persists(app, index
         app.processEvents()
         before = window._body.sizes()
         assert before[1] >= 360
+        assert abs(before[0] - before[1]) <= 8                              # half and half by default (2026-09-08)
+        panes = window._panes.sizes()
+        assert abs(panes[0] - panes[1]) <= 8
         window._now_playing.setText("Ambience Los Angeles Street Traffic Cars Pedestrians Dog Night Loop.wav" * 2)
         window._anchor_label.setText("window @ 2:20.000 (10 s) in Ambience Venice Canals Crowd Footsteps Loop.wav" * 2)
         app.processEvents()
@@ -745,8 +748,8 @@ def test_long_names_do_not_move_the_panes_and_their_position_persists(app, index
         # "Dragged" by hand — to a width above the left pane's own minimum (the
         # transport row's buttons; larger under the test's default font).
         left = window._body.widget(0)
-        target = max(900, left.minimumSizeHint().width() + 40)
-        assert target < before[0], (before, left.minimumSizeHint().width())
+        target = max(before[0] + 100, left.minimumSizeHint().width() + 40)   # away from the half-and-half default
+        assert target != before[0], (before, left.minimumSizeHint().width())
         window._body.setSizes([target, before[0] + before[1] - target])
         window._panes.setSizes([400, 200])
         app.processEvents()

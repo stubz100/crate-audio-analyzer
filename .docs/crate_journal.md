@@ -1126,3 +1126,22 @@ The user: "Segments of the selected sample" is not needed; the weights belong on
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-08 — Half-and-half splits by default
+
+**Phase:** 7 polish (the window) · `SPLIT_HASH`
+
+The user: the list and the waveform should split 50/50 vertically, and the list/waveform pane and the three tabs 50/50 horizontally, by default.
+
+**Done**
+
+- Both splitters (`main.py`) start with equal stretch and equal sizes; a dragged position still persists (§9.2's 2026-09-08 note). The settings keys are `window/splitter2` and `window/panes2`, so the new default shows once even where an older dragged position was saved — a drag after that is kept as before.
+
+**Verified**
+
+- `uv run pytest tests -q` → **199 passed, 3 skipped**; pyflakes clean — the panes test asserts both splits within 8 px of equal on a fresh settings file, then drags away from them and sees the drag survive a restart.
+- Offscreen on the user's index with fresh settings at 1600 × 900: list | tabs 798 | 798, list | waveform 362 | 362.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
