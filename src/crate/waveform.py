@@ -30,6 +30,11 @@ less crude look", "separate the playback from the graphics"):
 - The waveform body — peaks as a light fill, RMS as a brighter core, one
   column per device pixel — is rasterised once per view into a cached
   pixmap; a playhead tick only blits it and draws the overlays. All CPU:
+- A **spectral view** (2026-09-09, the user's steer) swaps the body for a
+  log-frequency spectrogram — one Hann-windowed FFT per pixel column over
+  the view, from the samples kept in memory, so its cost does not grow
+  with the file — drawn through the same cache, zoom and overlays; the
+  panel's *Spectrum* button toggles it and the window remembers the choice.
   Qt's antialiased raster engine is more than enough for a 2-D strip, and a
   GPU surface would add a driver dependency for no gain (CLAUDE.md).
 """
@@ -48,7 +53,7 @@ from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPai
 from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QPushButton, QScrollBar, QVBoxLayout, QWidget
 
 from .catalog import SegmentRow
-from .theme import ACCENT, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel, SqueezableWidget
+from .theme import ACCENT, ACCENT_DIM, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel, SqueezableWidget
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +72,10 @@ MIN_SEGMENT_MS = 1         # a marker never crosses its partner
 MIN_VIEW_SECONDS = 0.002   # the closest zoom: 2 ms across the plot
 ZOOM_STEP = 1.25           # per wheel notch
 PAN_FRACTION = 0.1         # of the view per wheel notch
+SPECTRUM_FLOOR_DB = -90.0  # the spectral view's black, below the loudest bin in view
+SPECTRUM_F_MIN = 30.0      # Hz, the bottom of the log-frequency axis
+MODE_WAVEFORM = "waveform"
+MODE_SPECTRUM = "spectrum"
 
 
 @dataclass
@@ -153,6 +162,57 @@ def peaks_for_view(env: Envelope, start_s: float, end_s: float, width_px: int):
     return mins, maxs, rms
 
 
+def spectrogram_image(env: Envelope, start_s: float, end_s: float, width: int, height: int) -> np.ndarray | None:
+    """An H × W × 3 uint8 image of the spectrum across [start_s, end_s]: one
+    Hann-windowed FFT per pixel column (the FFT length follows the zoom, 256
+    to 2048), magnitudes in dB below the loudest bin in view down to
+    SPECTRUM_FLOOR_DB, rows on a log-frequency axis from SPECTRUM_F_MIN to
+    the Nyquist frequency (top). None without samples in memory (a file
+    beyond KEEP_SAMPLES_SECONDS)."""
+    if env.samples is None or not env.sample_rate or not env.samples.size:
+        return None
+    if width <= 0 or height <= 0 or end_s <= start_s:
+        return None
+    y, sr = env.samples, env.sample_rate
+    hop = (end_s - start_s) * sr / width
+    n_fft = int(min(2048, max(256, 2 ** round(math.log2(max(hop * 8, 1.0))))))
+    centres = (start_s * sr + (np.arange(width) + 0.5) * hop).astype(np.int64)
+    idx = (centres - n_fft // 2)[:, None] + np.arange(n_fft)[None, :]
+    frames = np.where((idx >= 0) & (idx < y.size), y[np.clip(idx, 0, y.size - 1)], 0.0).astype(np.float32)
+    frames *= np.hanning(n_fft).astype(np.float32)
+    mags = np.abs(np.fft.rfft(frames, axis=1))                       # W × (n_fft // 2 + 1)
+    db = 20.0 * np.log10(mags + 1e-9)
+    db -= float(db.max())
+    level = np.clip((db - SPECTRUM_FLOOR_DB) / -SPECTRUM_FLOOR_DB, 0.0, 1.0)
+    f_max = sr / 2.0
+    f_min = min(SPECTRUM_F_MIN, f_max / 4.0)
+    rows = f_min * (f_max / f_min) ** (1.0 - (np.arange(height) + 0.5) / height)   # top row = f_max
+    bins = np.clip(np.round(rows / (f_max / (n_fft // 2))).astype(np.int64), 0, n_fft // 2)
+    return _SPECTRUM_LUT[(level[:, bins].T * 255.0).astype(np.uint8)]  # H × W × 3
+
+
+def spectrum_row(height: float, frequency_hz: float, sample_rate: int) -> float:
+    """Where a frequency sits on the spectral view's axis: 0 = top (Nyquist)."""
+    f_max = sample_rate / 2.0
+    f_min = min(SPECTRUM_F_MIN, f_max / 4.0)
+    frequency_hz = min(max(frequency_hz, f_min), f_max)
+    return height * (1.0 - math.log(frequency_hz / f_min) / math.log(f_max / f_min))
+
+
+def _build_spectrum_lut() -> np.ndarray:
+    """256 colours from the panel ground through the accent to amber and white."""
+    stops = [(0.0, BG), (0.35, ACCENT_DIM), (0.6, ACCENT), (0.85, AMBER), (1.0, WHITE)]
+    xs = np.array([p for p, _ in stops])
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    t = np.linspace(0.0, 1.0, 256)
+    for channel, pick in enumerate((QColor.red, QColor.green, QColor.blue)):
+        lut[:, channel] = np.interp(t, xs, [pick(c) for _, c in stops]).astype(np.uint8)
+    return lut
+
+
+_SPECTRUM_LUT = _build_spectrum_lut()
+
+
 def _alpha(colour: QColor, alpha: int) -> QColor:
     out = QColor(colour)
     out.setAlpha(alpha)
@@ -199,6 +259,7 @@ class WaveformView(QWidget):
     selection_changed = Signal(object) # the selected segment id, or None
     delete_requested = Signal(int)     # Del on the selected segment
     view_changed = Signal()            # zoomed, panned, fitted or loaded
+    mode_changed = Signal(str)         # MODE_WAVEFORM | MODE_SPECTRUM
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -220,8 +281,9 @@ class WaveformView(QWidget):
         self._drafts: list[tuple[int, int]] = []         # segments drawn by hand, unsaved
         self._drag: tuple | None = None                  # ("move", key, edge) | ("press", ms, x)
         self._view: tuple[float, float] = (0.0, 0.0)     # the seconds across the plot
-        self._layer: QPixmap | None = None               # the rasterised waveform body
+        self._layer: QPixmap | None = None               # the rasterised waveform body (or the spectrum)
         self._layer_key: tuple | None = None
+        self._mode = MODE_WAVEFORM
 
     # --- data in ---
 
@@ -336,6 +398,26 @@ class WaveformView(QWidget):
     def duration_s(self) -> float:
         return self._env.duration_s if self._env is not None else 0.0
 
+    # --- waveform or spectrum (2026-09-09) ---
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def set_mode(self, mode: str) -> None:
+        """MODE_WAVEFORM or MODE_SPECTRUM; the overlays, zoom and markers are the same."""
+        mode = MODE_SPECTRUM if mode == MODE_SPECTRUM else MODE_WAVEFORM
+        if mode != self._mode:
+            self._mode = mode
+            self._layer = None
+            self.mode_changed.emit(mode)
+            self.update()
+
+    @property
+    def spectrum_available(self) -> bool:
+        """The spectral view needs the samples in memory (files up to KEEP_SAMPLES_SECONDS)."""
+        return self._env is not None and self._env.samples is not None and bool(self._env.samples.size)
+
     # --- the view: zoom and pan (2026-09-08) ---
 
     @property
@@ -414,9 +496,20 @@ class WaveformView(QWidget):
         dpr = float(self.devicePixelRatioF())
         width = max(1, int(round(rect.width() * dpr)))
         height = max(1, int(round(rect.height() * dpr)))
-        key = (self._generation, self._view, width, height, dpr)
+        key = (self._generation, self._view, width, height, dpr, self._mode)
         if self._layer is not None and self._layer_key == key:
             return self._layer
+        if self._mode == MODE_SPECTRUM:
+            pixels = spectrogram_image(self._env, self._view[0], self._view[1], width, height)
+            if pixels is None:
+                self._layer, self._layer_key = None, key
+                return None
+            data = np.ascontiguousarray(pixels).tobytes()
+            image = QImage(data, width, height, width * 3, QImage.Format.Format_RGB888).copy()
+            pixmap = QPixmap.fromImage(image)
+            pixmap.setDevicePixelRatio(dpr)
+            self._layer, self._layer_key = pixmap, key
+            return pixmap
         image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
         peaks = peaks_for_view(self._env, self._view[0], self._view[1], width)
@@ -457,12 +550,27 @@ class WaveformView(QWidget):
 
         painter.save()
         painter.setClipRect(rect)
-        self._paint_windows(painter, rect)
-        self._paint_segments(painter, rect)
-        layer = self._layer_for(rect)
-        if layer is not None:
-            painter.drawPixmap(rect.topLeft(), layer)
-        self._paint_envelope(painter, rect, mid, half)
+        if self._mode == MODE_SPECTRUM:
+            # the spectrum is opaque: it goes under the segment fills; no envelope
+            layer = self._layer_for(rect)
+            if layer is not None:
+                painter.drawPixmap(rect.topLeft(), layer)
+                self._paint_frequency_ticks(painter, rect)
+            else:
+                painter.setPen(TEXT_DIM)
+                painter.drawText(
+                    rect, Qt.AlignmentFlag.AlignCenter,
+                    f"the spectrum needs the audio in memory: files up to {KEEP_SAMPLES_SECONDS / 60:.0f} minutes",
+                )
+            self._paint_windows(painter, rect)
+            self._paint_segments(painter, rect)
+        else:
+            self._paint_windows(painter, rect)
+            self._paint_segments(painter, rect)
+            layer = self._layer_for(rect)
+            if layer is not None:
+                painter.drawPixmap(rect.topLeft(), layer)
+            self._paint_envelope(painter, rect, mid, half)
         if self._position_ms is not None:
             x = self._x_of(self._position_ms / 1000, rect)
             painter.setPen(QPen(WHITE, 1.5))
@@ -489,6 +597,8 @@ class WaveformView(QWidget):
         if self.zoomed:
             start, end = self._view
             parts.append(f"zoom ×{self._env.duration_s / (end - start):.0f} ({start:.3f}–{end:.3f} s)")
+        if self._mode == MODE_SPECTRUM:
+            parts.append("spectrum")
         return "  ·  ".join(parts)
 
     def _paint_windows(self, painter: QPainter, rect: QRectF) -> None:
@@ -559,6 +669,18 @@ class WaveformView(QWidget):
         if label and min(x1, rect.right()) - left > painter.fontMetrics().horizontalAdvance(label) + 6:
             painter.setPen(colour)
             painter.drawText(QRectF(left + 2, rect.top() + 1, x1 - left - 4, 14), Qt.AlignmentFlag.AlignLeft, label)
+
+    def _paint_frequency_ticks(self, painter: QPainter, rect: QRectF) -> None:
+        """100 Hz, 1 kHz and 10 kHz on the spectral view's log axis, at the left edge."""
+        if self._env is None or not self._env.sample_rate:
+            return
+        painter.setPen(TEXT_DIM)
+        for hz, label in ((100.0, "100"), (1000.0, "1k"), (10000.0, "10k")):
+            if hz >= self._env.sample_rate / 2.0:
+                continue
+            y = rect.top() + spectrum_row(rect.height(), hz, self._env.sample_rate)
+            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.left() + 6, y))
+            painter.drawText(QRectF(rect.left() + 8, y - 7, 40, 14), Qt.AlignmentFlag.AlignLeft, label)
 
     def _paint_envelope(self, painter: QPainter, rect: QRectF, mid: float, half: float) -> None:
         if self._env is None or self._attack_ms is None or self._env.columns == 0:
@@ -801,6 +923,7 @@ class WaveformPanel(QWidget):
     caption_requested = Signal()
     play_requested = Signal()
     stop_requested = Signal()
+    mode_changed = Signal(str)         # the view's mode, for the window to remember
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -842,6 +965,17 @@ class WaveformPanel(QWidget):
         self.stop_button.setToolTip("Stop")
         self.stop_button.clicked.connect(self.stop_requested)
         self.autoplay = QCheckBox("Auto-play on select")
+        self.mode_button = QPushButton("Spectrum")          # the spectral view (2026-09-09)
+        self.mode_button.setCheckable(True)
+        self.mode_button.setToolTip(
+            "Show the spectrum instead of the waveform: one FFT per pixel column over the view, "
+            "log frequency from 30 Hz to half the sample rate, the loudest bin in view white. "
+            "Files up to three minutes; zoom, markers and the playhead work the same."
+        )
+        self.mode_button.toggled.connect(
+            lambda on: self.view.set_mode(MODE_SPECTRUM if on else MODE_WAVEFORM)
+        )
+        self.view.mode_changed.connect(self._on_mode_changed)
         self._save = QPushButton("Save segment")
         self._save.setToolTip(
             "Write the moved or drawn markers to the index as manual segments (§6.3): exempt "
@@ -861,6 +995,7 @@ class WaveformPanel(QWidget):
         row.setSpacing(6)
         row.addWidget(self.play_button)
         row.addWidget(self.stop_button)
+        row.addWidget(self.mode_button)
         row.addWidget(self._save)
         row.addWidget(self._discard)
         row.addWidget(self._delete)
@@ -893,6 +1028,12 @@ class WaveformPanel(QWidget):
     @property
     def caption_text(self) -> str:
         return self._caption_label.text()
+
+    # --- waveform or spectrum ---
+
+    def _on_mode_changed(self, mode: str) -> None:
+        self.mode_button.setChecked(mode == MODE_SPECTRUM)
+        self.mode_changed.emit(mode)
 
     # --- the scrollbar ---
 

@@ -17,11 +17,15 @@ from PySide6.QtWidgets import QApplication
 from crate.catalog import SegmentRow
 from crate.waveform import (
     DEFAULT_COLUMNS,
+    MODE_SPECTRUM,
+    MODE_WAVEFORM,
     WaveformPanel,
     WaveformView,
     _tick_step,
     envelope_columns,
     peaks_for_view,
+    spectrogram_image,
+    spectrum_row,
 )
 
 SR = 22050
@@ -336,3 +340,59 @@ def test_panel_caption_line(app):
     assert asked == [1]
     panel.set_caption(None, True)
     assert panel.caption_text == "—" and panel._caption_button.text() == "Caption"
+
+
+# --- the spectral view (2026-09-09) ---
+
+
+def _tone_file(path, hz: float = 1000.0, duration_s: float = 2.0):
+    t = np.arange(int(SR * duration_s)) / SR
+    sf.write(path, (0.8 * np.sin(2 * np.pi * hz * t)).astype("float32"), SR)
+    return path
+
+
+def test_spectrogram_image_puts_a_tone_on_its_row(tmp_path):
+    env = envelope_columns(_tone_file(tmp_path / "tone.wav"))
+    image = spectrogram_image(env, 0.0, 2.0, 200, 120)
+    assert image is not None and image.shape == (120, 200, 3) and image.dtype == np.uint8
+    brightness = image.astype(int).sum(axis=(1, 2))                       # per row
+    expected = spectrum_row(120, 1000.0, SR)
+    assert abs(int(brightness.argmax()) - expected) <= 4                  # the 1 kHz row is the bright one
+    assert brightness.max() > 3 * np.median(brightness)                   # against a dark background
+    zoomed = spectrogram_image(env, 0.9, 0.95, 200, 120)                  # 50 ms: a shorter FFT, still the tone
+    assert zoomed is not None and abs(int(zoomed.astype(int).sum(axis=(1, 2)).argmax()) - expected) <= 8
+    assert spectrogram_image(env, 1.0, 1.0, 200, 120) is None
+    overview = envelope_columns(tmp_path / "tone.wav", keep_samples_s=0.5)  # "long": no samples kept
+    assert spectrogram_image(overview, 0.0, 2.0, 200, 120) is None
+    assert spectrum_row(100, SR / 2, SR) == pytest.approx(0.0) and spectrum_row(100, 30.0, SR) == pytest.approx(100.0)
+
+
+def test_view_and_panel_swap_between_waveform_and_spectrum(app, tmp_path):
+    panel = WaveformPanel()
+    view = panel.view
+    view.resize(1000, 150)
+    _load(view, _tone_file(tmp_path / "tone.wav"), "tone.wav", [SegmentRow(1, 1, 500, 1000, 1.0, "auto", 0, None)], None, None)
+    rect = view._plot_rect()
+    waveform_layer = view._layer_for(rect)
+    modes: list[str] = []
+    panel.mode_changed.connect(modes.append)
+    assert view.mode == MODE_WAVEFORM and not panel.mode_button.isChecked() and view.spectrum_available
+
+    panel.mode_button.setChecked(True)                                    # the button swaps the view
+    assert view.mode == MODE_SPECTRUM and modes == [MODE_SPECTRUM]
+    spectrum_layer = view._layer_for(rect)
+    assert spectrum_layer is not None and spectrum_layer is not waveform_layer
+    assert "spectrum" in view._header_text() and not view.grab().isNull()  # ticks, segments and all paint
+    rect = view._plot_rect()                                               # the grab let the panel lay the view out
+    spectrum_layer = view._layer_for(rect)
+    view.zoom(4.0, about_s=0.5)
+    assert view._layer_for(rect) is not spectrum_layer                     # the zoom re-rasters
+    assert view.marker_at(view._x_of(0.5, rect)) == (1, "start")           # markers work the same (1.0 s is off-view now)
+
+    view.set_mode(MODE_WAVEFORM)                                           # the view tells the button
+    assert not panel.mode_button.isChecked() and modes[-1] == MODE_WAVEFORM
+
+    _load(view, _tone_file(tmp_path / "long.wav", duration_s=2.0), "long.wav", [], None, None)
+    view._env.samples = None                                               # as a file beyond the kept length
+    panel.mode_button.setChecked(True)
+    assert not view.spectrum_available and view._layer_for(rect) is None and not view.grab().isNull()

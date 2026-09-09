@@ -94,6 +94,7 @@ SETTINGS_KEY_HEADER = "list/header2"        # the list's columns: order, widths,
 SETTINGS_KEY_GEOMETRY = "window/geometry"   # size and position
 SETTINGS_KEY_TAB = "window/tab"             # the open tab
 SETTINGS_KEY_VIEW = "window/view"           # list or map
+SETTINGS_KEY_PREVIEW_MODE = "preview/mode"  # the bottom panel: waveform or spectrum (2026-09-09)
 HALO_NEIGHBOURS = 20               # §9.3: nearest neighbours highlighted after a ranking
 # The model stack logs every HTTP request at INFO; that is noise on a
 # multi-hour run, not progress (same list as the CLI).
@@ -360,6 +361,10 @@ class MainWindow(QMainWindow):
         )
         self._waveform_panel.play_requested.connect(self._play_current)
         self._waveform_panel.stop_requested.connect(self._preview.stop)
+        self._waveform_panel.mode_button.setChecked(
+            self._settings.value(SETTINGS_KEY_PREVIEW_MODE, "waveform", type=str) == "spectrum"
+        )
+        self._waveform_panel.mode_changed.connect(lambda mode: self._settings.setValue(SETTINGS_KEY_PREVIEW_MODE, mode))
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self._toggle_play)
         QShortcut(QKeySequence(Qt.Key.Key_A), self, activated=self._anchor_current)
 

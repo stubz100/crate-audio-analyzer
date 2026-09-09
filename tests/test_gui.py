@@ -1088,6 +1088,7 @@ def test_columns_are_configurable_and_the_window_remembers_itself(app, index, tm
 
         window._tabs.setCurrentIndex(2)
         window._map_button.click()
+        window._waveform_panel.mode_button.setChecked(True)                 # the spectral view
         window.resize(700, 520)                                          # inside the offscreen 800 × 600 screen:
         app.processEvents()                                              # a restored geometry is clamped to it
         window._save_geometry()
@@ -1104,6 +1105,7 @@ def test_columns_are_configurable_and_the_window_remembers_itself(app, index, tm
         assert h.sortIndicatorSection() == C.COL_LENGTH
         assert again._proxy.data(again._proxy.index(0, C.COL_FILE)) == "loop.wav"        # 4.0 s before 0.4 s: sorted as left
         assert again._tabs.currentIndex() == 2 and again._views.currentWidget() is again._map
+        assert again._waveform_panel.mode_button.isChecked() and again._waveform.mode == "spectrum"
         assert abs(again.width() - 700) <= 2 and abs(again.height() - 520) <= 40
     finally:
         again.close()

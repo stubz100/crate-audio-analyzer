@@ -1304,3 +1304,24 @@ The user: anchoring a sample locks the system into a calculation — manage it, 
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-09 — A spectral view on the waveform panel
+
+**Phase:** 9 polish (the waveform panel) · `SPECTRUM_HASH`
+
+The user: a spectral view, swappable by a button on the waveform panel.
+
+**Done**
+
+- `waveform.py`: `spectrogram_image(env, start_s, end_s, width, height)` — one Hann-windowed FFT per pixel column centred on the column's time (the FFT length follows the zoom: 256 to 2048), magnitudes in dB below the loudest bin in view, floor −90 dB, rows sampled on a log-frequency axis from 30 Hz to Nyquist (`spectrum_row` places a frequency), a 256-entry LUT from the panel ground through the accent to amber and white; H × W × 3 uint8 straight into a `QImage`. Because it takes one frame per column from the samples in memory, a full view of a 2-minute file costs the same as a 4-s one, and a file beyond `KEEP_SAMPLES_SECONDS` gets a note instead.
+- `WaveformView.set_mode` / `mode` / `mode_changed` / `spectrum_available`: the raster cache is keyed by the mode; in spectrum mode the opaque image goes under the segment and window fills, the amplitude envelope is not drawn, 100 Hz / 1 kHz / 10 kHz ticks sit at the left edge, and the header says "spectrum". Zoom, markers, the playhead and the staging are untouched.
+- `WaveformPanel.mode_button` (*Spectrum*, checkable, after ■) toggles it and follows the view; the window remembers the choice (`preview/mode`).
+
+**Verified**
+
+- `uv run pytest tests -q` → **206 passed, 3 skipped**; pyflakes clean. New: a 1 kHz tone's brightest row is where `spectrum_row` puts 1 kHz, at the full view and at a 50 ms zoom; no image without samples or for an empty span; the button swaps the view and the view updates the button; the raster re-does on a zoom; markers grab in spectrum mode; a file without samples in memory paints the note; the choice survives a restart (the remember-itself test).
+- Offscreen on the user's index: a 4.7-s vowel and a 136-s street ambience both raster in 21–22 ms at the full view (4 ms and 22 ms at ×8): the harmonics of the vowel, the broadband wash of the street. Screenshots checked.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
