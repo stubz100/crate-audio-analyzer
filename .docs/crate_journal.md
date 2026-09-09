@@ -1240,7 +1240,7 @@ The user: a quick review before wrapping up. The multi-agent review hit the sess
 
 ## 2026-09-09 — Configurable, remembered columns; a Sections toggle; the window remembers itself
 
-**Phase:** 7 polish (the list, the window) · `COLUMNS_HASH`
+**Phase:** 7 polish (the list, the window) · `00c7823`
 
 The user: an expand/collapse-all for the hits in the list; the columns configurable — draggable, replaceable by another column on right-click — and the configuration saved on any change so the list opens as it was left; the same for the window's settings.
 
