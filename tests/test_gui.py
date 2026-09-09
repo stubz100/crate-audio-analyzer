@@ -31,7 +31,7 @@ from crate.db import open_db
 from crate.embedding import embed_pending
 from crate.layout import PcaReducer
 from crate.library import add_library, normalize
-from crate.listmodel import ColumnFilter, ListProxy, SampleTreeModel, SegmentTableModel
+from crate.listmodel import SECTION_LABEL_ROLE, ColumnFilter, ListProxy, SampleTreeModel, SegmentTableModel
 from crate.recompute import RunPlan
 from crate.render import render_segment
 from crate.scanner import scan_library
@@ -230,7 +230,7 @@ def test_text_search_scores_the_list_and_nests_a_sub_hit(app, index, tmp_path):
         loop = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
         assert window._proxy.rowCount(loop) >= 1 and window._table.isExpanded(loop)   # its sections, the hit first
         sub_hit = window._proxy.index(0, 0, loop)
-        assert window._proxy.data(sub_hit).startswith("↳ hit @")
+        assert window._proxy.data(sub_hit, SECTION_LABEL_ROLE).startswith("↳ hit @")   # drawn in the first column shown
         assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_TYPE, loop)) == "hit"
         assert window._proxy.rowCount(sub_hit) == 0
         del top
@@ -697,7 +697,7 @@ def test_a_search_can_land_on_a_window_inside_a_long_file(app, tmp_path):
         parent = window._proxy.index(_proxy_row_named(window, "ambience.wav"), 0)
         assert window._proxy.rowCount(parent) >= 1 and window._table.isExpanded(parent)
         sub_hit = window._proxy.index(0, 0, parent)                    # the best-matching section first
-        assert window._proxy.data(sub_hit) == "↳ window @ 20.000 s (5 s)"
+        assert window._proxy.data(sub_hit, SECTION_LABEL_ROLE) == "↳ window @ 20.000 s (5 s)"
         assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_TYPE, parent)) == "window"
 
         window._table.setCurrentIndex(sub_hit)
@@ -1016,3 +1016,80 @@ def test_every_section_sits_under_its_sample_ordered_by_similarity(app, index, t
             window._proxy.mapToSource(window._proxy.index(0, 0, loop))).segment_id)
     finally:
         window.close()
+
+
+# --- configurable, remembered columns; the Sections toggle; the window remembers itself (2026-09-09) ---
+
+
+def test_columns_are_configurable_and_the_window_remembers_itself(app, index, tmp_path):
+    from PySide6.QtWidgets import QMenu
+
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    settings = _ini(tmp_path)
+    window = MainWindow(db_path=db, cache_dir=cache, settings=settings)
+    try:
+        window._autoplay.setChecked(False)
+        window.resize(1500, 850)
+        window.show()
+        app.processEvents()
+        header = window._header
+        C = SampleTreeModel
+        assert header.sectionsMovable() and window._table.treePosition() == -1
+        assert header.first_visible_column() == C.COL_FOLDER
+
+        header.moveSection(header.visualIndex(C.COL_FOLDER), 1)          # dragged: File is first now
+        assert header.first_visible_column() == C.COL_FILE and settings.value("list/header") is not None
+        assert window._anchor_delegate._first() == C.COL_FILE             # the circle moved with it
+
+        header.set_column_visible(C.COL_BPM, False)                       # hidden…
+        assert header.isSectionHidden(C.COL_BPM) and header.hidden_columns() == [C.COL_BPM]
+        position = header.visualIndex(C.COL_TAGS)
+        header.replace_column(C.COL_TAGS, C.COL_BPM)                      # …then back, in Tags' place
+        assert not header.isSectionHidden(C.COL_BPM) and header.visualIndex(C.COL_BPM) == position
+        assert header.isSectionHidden(C.COL_TAGS)
+        header.set_column_visible(C.COL_SIMILARITY, False)                # the score columns are the view's
+        assert C.COL_SIMILARITY not in header.hidden_columns()
+        menu = header.column_menu(C.COL_KEY)
+        assert isinstance(menu, QMenu)
+        texts = [a.text() for a in menu.actions()]
+        assert "Reset columns" in texts and any(t.startswith("Replace") for t in texts)
+        assert "Key" in texts and "Similarity" not in texts
+        for column in range(C.COL_HITS + 1):                              # never the last one shown
+            header.set_column_visible(column, False)
+        assert len([c for c in range(C.COL_HITS + 1) if not header.isSectionHidden(c)]) == 1
+        header.reset_columns()
+        assert header.first_visible_column() == C.COL_FOLDER and not header.hidden_columns()
+        header.moveSection(header.visualIndex(C.COL_FOLDER), 1)
+        header.set_column_visible(C.COL_TAGS, False)
+        window._table.sortByColumn(C.COL_LENGTH, Qt.SortOrder.DescendingOrder)
+
+        loop = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
+        assert not window._table.isExpanded(loop)
+        window._sections_button.setChecked(True)                          # the header's third button
+        assert window._table.isExpanded(loop) and window._sections_button.text().startswith("Sections ▾")
+        window._sections_button.setChecked(False)
+        assert not window._table.isExpanded(loop)
+
+        window._tabs.setCurrentIndex(2)
+        window._map_button.click()
+        window.resize(700, 520)                                          # inside the offscreen 800 × 600 screen:
+        app.processEvents()                                              # a restored geometry is clamped to it
+        window._save_geometry()
+    finally:
+        window.close()
+    settings.sync()
+
+    again = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path))
+    try:
+        again.show()
+        app.processEvents()
+        h = again._header
+        assert h.first_visible_column() == C.COL_FILE and h.isSectionHidden(C.COL_TAGS)     # as left
+        assert h.sortIndicatorSection() == C.COL_LENGTH
+        assert again._proxy.data(again._proxy.index(0, C.COL_FILE)) == "loop.wav"        # 4.0 s before 0.4 s: sorted as left
+        assert again._tabs.currentIndex() == 2 and again._views.currentWidget() is again._map
+        assert abs(again.width() - 700) <= 2 and abs(again.height() - 520) <= 40
+    finally:
+        again.close()

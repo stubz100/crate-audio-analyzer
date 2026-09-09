@@ -1237,3 +1237,25 @@ The user: a quick review before wrapping up. The multi-agent review hit the sess
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections; a lazier section model before the list is asked to hold hundreds of thousands of rows (Phase 12).
+
+## 2026-09-09 — Configurable, remembered columns; a Sections toggle; the window remembers itself
+
+**Phase:** 7 polish (the list, the window) · `COLUMNS_HASH`
+
+The user: an expand/collapse-all for the hits in the list; the columns configurable — draggable, replaceable by another column on right-click — and the configuration saved on any change so the list opens as it was left; the same for the window's settings.
+
+**Done**
+
+- **Columns** (`headerfilter.py`): sections are movable; a drag is told from a click (the start-drag distance) so it never opens the filter popup; a right-click opens `column_menu` — *Replace “…” with* (the hidden columns; `replace_column` puts the chosen one in the clicked one's place and hides that), a checkable list of every column (`set_column_visible`, never the last one shown), *Reset columns* (`remember_default` / `reset_columns`). The score columns are `fixed`: the view shows and hides them by the scores, the menu leaves them out. `layout_changed` fires on every move, resize, show, hide or reset.
+- **The circle and the section labels follow the first column shown**: the view's tree position is -1 (Qt: follow visual index 0); `AnchorDelegate` is the view's delegate and paints the click zone, the circle and — new `SECTION_LABEL_ROLE` — a section row's label only in `first_visible_column()`; the model's Folder cell of a section row is empty text with the start time as its sort key.
+- **Remembered** (`main.py`): the header's `saveState()` on every `layout_changed` and sort-indicator change (`list/header`), restored before the first load with the saved sort applied; the splitters on every `splitterMoved`; the window geometry on resize or move (400 ms after it settles) and on close; the open tab and the List / Map choice as they change.
+- **Sections ▸ / ▾**: the header's third button expands or collapses every sample's sections (`expandAll` / `collapseAll` with updates off).
+
+**Verified**
+
+- `uv run pytest tests -q` → **203 passed, 3 skipped**; pyflakes clean. New: a moved section makes File first and moves the circle's column with it; hide, replace, the menu's entries (no score columns), the last-column guard, reset; the Sections toggle; a second window opens with the moved and hidden columns, the saved sort applied to the rows, the open tab, the map view and the size; a simulated drag on the header moves the section and opens no popup.
+- Offscreen on the user's index: Folder dragged after File (the circle and the section labels in File), BPM hidden, Tags replaced by BPM through the menu; the Sections toggle opens 4,299 samples in 0.27 s and closes them in 0.07 s.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.

@@ -155,3 +155,33 @@ def test_tag_bars_show_and_click(app):
     assert not bars.grab().isNull()
     bars.show_tags([(f"t{i}", 0.1 * i) for i in range(15)])
     assert len(bars.tags) == 10
+
+
+def test_a_drag_moves_a_section_without_opening_its_popup(app):
+    model, proxy, view, header = _view(app)
+    try:
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+
+        def mouse(kind, x):
+            pos = QPointF(x, 8.0)
+            button = Qt.MouseButton.NoButton if kind == QEvent.Type.MouseMove else Qt.MouseButton.LeftButton
+            return QMouseEvent(kind, pos, header.viewport().mapToGlobal(pos.toPoint()), button,
+                               Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+
+        assert header.sectionsMovable()
+        before = header.visualIndex(4)
+        x0 = header.sectionViewportPosition(4) + 10
+        x1 = header.sectionViewportPosition(7) + 10
+        header.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, x0))
+        for x in range(int(x0), int(x1), 8):
+            header.mouseMoveEvent(mouse(QEvent.Type.MouseMove, x))
+        header.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, x1))
+        app.processEvents()
+        assert header.popup is None                                        # a drag is not a click
+        assert header.visualIndex(4) != before                             # the section moved
+        assert header.first_visible_column() == 0
+        header.set_column_visible(0, False)
+        assert header.first_visible_column() == header.logicalIndex(1) if not header.isSectionHidden(header.logicalIndex(1)) else True
+    finally:
+        view.close()

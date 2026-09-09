@@ -44,7 +44,8 @@ from .theme import ACCENT, TEXT, TEXT_DIM
 log = logging.getLogger(__name__)
 
 SORT_ROLE = Qt.ItemDataRole.UserRole  # raw values, so the proxy sorts numbers as numbers
-ANCHOR_ROLE = Qt.ItemDataRole.UserRole + 1   # True for the row that carries the ⚓
+ANCHOR_ROLE = Qt.ItemDataRole.UserRole + 1   # True for the row that carries the anchor circle
+SECTION_LABEL_ROLE = Qt.ItemDataRole.UserRole + 2   # a section row's "↳ hit @ …": the delegate draws it in the first column shown
 ANCHOR_GLYPH_WIDTH = 24                       # the click zone at the start of every row
 _TOP = 0  # internalId of a top-level index; a sub-hit carries its parent's row + 1
 
@@ -274,13 +275,13 @@ class SampleTreeModel(QAbstractItemModel):
                 return f"{r.filepath} @ {section.start_ms} ms"
             if role == ANCHOR_ROLE:
                 return self._anchor == ("segment", section.segment_id)
+            if role == SECTION_LABEL_ROLE:
+                return "↳ " + hit_label(section.start_ms, section.end_ms, section.window)
             if role not in (Qt.ItemDataRole.DisplayRole, SORT_ROLE):
                 return None
             length_s = (section.end_ms - section.start_ms) / 1000
-            if col == self.COL_FOLDER:                # the tree column: the section's label
-                if display:
-                    return "↳ " + hit_label(section.start_ms, section.end_ms, section.window)
-                return section.start_ms
+            if col == self.COL_FOLDER:
+                return "" if display else section.start_ms   # the label is SECTION_LABEL_ROLE (drawn by the delegate)
             if col == self.COL_FILE:
                 return "" if display else section.start_ms   # a name sort keeps sections in time order
             if col == self.COL_LENGTH:
@@ -590,14 +591,23 @@ def _paint_anchor(painter: QPainter, zone: QRectF, colour, bold: bool = False) -
 class AnchorDelegate(QStyledItemDelegate):
     """The anchor circle at the start of every row of the list (2026-09-08, the user's
     steer: anchoring and ranking should be one click on the row, not a
-    button, a tab and a step). Paints the File cell shifted right by a click
-    zone that shows the glyph — accent for the row that is the anchor, dim
-    otherwise, brighter under the mouse — and turns a click in that zone
-    into `anchor_clicked(index)`; the rest of the cell behaves as before."""
+    button, a tab and a step). Set on the whole view: in the **first column
+    shown** (`first_column()`, whichever the user dragged there) it paints the
+    cell shifted right by a click zone that shows the circle — accent for the
+    row that is the anchor, dim otherwise, brighter under the mouse — draws a
+    section row's label there, and turns a click in that zone into
+    `anchor_clicked(index)`; every other column paints as usual."""
 
     anchor_clicked = Signal(QModelIndex)
 
+    def __init__(self, parent=None, first_column: Callable[[], int] | None = None) -> None:
+        super().__init__(parent)
+        self._first = first_column or (lambda: 0)
+
     def paint(self, painter, option, index) -> None:  # noqa: N802
+        if index.column() != self._first():
+            super().paint(painter, option, index)
+            return
         zone = QRectF(option.rect.left(), option.rect.top(), ANCHOR_GLYPH_WIDTH, option.rect.height())
         full = QStyleOptionViewItem(option)
         self.initStyleOption(full, index)
@@ -606,19 +616,29 @@ class AnchorDelegate(QStyledItemDelegate):
         style.drawPrimitive(QStyle.PrimitiveElement.PE_PanelItemViewItem, full, painter, full.widget)
         shifted = QStyleOptionViewItem(option)
         shifted.rect = option.rect.adjusted(ANCHOR_GLYPH_WIDTH, 0, 0, 0)
-        super().paint(painter, shifted, index)
+        label = index.data(SECTION_LABEL_ROLE)
+        if label:                                       # a section row: its label lives here
+            opt = QStyleOptionViewItem(shifted)
+            self.initStyleOption(opt, index)
+            opt.rect = shifted.rect
+            opt.text = str(label)
+            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, full.widget)
+        else:
+            super().paint(painter, shifted, index)
         anchored = bool(index.data(ANCHOR_ROLE))
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         _paint_anchor(painter, zone, ACCENT if anchored else (TEXT if hovered else TEXT_DIM), bold=anchored)
 
     def sizeHint(self, option, index):  # noqa: N802
         size = super().sizeHint(option, index)
-        size.setWidth(size.width() + ANCHOR_GLYPH_WIDTH)
+        if index.column() == self._first():
+            size.setWidth(size.width() + ANCHOR_GLYPH_WIDTH)
         return size
 
     def editorEvent(self, event, model, option, index) -> bool:  # noqa: N802
         if (
-            event.type() == QEvent.Type.MouseButtonRelease
+            index.column() == self._first()
+            and event.type() == QEvent.Type.MouseButtonRelease
             and event.button() == Qt.MouseButton.LeftButton
             and event.position().x() < option.rect.left() + ANCHOR_GLYPH_WIDTH
         ):

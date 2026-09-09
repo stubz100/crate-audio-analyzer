@@ -88,6 +88,10 @@ COLUMN_SPECS = {
     SampleTreeModel.COL_MATCH: ColumnSpec("range", "%", maximum=100, scale=100.0),
 }
 SETTINGS_KEY_PANES = "window/panes3"        # waveform | tabs, as dragged (3: as above)
+SETTINGS_KEY_HEADER = "list/header"         # the list's columns: order, widths, hidden, sort (2026-09-09)
+SETTINGS_KEY_GEOMETRY = "window/geometry"   # size and position
+SETTINGS_KEY_TAB = "window/tab"             # the open tab
+SETTINGS_KEY_VIEW = "window/view"           # list or map
 HALO_NEIGHBOURS = 20               # §9.3: nearest neighbours highlighted after a ranking
 # The model stack logs every HTTP request at INFO; that is noise on a
 # multi-hour run, not progress (same list as the CLI).
@@ -281,21 +285,34 @@ class MainWindow(QMainWindow):
         self._table = QTreeView()
         self._table.setModel(self._proxy)
         self._table.setSortingEnabled(False)       # a header click opens its filter popup; the popup's buttons sort
-        self._header = FilterHeader(COLUMN_SPECS, self._table)
+        self._header = FilterHeader(
+            COLUMN_SPECS, self._table,
+            fixed=(SampleTreeModel.COL_SIMILARITY, SampleTreeModel.COL_MATCH),   # shown by the scores, not the menu
+        )
         self._header.install_on(self._table)
         self._header.sort_requested.connect(self._table.sortByColumn)
         self._header.filter_changed.connect(self._on_column_filter)
+        self._table.setTreePosition(-1)             # the tree follows the first column shown, wherever it is dragged
         self._table.setUniformRowHeights(True)
         self._table.setRootIsDecorated(True)
         self._table.setExpandsOnDoubleClick(False)
         self._table.setMouseTracking(True)              # the ⚓ brightens under the mouse
-        self._anchor_delegate = AnchorDelegate(self._table)
+        self._anchor_delegate = AnchorDelegate(self._table, self._header.first_visible_column)
         self._anchor_delegate.anchor_clicked.connect(self._on_anchor_clicked)
-        self._table.setItemDelegateForColumn(0, self._anchor_delegate)
+        self._table.setItemDelegate(self._anchor_delegate)   # the circle sits in whichever column is first
         header = self._table.header()
         header.setResizeContentsPrecision(200)   # measure a sample of rows, not all of them
         header.moveSection(header.visualIndex(SampleTreeModel.COL_MATCH), 2)       # after Folder and File
         header.moveSection(header.visualIndex(SampleTreeModel.COL_SIMILARITY), 2)
+        self._header.remember_default()
+        saved_header = self._settings.value(SETTINGS_KEY_HEADER, None)
+        if saved_header:                             # the columns as they were left (2026-09-09)
+            self._header.restoreState(saved_header)
+            section = self._header.sortIndicatorSection()
+            if section >= 0 and section not in (SampleTreeModel.COL_SIMILARITY, SampleTreeModel.COL_MATCH):
+                self._table.sortByColumn(section, self._header.sortIndicatorOrder())
+        self._header.layout_changed.connect(self._save_header)
+        self._header.sortIndicatorChanged.connect(lambda *_: self._save_header())
         self._configure_drag_view(self._table)
         self._table.selectionModel().currentRowChanged.connect(self._on_sample_selected)
         self._table.doubleClicked.connect(lambda _index: self._play_current())
@@ -310,8 +327,15 @@ class MainWindow(QMainWindow):
         self._views = QStackedWidget()
         self._views.addWidget(self._table)
         self._views.addWidget(self._map)
-        self._list_button.clicked.connect(lambda: self._views.setCurrentWidget(self._table))
-        self._map_button.clicked.connect(lambda: self._views.setCurrentWidget(self._map))
+        self._list_button.clicked.connect(lambda: self._show_view("list"))
+        self._map_button.clicked.connect(lambda: self._show_view("map"))
+        self._sections_button = QPushButton("Sections ▸")
+        self._sections_button.setCheckable(True)
+        self._sections_button.setToolTip("Expand or collapse every sample's sections in the list")
+        self._sections_button.toggled.connect(self._toggle_sections)
+        if self._settings.value(SETTINGS_KEY_VIEW, "list", type=str) == "map":
+            self._map_button.setChecked(True)
+            self._views.setCurrentWidget(self._map)
 
         # --- the waveform panel (§9.2's preview strip, at the bottom on the user's steer;
         # its markers editable since 2026-09-08, Phase 9) ---
@@ -365,6 +389,9 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._search_panel, "Search")
         tabs.addTab(self._recompute, "Recompute")
         tabs.setMinimumWidth(360)
+        tabs.setCurrentIndex(self._settings.value(SETTINGS_KEY_TAB, 0, type=int))
+        tabs.currentChanged.connect(lambda i: self._settings.setValue(SETTINGS_KEY_TAB, int(i)))
+        self._tabs = tabs
 
         header_widget = QWidget()
         header_widget.setObjectName("header")
@@ -375,7 +402,8 @@ class MainWindow(QMainWindow):
         switch.setSpacing(2)
         switch.addWidget(self._list_button)
         switch.addWidget(self._map_button)
-        switch.addStretch(1)                         # room for a third button
+        switch.addWidget(self._sections_button)      # the third button (2026-09-09)
+        switch.addStretch(1)
         bars_column = QVBoxLayout()
         bars_column.setSpacing(2)
         bars_column.addWidget(self._tag_bars, stretch=1)
@@ -418,7 +446,16 @@ class MainWindow(QMainWindow):
             state = self._settings.value(key, None)
             if state:
                 splitter.restoreState(state)
+            # saved as soon as it is dragged (2026-09-09), not only on close
+            splitter.splitterMoved.connect(lambda *_, s=splitter, k=key: self._settings.setValue(k, s.saveState()))
         self.setCentralWidget(body)
+        geometry = self._settings.value(SETTINGS_KEY_GEOMETRY, None)
+        if geometry:
+            self.restoreGeometry(geometry)
+        self._geometry_timer = QTimer(self)          # a resize or move is saved once it settles
+        self._geometry_timer.setSingleShot(True)
+        self._geometry_timer.setInterval(400)
+        self._geometry_timer.timeout.connect(self._save_geometry)
 
         self.reload()
         self._restore_anchor()
@@ -996,6 +1033,38 @@ class MainWindow(QMainWindow):
         finally:
             self._table.setUpdatesEnabled(True)
 
+    # --- the window remembers itself (2026-09-09, the user's steer) ---
+
+    def _save_header(self, *_args) -> None:
+        self._settings.setValue(SETTINGS_KEY_HEADER, self._header.saveState())
+
+    def _save_geometry(self) -> None:
+        self._settings.setValue(SETTINGS_KEY_GEOMETRY, self.saveGeometry())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._geometry_timer.start()
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        super().moveEvent(event)
+        self._geometry_timer.start()
+
+    def _show_view(self, which: str) -> None:
+        self._views.setCurrentWidget(self._map if which == "map" else self._table)
+        self._settings.setValue(SETTINGS_KEY_VIEW, which)
+
+    def _toggle_sections(self, expanded: bool) -> None:
+        """The header's third button: every sample's sections open or folded."""
+        self._sections_button.setText("Sections ▾" if expanded else "Sections ▸")
+        self._table.setUpdatesEnabled(False)
+        try:
+            if expanded:
+                self._table.expandAll()
+            else:
+                self._table.collapseAll()
+        finally:
+            self._table.setUpdatesEnabled(True)
+
     def _update_badges(self) -> None:
         self._map.set_badges(self._samples.hit_sample_ids())
 
@@ -1125,6 +1194,8 @@ class MainWindow(QMainWindow):
         self._recompute.save_settings()
         self._settings.setValue(SETTINGS_KEY_SPLITTER, self._body.saveState())
         self._settings.setValue(SETTINGS_KEY_PANES, self._panes.saveState())
+        self._save_header()
+        self._save_geometry()
         self._recompute.shutdown()
         self._conn.close()
         super().closeEvent(event)

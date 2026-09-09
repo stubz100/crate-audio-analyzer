@@ -14,6 +14,7 @@ view state (§9.4): nothing here touches the index.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPoint, QPointF, Qt, Signal
@@ -27,9 +28,11 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QVBoxLayout,
 )
+from PySide6.QtWidgets import QApplication
 
 from .listmodel import ColumnFilter
 from .theme import ACCENT
@@ -203,20 +206,35 @@ class FilterPopup(QFrame):
 class FilterHeader(QHeaderView):
     """The list's horizontal header: a click on a section opens its filter
     popup; a filtered section carries a dot. `specs` says what each column
-    edits; a column without a spec has no popup."""
+    edits; a column without a spec has no popup.
+
+    Configurable since 2026-09-09 (the user's steer): sections drag to a new
+    place; a right-click opens a menu to *replace* the column with a hidden
+    one, show or hide any column, or reset; `fixed` names the columns the
+    view manages itself (the score columns) — they are left out of the menu.
+    `layout_changed` fires on every move, resize, show or hide, so the window
+    can save `saveState()` at once."""
 
     filter_changed = Signal(int, object)     # column, ColumnFilter | None
     sort_requested = Signal(int, object)     # column, Qt.SortOrder
+    layout_changed = Signal()                # moved, resized, shown, hidden or reset
 
-    def __init__(self, specs: dict[int, ColumnSpec], parent=None) -> None:
+    def __init__(self, specs: dict[int, ColumnSpec], parent=None, fixed: Iterable[int] = ()) -> None:
         super().__init__(Qt.Orientation.Horizontal, parent)
         self._specs = dict(specs)
+        self._fixed = set(fixed)
         self._filters: dict[int, ColumnFilter] = {}
         self._popup: FilterPopup | None = None
         self._before: tuple[int, Qt.SortOrder] | None = None
+        self._press_pos: QPointF | None = None
+        self._dragged = False
+        self._default_state = None
         self.setSectionsClickable(True)
         self.setSortIndicatorShown(True)
+        self.setSectionsMovable(True)
         self.sectionClicked.connect(self.open_filter)
+        self.sectionMoved.connect(lambda *_: self.layout_changed.emit())
+        self.sectionResized.connect(lambda *_: self.layout_changed.emit())
 
     def install_on(self, view) -> None:
         """Make this the view's header. The view resets clickability when it
@@ -224,12 +242,21 @@ class FilterHeader(QHeaderView):
         view.setHeader(self)
         self.setSectionsClickable(True)
         self.setSortIndicatorShown(True)
+        self.setSectionsMovable(True)
 
     # --- a click opens the popup; the indicator stays where the last sort put it ---
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         self._before = (self.sortIndicatorSection(), self.sortIndicatorOrder())
+        self._press_pos = event.position()
+        self._dragged = False
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._press_pos is not None and not self._dragged:
+            if (event.position() - self._press_pos).manhattanLength() >= QApplication.startDragDistance():
+                self._dragged = True                # a drag moves the section; it is not a click
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         super().mouseReleaseEvent(event)          # flips the indicator on a click: put it back
@@ -240,7 +267,7 @@ class FilterHeader(QHeaderView):
     def open_filter(self, column: int) -> None:
         spec = self._specs.get(column)
         model = self.model()
-        if spec is None or model is None:
+        if spec is None or model is None or self._dragged:
             return
         title = str(model.headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or "")
         values: list[str] = []
@@ -275,6 +302,86 @@ class FilterHeader(QHeaderView):
     def _on_filter(self, column: int, column_filter: ColumnFilter | None) -> None:
         self.set_filter(column, column_filter)
         self.filter_changed.emit(column, column_filter)
+
+    # --- the columns: order, visibility (2026-09-09) ---
+
+    def remember_default(self) -> None:
+        """The arrangement *Reset columns* goes back to (called once the view
+        has laid the defaults out)."""
+        self._default_state = self.saveState()
+
+    def _names(self) -> dict[int, str]:
+        model = self.model()
+        return {
+            c: str(model.headerData(c, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or c)
+            for c in range(self.count())
+        } if model is not None else {}
+
+    def hidden_columns(self) -> list[int]:
+        """The columns a right-click can bring back, in logical order."""
+        return [c for c in range(self.count()) if c not in self._fixed and self.isSectionHidden(c)]
+
+    def first_visible_column(self) -> int:
+        """The logical column at the left edge — where the anchor circle and
+        the section labels go."""
+        for visual in range(self.count()):
+            logical = self.logicalIndex(visual)
+            if logical >= 0 and not self.isSectionHidden(logical):
+                return logical
+        return 0
+
+    def set_column_visible(self, column: int, visible: bool) -> None:
+        """Show or hide a column — never the last one shown."""
+        if column in self._fixed:
+            return
+        shown = [c for c in range(self.count()) if c not in self._fixed and not self.isSectionHidden(c)]
+        if not visible and shown == [column]:
+            return
+        self.setSectionHidden(column, not visible)
+        self.layout_changed.emit()
+
+    def replace_column(self, old: int, new: int) -> None:
+        """*Replace with*: `new` takes `old`'s place and `old` goes."""
+        if old == new or old in self._fixed or new in self._fixed:
+            return
+        position = self.visualIndex(old)
+        self.setSectionHidden(new, False)
+        self.moveSection(self.visualIndex(new), position)
+        self.setSectionHidden(old, True)
+        self.layout_changed.emit()
+
+    def reset_columns(self) -> None:
+        if self._default_state is not None:
+            self.restoreState(self._default_state)
+            self.layout_changed.emit()
+
+    def column_menu(self, section: int) -> QMenu:
+        """The right-click menu on a section: replace it with a hidden column,
+        tick columns on or off, reset."""
+        names = self._names()
+        menu = QMenu(self)
+        if section >= 0 and section not in self._fixed:
+            replace = menu.addMenu(f"Replace “{names.get(section, section)}” with")
+            hidden = self.hidden_columns()
+            for column in hidden:
+                action = replace.addAction(names.get(column, str(column)))
+                action.triggered.connect(lambda _checked=False, a=section, b=column: self.replace_column(a, b))
+            replace.setEnabled(bool(hidden))
+            menu.addSeparator()
+        for column in range(self.count()):
+            if column in self._fixed:
+                continue
+            action = menu.addAction(names.get(column, str(column)))
+            action.setCheckable(True)
+            action.setChecked(not self.isSectionHidden(column))
+            action.triggered.connect(lambda on, c=column: self.set_column_visible(c, bool(on)))
+        menu.addSeparator()
+        reset = menu.addAction("Reset columns")
+        reset.triggered.connect(self.reset_columns)
+        return menu
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.column_menu(self.logicalIndexAt(event.pos())).exec(event.globalPos())
 
     # --- painting ---
 

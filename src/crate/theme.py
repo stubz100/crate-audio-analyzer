@@ -165,6 +165,11 @@ QSplitter::handle:vertical {{ height: 6px; }}
 QStatusBar {{ background: {PANEL.name()}; color: {TEXT_DIM.name()}; border-top: 1px solid {BORDER.name()}; }}
 QLabel#caption {{ color: {TEXT_DIM.name()}; }}
 QWidget#header {{ background: {PANEL.name()}; border-bottom: 1px solid {BORDER.name()}; }}
+QMenu {{ background: {PANEL.name()}; color: {TEXT.name()}; border: 1px solid {BORDER.name()}; padding: 4px 0; }}
+QMenu::item {{ padding: 4px 22px 4px 24px; }}
+QMenu::item:selected {{ background: {ACCENT_DIM.name()}; }}
+QMenu::item:disabled {{ color: {TEXT_DIM.name()}; }}
+QMenu::separator {{ height: 1px; background: {BORDER.name()}; margin: 3px 6px; }}
 QFrame#filterPopup {{ background: {PANEL.name()}; border: 1px solid {BORDER.name()}; }}
 QLabel#nowPlaying {{ color: {TEXT.name()}; font-weight: 600; }}
 """
