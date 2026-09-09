@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -257,12 +259,13 @@ class MainWindow(QMainWindow):
         self._close_pending = False
         self._quiet_select = False                    # a reload re-selects without replaying
         self._plan_steps: list[tuple[str, str | None]] = []   # the Recompute tab's Run, step by step
+        self._expand_queue: deque[int] = deque()              # samples still to open after a ranking / search
+        self._expand_generation = 0
         self._feature_thread: _FeatureThread | None = None
         self._feature_generation = 0                            # bumped by reload(): a table loaded before is stale
         self._feature_waiters: list = []                        # callbacks for when the table lands
         self._layout_dir = Path(self._cache_dir).parent / "layouts"
         self._rows_by_id: dict[int, object] = {}
-        self._source_row_of: dict[int, int] = {}
 
         # --- the header across the window (2026-09-08, the user's steer): the
         # view switch stacked at the left with room for a third button, the
@@ -472,7 +475,6 @@ class MainWindow(QMainWindow):
         keep = self._current_item                        # re-selected below, quietly
         rows = load_samples(self._conn, scope=scope)
         self._rows_by_id = {r.id: r for r in rows}
-        self._source_row_of = {r.id: i for i, r in enumerate(rows)}
         self._samples.set_rows(rows, load_sections(self._conn, scope))   # every section under its sample
         self._samples.set_similarity(None)
         self._samples.set_match(None)
@@ -1022,17 +1024,37 @@ class MainWindow(QMainWindow):
     def _expand_hits(self) -> None:
         """Open the samples whose winning hit is a section (so the ranked or
         matched section shows, at the top of its sample's sections); every
-        other sample stays folded."""
-        # Called right after a model reset, which folds everything already: no
-        # collapseAll() first (it walked 3k open samples in 0.6 s, measured 2026-09-08).
-        self._table.setUpdatesEnabled(False)         # thousands of expands: one relayout, not one each
+        other sample stays folded. Called right after a model reset, which
+        folds everything already. The opening runs in slices between
+        event-loop turns, in the list's order (2026-09-09, the user: anchoring
+        locked the window): the rows in view open at once, the rest follow
+        while the window stays live; a newer ranking drops what is left."""
+        self._expand_generation += 1
+        hits = self._samples.hit_sample_ids()
+        self._expand_queue.clear()
+        if not hits:
+            return
+        proxy, model = self._proxy, self._samples
+        for row in range(proxy.rowCount()):
+            sample_id = model.row_at(proxy.mapToSource(proxy.index(row, 0))).id
+            if sample_id in hits:
+                self._expand_queue.append(sample_id)
+        self._expand_slice(self._expand_generation, budget_s=0.06)
+
+    def _expand_slice(self, generation: int, budget_s: float = 0.03) -> None:
+        if generation != self._expand_generation:
+            return
+        deadline = time.perf_counter() + budget_s
+        self._table.setUpdatesEnabled(False)
         try:
-            for sample_id in self._samples.hit_sample_ids():
-                source_row = self._source_row_of.get(sample_id)
+            while self._expand_queue and time.perf_counter() < deadline:
+                source_row = self._samples.row_of(self._expand_queue.popleft())
                 if source_row is not None:
                     self._table.expand(self._proxy.mapFromSource(self._samples.index(source_row, 0)))
         finally:
             self._table.setUpdatesEnabled(True)
+        if self._expand_queue:
+            QTimer.singleShot(0, lambda: self._expand_slice(generation))
 
     # --- the window remembers itself (2026-09-09, the user's steer) ---
 
@@ -1084,7 +1106,7 @@ class MainWindow(QMainWindow):
 
     def _select_sample(self, sample_id: int) -> None:
         """A click on the map selects the sample in the list (and previews it)."""
-        source_row = self._source_row_of.get(sample_id)
+        source_row = self._samples.row_of(sample_id)
         if source_row is None:
             return
         proxy_index = self._proxy.mapFromSource(self._samples.index(source_row, 0))

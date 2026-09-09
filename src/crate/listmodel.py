@@ -126,14 +126,18 @@ class SampleTreeModel(QAbstractItemModel):
         self._children: dict[int, list[Section]] = {}       # the child rows shown, in their order
         self._parent_of: dict[int, int] = {}                # segment id → sample id, for the shown rows
         self._anchor: tuple[str, int] | None = None     # (kind, id): the ⚓ row (§9.2)
+        self._sort: tuple[int, Qt.SortOrder] | None = None   # the column and order the rows are kept in
+        self._row_index: dict[int, int] = {}                  # sample id → row, kept with every reorder
 
     # --- data in ---
 
     def set_rows(self, rows: list[SampleRow], sections: Mapping[int, list[Section]] | None = None) -> None:
         self.beginResetModel()
         self._rows = list(rows)
+        self._row_index = {r.id: i for i, r in enumerate(self._rows)}
         self._sections = {k: list(v) for k, v in (sections or {}).items()}
         self._rebuild_children()
+        self._apply_sort()
         self.endResetModel()
 
     def set_similarity(self, scores: Scores | None) -> None:
@@ -142,6 +146,7 @@ class SampleTreeModel(QAbstractItemModel):
         self._similarity = scores
         self._hits = self._pick_hits()
         self._rebuild_children()
+        self._apply_sort()
         self.endResetModel()
 
     def set_match(self, scores: Scores | None) -> None:
@@ -150,6 +155,7 @@ class SampleTreeModel(QAbstractItemModel):
         self._match = scores
         self._hits = self._pick_hits()
         self._rebuild_children()
+        self._apply_sort()
         self.endResetModel()
 
     def _pick_hits(self) -> dict[int, Hit]:
@@ -159,6 +165,74 @@ class SampleTreeModel(QAbstractItemModel):
         if self._similarity is not None:
             return dict(self._similarity.hits)
         return {}
+
+    # --- sorting, in the model (2026-09-09) ---
+
+    def _sort_key(self, column: int) -> Callable[[SampleRow], object]:
+        """The key a column sorts samples by — what SORT_ROLE returns, without
+        going through data()."""
+        if column == self.COL_FOLDER:
+            return lambda r: r.folder.lower()
+        if column == self.COL_FILE:
+            return lambda r: r.filename.lower()
+        if column == self.COL_CAPTION:
+            return lambda r: r.caption.lower()
+        if column == self.COL_LENGTH:
+            return lambda r: r.duration_s if r.duration_s is not None else -1.0
+        if column == self.COL_TYPE:
+            return lambda r: r.structural_type or ""
+        if column == self.COL_BPM:
+            return lambda r: r.tempo_bpm if r.tempo_bpm is not None else -1.0
+        if column == self.COL_KEY:
+            return lambda r: r.key or ""
+        if column == self.COL_TAGS:
+            return lambda r: r.tags.lower()
+        if column == self.COL_HITS:
+            return lambda r: r.segment_count
+        if column == self.COL_SIMILARITY:
+            return lambda r: self._similarity_cell("sample", r.id, False)
+        if column == self.COL_MATCH:
+            return lambda r: _score_cell(self._match, "sample", r.id, False)
+        return lambda r: 0
+
+    def _apply_sort(self) -> None:
+        """Order the rows by the current sort (inside a reset)."""
+        if self._sort is None or not self._rows:
+            return
+        column, order = self._sort
+        self._rows.sort(key=self._sort_key(column), reverse=order == Qt.SortOrder.DescendingOrder)
+        self._row_index = {r.id: i for i, r in enumerate(self._rows)}
+
+    def sort(self, column: int, order=Qt.SortOrder.AscendingOrder) -> None:  # type: ignore[override]
+        """Sort here, not in the proxy (2026-09-09, the user: anchoring locked
+        the window): the proxy compares rows by calling back into Python for
+        every comparison — over a second at 30k rows — while a key per sample
+        is milliseconds. Sections keep `_rebuild_children`'s order (by score
+        when scored, else time). Persistent indexes (the selection, the open
+        samples) follow their rows."""
+        self._sort = (column, order)
+        if not self._rows:
+            return
+        self.layoutAboutToBeChanged.emit()
+        persistent = self.persistentIndexList()
+        remembered = []
+        for index in persistent:
+            if index.internalId() == _TOP:
+                remembered.append((self._rows[index.row()].id, None, index.column()))
+            else:
+                remembered.append((self._rows[int(index.internalId()) - 1].id, index.row(), index.column()))
+        self._apply_sort()
+        self._row_index = {r.id: i for i, r in enumerate(self._rows)}
+        row_of = self._row_index
+        moved = []
+        for sample_id, child_row, column_ in remembered:
+            row = row_of[sample_id]
+            if child_row is None:
+                moved.append(self.createIndex(row, column_, _TOP))
+            else:
+                moved.append(self.createIndex(child_row, column_, row + 1))
+        self.changePersistentIndexList(persistent, moved)
+        self.layoutChanged.emit()
 
     def _rebuild_children(self) -> None:
         """The child rows: every segment, plus the CLAP windows that carry a
@@ -183,6 +257,10 @@ class SampleTreeModel(QAbstractItemModel):
             self._children[r.id] = [s for _, _, s in shown]
             for section in self._children[r.id]:
                 self._parent_of[section.segment_id] = r.id
+
+    def row_of(self, sample_id: int) -> int | None:
+        """The sample's row in this model as it is ordered now."""
+        return self._row_index.get(sample_id)
 
     def children_of(self, sample_id: int) -> list[Section]:
         return list(self._children.get(sample_id, ()))
@@ -368,7 +446,7 @@ class SampleTreeModel(QAbstractItemModel):
                 continue
             kind, item_id = old
             sample_id = item_id if kind == "sample" else self._parent_of.get(item_id)
-            source_row = next((i for i, r in enumerate(self._rows) if r.id == sample_id), None)
+            source_row = self._row_index.get(sample_id)
             if source_row is None:
                 continue
             self.dataChanged.emit(self.index(source_row, 0), self.index(source_row, self.COL_SIMILARITY), roles)
@@ -453,6 +531,13 @@ class ListProxy(QSortFilterProxyModel):
     @property
     def filtered_columns(self) -> frozenset[int]:
         return frozenset(self._column_filters)
+
+    def sort(self, column: int, order=Qt.SortOrder.AscendingOrder) -> None:  # type: ignore[override]
+        """The source model sorts (see `SampleTreeModel.sort`); this proxy only
+        filters, so its own sort column stays unset."""
+        source = self.sourceModel()
+        if source is not None:
+            source.sort(column, order)
 
     def set_axis_lookup(self, lookup: AxisLookup) -> None:
         """Per-sample distance-from-anchor by axis (§9.5); reset with a

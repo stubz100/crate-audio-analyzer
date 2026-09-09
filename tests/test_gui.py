@@ -92,7 +92,7 @@ def _anchor_current(app, window) -> None:
     """Anchor the selected row (the A shortcut / a click on its ⚓) and wait for
     the feature table's first load, which happens on a thread."""
     window._anchor_current()
-    _wait_until(app, lambda: window._feature_thread is None and not window._feature_waiters)
+    _wait_until(app, lambda: window._feature_thread is None and not window._feature_waiters and not window._expand_queue)
 
 
 def _rerank(app, window) -> None:
@@ -219,7 +219,7 @@ def test_text_search_scores_the_list_and_nests_a_sub_hit(app, index, tmp_path):
         window._autoplay.setChecked(False)
         window._search_panel.search_for("kick drum")
         assert window._search_thread is not None                # embedding runs off the GUI thread
-        _wait_until(app, lambda: window._search_thread is None and window._samples.has_match)
+        _wait_until(app, lambda: window._search_thread is None and window._samples.has_match and not window._expand_queue)
 
         assert not window._table.isColumnHidden(SampleTreeModel.COL_MATCH)
         assert "kick drum" in window.statusBar().currentMessage()
@@ -641,7 +641,7 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         assert window._map._selected == loop_id
 
         window._search_panel.search_for("kick drum")               # the loop's hit is a segment
-        _wait_until(app, lambda: window._search_thread is None and window._samples.has_match)
+        _wait_until(app, lambda: window._search_thread is None and window._samples.has_match and not window._expand_queue)
         assert loop_id in window._map._badges
         window._search_panel._clear_search()
         assert loop_id not in window._map._badges
@@ -693,7 +693,8 @@ def test_a_search_can_land_on_a_window_inside_a_long_file(app, tmp_path):
         assert "3 CLAP windows" in window.statusBar().currentMessage()
 
         window._search_panel.search_for("a door slam")
-        _wait_until(app, lambda: window._search_thread is None and "door slam" in window.statusBar().currentMessage())
+        _wait_until(app, lambda: window._search_thread is None and "door slam" in window.statusBar().currentMessage()
+                    and not window._expand_queue)
         parent = window._proxy.index(_proxy_row_named(window, "ambience.wav"), 0)
         assert window._proxy.rowCount(parent) >= 1 and window._table.isExpanded(parent)
         sub_hit = window._proxy.index(0, 0, parent)                    # the best-matching section first
@@ -1106,3 +1107,33 @@ def test_columns_are_configurable_and_the_window_remembers_itself(app, index, tm
         assert abs(again.width() - 700) <= 2 and abs(again.height() - 520) <= 40
     finally:
         again.close()
+
+
+# --- sorting lives in the model; the selection survives it (2026-09-09) ---
+
+
+def test_sorting_in_the_model_keeps_the_selection_and_the_open_samples(app, index, tmp_path):
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
+    try:
+        window._autoplay.setChecked(False)
+        C = SampleTreeModel
+        assert window._proxy.sortColumn() == -1                            # the proxy never sorts
+        window._table.setCurrentIndex(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))
+        loop = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
+        window._table.expand(loop)
+        window._table.sortByColumn(C.COL_LENGTH, Qt.SortOrder.AscendingOrder)   # hit (0.4 s) above loop (4.0 s)
+        assert window._proxy.data(window._proxy.index(0, C.COL_FILE)) == "hit.wav"
+        assert window._proxy.sortColumn() == -1 and window._samples._sort == (C.COL_LENGTH, Qt.SortOrder.AscendingOrder)
+        current = window._table.currentIndex()
+        assert window._proxy.data(window._proxy.index(current.row(), C.COL_FILE)) == "loop.wav"   # still selected…
+        assert window._table.isExpanded(window._proxy.index(_proxy_row_named(window, "loop.wav"), 0))   # … and open
+        window._table.sortByColumn(C.COL_LENGTH, Qt.SortOrder.DescendingOrder)
+        assert window._proxy.data(window._proxy.index(0, C.COL_FILE)) == "loop.wav"
+        assert window._table.isExpanded(window._proxy.index(0, 0))
+        window.reload()                                                     # the order survives a reload
+        assert window._proxy.data(window._proxy.index(0, C.COL_FILE)) == "loop.wav"
+    finally:
+        window.close()

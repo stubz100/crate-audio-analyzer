@@ -1279,3 +1279,28 @@ The user: the collapse/expand and the anchor circle should both be separate colu
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-09 — Anchoring no longer locks the window
+
+**Phase:** 7 polish (the list) · `NOFREEZE_HASH`
+
+The user: anchoring a sample locks the system into a calculation — manage it, by precomputing every anchoring scenario on recompute, or by lazy loading with items rearranging one by one.
+
+**Done**
+
+- **Diagnosis first**: the ranking pass is 25 ms (§9.2's measurement stands). The lock was the list: Qt's proxy sorted the 32k rows (4.5k samples + 27k sections) by calling Python's `data()` for every comparison, and `_expand_hits` opened 3k samples in one go — 1.8–2.2 s on the GUI thread per click.
+- **The model sorts itself** (`SampleTreeModel.sort`, `_sort_key`, `_apply_sort`): a key per sample, `layoutAboutToBeChanged` / `changePersistentIndexList` / `layoutChanged`, so the selection and the open samples follow their rows; `ListProxy.sort` forwards to the source and never sets its own sort column, so the proxy only filters (4.5k `filterAcceptsRow` calls). The sort is kept across resets (`_apply_sort` inside `set_rows` / `set_similarity` / `set_match`), so a saved sort applies to a fresh load. Sections keep `_rebuild_children`'s order. `row_of` replaces the window's load-order map, which went stale the moment the model reordered itself.
+- **Expansion in slices** (`_expand_hits` → `_expand_slice`): the samples with a winning section are queued in the list's order and opened 60 ms on the click, then 30 ms per event-loop turn (`QTimer.singleShot(0)`), the rows in view first; a newer ranking or search drops the rest (`_expand_generation`).
+
+**Decided**
+
+- No precomputed anchor pairs: 4.5k × 4.5k is 80 MB today and impossible at the library's scale, and it would not have touched the actual cost. "Lazy, one by one" is exactly what the sliced expansion does for the one step that was still heavy.
+
+**Verified**
+
+- `uv run pytest tests -q` → **204 passed, 3 skipped**; pyflakes clean. New: the proxy's sort column stays -1, a sort by Length reorders through the model, the selection and the open sample survive it, and the order survives a reload; every ranking and search test waits for the expansion queue.
+- The user's index (a copy), offscreen: the first anchor click after a load returns at once and finishes in 0.92 s with no single block of the GUI thread over 0.17 s; a warm click holds it for 0.19–0.23 s and opens 3,063–3,564 samples; a sort of the 32k rows by File or Similarity is 0.43 s. Before: 1.8–2.2 s locked.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
