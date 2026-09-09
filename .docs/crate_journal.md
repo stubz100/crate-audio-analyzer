@@ -1282,7 +1282,7 @@ The user: the collapse/expand and the anchor circle should both be separate colu
 
 ## 2026-09-09 — Anchoring no longer locks the window
 
-**Phase:** 7 polish (the list) · `NOFREEZE_HASH`
+**Phase:** 7 polish (the list) · `a70c764`
 
 The user: anchoring a sample locks the system into a calculation — manage it, by precomputing every anchoring scenario on recompute, or by lazy loading with items rearranging one by one.
 
