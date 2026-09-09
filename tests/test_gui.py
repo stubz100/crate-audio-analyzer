@@ -945,6 +945,9 @@ def test_save_and_delete_segments_from_the_waveform(app, index, tmp_path):
                     and conn.execute("SELECT COUNT(*) FROM segments WHERE id = ?", (new_id,)).fetchone()[0] == 0)
         _wait_until(app, lambda: all(s.id != new_id for s in window._segment_rows))
         assert "deleted" in jobs.log_text() and window._current_sample == loop_id
+        assert window._current_item == ("sample", loop_id)            # the gone segment's parent is current now
+        view.wait_for_load()
+        assert view.loaded and window._current is not None and window._current.name == "loop.wav"
     finally:
         window.close()
 

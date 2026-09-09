@@ -1214,3 +1214,26 @@ The user: the play icon twice as big; a sample should keep all its sections unde
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-09 — Review of 2026-09-08's work
+
+**Phase:** review · `REVIEW_HASH`
+
+The user: a quick review before wrapping up. The multi-agent review hit the session limit; this is a direct read of the day's diff (25 files, +2,798 / −772): the anchored-only recompute and schema v10, the marker editing, the waveform zoom and threaded reads, the header and column filters, the tab reshuffle, the sections tree.
+
+**Found and fixed**
+
+- `reload()` re-selects the current item after a job by mapping a current segment to its parent through the index; a segment that the job itself removed — *Delete segment* on the selected one, or an anchored-only recompute re-detecting it — mapped to nothing, so the selection, the preview target and the waveform went stale. It now falls back to the parent remembered at selection time (`_current_sample`); the delete test asserts the parent is current and its waveform loaded afterwards.
+
+**Read and left alone**
+
+- `SampleTreeModel.index()` bounds, `_rebuild_children`, `set_anchor`'s targeted signals, the proxy's child handling; the waveform's press/move/release state machine and `_ordered`'s clipping before the audio lands; `FilterHeader`'s indicator restore around the click; `ids_clause` parameter order in the four stages; the v10 rebuild.
+- Known leftovers, not bugs: `Criteria.types` / `duration_s` / `tempo_bpm` are no longer set by any panel (the header filters took over) and `SegmentTableModel` is no longer used by the window — both tested, both cheap to keep until Phase 11/12 touches them. The Hits column counts a sample's segments while its child rows can also carry scored CLAP windows, so the two numbers can differ by a few.
+
+**Verified**
+
+- `uv run pytest tests -q` → **201 passed, 3 skipped**; pyflakes clean.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections; a lazier section model before the list is asked to hold hundreds of thousands of rows (Phase 12).

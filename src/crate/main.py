@@ -461,7 +461,10 @@ class MainWindow(QMainWindow):
         )
         if keep is not None:
             kind, item_id = keep
-            sample_id = item_id if kind == KIND_SAMPLE else self._parent_of_segment(item_id)
+            # A current segment that is gone (deleted, or redone by a recompute)
+            # falls back to its parent, which was remembered at selection time
+            # (found in review 2026-09-09: the selection went stale instead).
+            sample_id = item_id if kind == KIND_SAMPLE else (self._parent_of_segment(item_id) or self._current_sample)
             if sample_id in self._rows_by_id:
                 self._quiet_select = True
                 try:
