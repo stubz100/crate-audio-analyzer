@@ -18,7 +18,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QPainter
+from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtWidgets import QApplication
 
 from .listmodel import ColumnFilter
-from .theme import ACCENT
+from .theme import ACCENT, TEXT, TEXT_DIM
 
 NONE_LABEL = "(none)"      # how an empty cell reads in a checklist
 
@@ -218,11 +218,23 @@ class FilterHeader(QHeaderView):
     filter_changed = Signal(int, object)     # column, ColumnFilter | None
     sort_requested = Signal(int, object)     # column, Qt.SortOrder
     layout_changed = Signal()                # moved, resized, shown, hidden or reset
+    tree_clicked = Signal()                  # the expander column's header cell: expand / collapse all
 
-    def __init__(self, specs: dict[int, ColumnSpec], parent=None, fixed: Iterable[int] = ()) -> None:
+    def __init__(
+        self, specs: dict[int, ColumnSpec], parent=None, fixed: Iterable[int] = (),
+        pinned: dict[int, int] | None = None, tree_column: int = -1, anchor_column: int = -1,
+    ) -> None:
+        """`fixed`: columns the menu leaves alone. `pinned`: {column: width} —
+        the columns nailed to the left edge, unmovable and unresizable (the
+        expander and the anchor); `tree_column` is the one whose header cell
+        toggles the sections, `anchor_column` the one whose header shows a ring."""
         super().__init__(Qt.Orientation.Horizontal, parent)
         self._specs = dict(specs)
-        self._fixed = set(fixed)
+        self._pinned = dict(pinned or {})
+        self._fixed = set(fixed) | set(self._pinned)
+        self._tree_column = tree_column
+        self._anchor_column = anchor_column
+        self._sections_open = False
         self._filters: dict[int, ColumnFilter] = {}
         self._popup: FilterPopup | None = None
         self._before: tuple[int, Qt.SortOrder] | None = None
@@ -233,7 +245,7 @@ class FilterHeader(QHeaderView):
         self.setSortIndicatorShown(True)
         self.setSectionsMovable(True)
         self.sectionClicked.connect(self.open_filter)
-        self.sectionMoved.connect(lambda *_: self.layout_changed.emit())
+        self.sectionMoved.connect(self._on_section_moved)
         self.sectionResized.connect(lambda *_: self.layout_changed.emit())
 
     def install_on(self, view) -> None:
@@ -243,6 +255,9 @@ class FilterHeader(QHeaderView):
         self.setSectionsClickable(True)
         self.setSortIndicatorShown(True)
         self.setSectionsMovable(True)
+        for column, width in self._pinned.items():
+            self.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            self.resizeSection(column, width)
 
     # --- a click opens the popup; the indicator stays where the last sort put it ---
 
@@ -250,6 +265,8 @@ class FilterHeader(QHeaderView):
         self._before = (self.sortIndicatorSection(), self.sortIndicatorOrder())
         self._press_pos = event.position()
         self._dragged = False
+        if self.logicalIndexAt(event.position().toPoint()) in self._pinned:
+            self.setSectionsMovable(False)          # a pinned column never starts a drag
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -260,14 +277,20 @@ class FilterHeader(QHeaderView):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         super().mouseReleaseEvent(event)          # flips the indicator on a click: put it back
+        self.setSectionsMovable(True)
         if self._before is not None and (self.sortIndicatorSection(), self.sortIndicatorOrder()) != self._before:
             self.setSortIndicator(*self._before)
         self._before = None
 
     def open_filter(self, column: int) -> None:
+        if self._dragged:
+            return
+        if column == self._tree_column:             # the expander column's header: expand / collapse all
+            self.tree_clicked.emit()
+            return
         spec = self._specs.get(column)
         model = self.model()
-        if spec is None or model is None or self._dragged:
+        if spec is None or model is None:
             return
         title = str(model.headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or "")
         values: list[str] = []
@@ -317,16 +340,37 @@ class FilterHeader(QHeaderView):
             for c in range(self.count())
         } if model is not None else {}
 
+    def _on_section_moved(self, logical: int, old_visual: int, new_visual: int) -> None:
+        """A pinned column stays where it is, and nothing lands among the pinned
+        ones: such a move is undone before it is saved."""
+        if logical in self._pinned or new_visual < len(self._pinned):
+            self.blockSignals(True)
+            try:
+                self.moveSection(new_visual, old_visual)
+            finally:
+                self.blockSignals(False)
+            return
+        self.layout_changed.emit()
+
+    @property
+    def sections_open(self) -> bool:
+        return self._sections_open
+
+    def set_sections_open(self, open_: bool) -> None:
+        """What the expander column's header cell shows (▾ open, ▸ folded)."""
+        self._sections_open = bool(open_)
+        if self._tree_column >= 0:
+            self.updateSection(self._tree_column)
+
     def hidden_columns(self) -> list[int]:
         """The columns a right-click can bring back, in logical order."""
         return [c for c in range(self.count()) if c not in self._fixed and self.isSectionHidden(c)]
 
     def first_visible_column(self) -> int:
-        """The logical column at the left edge — where the anchor circle and
-        the section labels go."""
+        """The first movable column shown — where a section row's label goes."""
         for visual in range(self.count()):
             logical = self.logicalIndex(visual)
-            if logical >= 0 and not self.isSectionHidden(logical):
+            if logical >= 0 and logical not in self._pinned and not self.isSectionHidden(logical):
                 return logical
         return 0
 
@@ -389,6 +433,18 @@ class FilterHeader(QHeaderView):
         painter.save()
         super().paintSection(painter, rect, logical_index)
         painter.restore()
+        if logical_index == self._tree_column:
+            painter.save()
+            painter.setPen(TEXT)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "▾" if self._sections_open else "▸")
+            painter.restore()
+        elif logical_index == self._anchor_column:
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(TEXT_DIM, 1.2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(rect.center().x(), rect.center().y()), 4.0, 4.0)
+            painter.restore()
         if logical_index in self._filters:
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)

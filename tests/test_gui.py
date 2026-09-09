@@ -991,9 +991,10 @@ def test_every_section_sits_under_its_sample_ordered_by_similarity(app, index, t
     window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
     try:
         window._autoplay.setChecked(False)
-        assert list(SampleTreeModel.COLUMNS[:3]) == ["Folder", "File", "Caption"]
+        assert list(SampleTreeModel.COLUMNS[:5]) == ["", "", "Folder", "File", "Caption"]
         header = window._table.header()
-        assert header.visualIndex(SampleTreeModel.COL_FOLDER) == 0 and header.visualIndex(SampleTreeModel.COL_FILE) == 1
+        assert header.visualIndex(SampleTreeModel.COL_TREE) == 0 and header.visualIndex(SampleTreeModel.COL_ANCHOR) == 1
+        assert header.visualIndex(SampleTreeModel.COL_FOLDER) == 2 and header.visualIndex(SampleTreeModel.COL_FILE) == 3
         loop_id = conn.execute("SELECT id FROM samples WHERE filename = 'loop.wav'").fetchone()[0]
         expected = conn.execute(
             "SELECT COUNT(*) FROM segments WHERE sample_id = ? AND detection_method != 'window'", (loop_id,)
@@ -1001,7 +1002,7 @@ def test_every_section_sits_under_its_sample_ordered_by_similarity(app, index, t
         loop = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
         n = window._proxy.rowCount(loop)
         assert n == expected > 1 and not window._table.isExpanded(loop)         # all of them, folded
-        starts = [window._proxy.data(window._proxy.index(i, 0, loop), SORT_ROLE) for i in range(n)]
+        starts = [window._proxy.data(window._proxy.index(i, SampleTreeModel.COL_FOLDER, loop), SORT_ROLE) for i in range(n)]
         assert starts == sorted(starts)                                          # in time order, nothing scored
         assert window._proxy.data(window._proxy.index(0, SampleTreeModel.COL_CAPTION)) in ("", "a click loop")
 
@@ -1036,12 +1037,22 @@ def test_columns_are_configurable_and_the_window_remembers_itself(app, index, tm
         app.processEvents()
         header = window._header
         C = SampleTreeModel
-        assert header.sectionsMovable() and window._table.treePosition() == -1
+        assert header.sectionsMovable() and window._table.treePosition() == C.COL_TREE
         assert header.first_visible_column() == C.COL_FOLDER
+        for column in C.FIXED:                                           # pinned: no drag, no resize, no popup
+            header.moveSection(header.visualIndex(column), 5)
+            assert header.visualIndex(column) == column
+            header.open_filter(column)
+            assert header.popup is None
+            assert header.sectionResizeMode(column) == header.ResizeMode.Fixed
+        assert header.sections_open                                       # the expander's cell toggled instead
+        window._toggle_sections(False)
+        header.moveSection(header.visualIndex(C.COL_FILE), 0)             # nothing lands among the pinned ones
+        assert header.visualIndex(C.COL_FILE) == 3
 
-        header.moveSection(header.visualIndex(C.COL_FOLDER), 1)          # dragged: File is first now
-        assert header.first_visible_column() == C.COL_FILE and settings.value("list/header") is not None
-        assert window._anchor_delegate._first() == C.COL_FILE             # the circle moved with it
+        header.moveSection(header.visualIndex(C.COL_FOLDER), 3)          # dragged after File: File is first now
+        assert header.first_visible_column() == C.COL_FILE and settings.value("list/header2") is not None
+        assert window._anchor_delegate._first() == C.COL_FILE             # the section labels moved with it
 
         header.set_column_visible(C.COL_BPM, False)                       # hidden…
         assert header.isSectionHidden(C.COL_BPM) and header.hidden_columns() == [C.COL_BPM]
@@ -1056,21 +1067,23 @@ def test_columns_are_configurable_and_the_window_remembers_itself(app, index, tm
         texts = [a.text() for a in menu.actions()]
         assert "Reset columns" in texts and any(t.startswith("Replace") for t in texts)
         assert "Key" in texts and "Similarity" not in texts
-        for column in range(C.COL_HITS + 1):                              # never the last one shown
+        assert all(a.text() for a in menu.actions() if a.isCheckable())     # the fixed columns are not offered
+        for column in range(C.COL_FOLDER, C.COL_HITS + 1):                # never the last one shown
             header.set_column_visible(column, False)
-        assert len([c for c in range(C.COL_HITS + 1) if not header.isSectionHidden(c)]) == 1
+        assert len([c for c in range(C.COL_FOLDER, C.COL_HITS + 1) if not header.isSectionHidden(c)]) == 1
+        assert not any(header.isSectionHidden(c) for c in C.FIXED)
         header.reset_columns()
         assert header.first_visible_column() == C.COL_FOLDER and not header.hidden_columns()
-        header.moveSection(header.visualIndex(C.COL_FOLDER), 1)
+        header.moveSection(header.visualIndex(C.COL_FOLDER), 3)
         header.set_column_visible(C.COL_TAGS, False)
         window._table.sortByColumn(C.COL_LENGTH, Qt.SortOrder.DescendingOrder)
 
         loop = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
-        assert not window._table.isExpanded(loop)
-        window._sections_button.setChecked(True)                          # the header's third button
-        assert window._table.isExpanded(loop) and window._sections_button.text().startswith("Sections ▾")
-        window._sections_button.setChecked(False)
-        assert not window._table.isExpanded(loop)
+        assert not window._table.isExpanded(loop) and not header.sections_open
+        header.tree_clicked.emit()                                        # the expander column's header cell
+        assert window._table.isExpanded(loop) and header.sections_open
+        header.tree_clicked.emit()
+        assert not window._table.isExpanded(loop) and not header.sections_open
 
         window._tabs.setCurrentIndex(2)
         window._map_button.click()

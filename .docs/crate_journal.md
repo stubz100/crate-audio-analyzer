@@ -1259,3 +1259,23 @@ The user: an expand/collapse-all for the hits in the list; the columns configura
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-09 — The expander and the anchor as two fixed columns
+
+**Phase:** 7 polish (the list) · `FIXED_HASH`
+
+The user: the collapse/expand and the anchor circle should both be separate columns — fixed: unmovable, unsortable, unsearchable; the Sections button comes out of the header.
+
+**Done**
+
+- `SampleTreeModel.COLUMNS` opens with two blank-titled columns, `COL_TREE` and `COL_ANCHOR` (`FIXED`); every other `COL_*` shifted by two. The view's tree position is `COL_TREE`; `AnchorDelegate` paints the circle in `COL_ANCHOR` (a click there anchors or clears) and a section row's label in the first movable column shown (`SECTION_LABEL_ROLE`); the fixed cells are empty for every role that sorts or filters.
+- `FilterHeader` takes `pinned={column: width}`, `tree_column`, `anchor_column`: pinned sections get a fixed resize mode and never start a drag (movability is switched off for the press), a move that involves them or lands among them is undone before it is saved, they are in neither menu, and they have no popup. The expander column's header cell paints ▸ / ▾ (`set_sections_open`) and a click on it emits `tree_clicked`; the anchor column's header cell paints a ring. The window's `_toggle_sections` hangs off `tree_clicked`; the `Sections` button is gone; the header state key is `list/header2` (a saved state with the old column count would not restore anyway). The reload's resize-to-contents skips the pinned columns.
+
+**Verified**
+
+- `uv run pytest tests -q` → **203 passed, 3 skipped**; pyflakes clean. New: the pinned columns refuse a move, a resize mode change and a popup, and nothing can be dropped among them; Folder dragged after File puts the section labels in File; the fixed columns are absent from the right-click menu and are never hidden; the expander's header cell toggles all sections and shows its state; the header test's drag and toggle.
+- Offscreen on the user's index: the two fixed columns at the left, Folder after File, an anchor's filled circle in its column, every section open in 0.8 s from the expander's header cell. Screenshot checked.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.

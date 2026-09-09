@@ -46,7 +46,8 @@ log = logging.getLogger(__name__)
 SORT_ROLE = Qt.ItemDataRole.UserRole  # raw values, so the proxy sorts numbers as numbers
 ANCHOR_ROLE = Qt.ItemDataRole.UserRole + 1   # True for the row that carries the anchor circle
 SECTION_LABEL_ROLE = Qt.ItemDataRole.UserRole + 2   # a section row's "↳ hit @ …": the delegate draws it in the first column shown
-ANCHOR_GLYPH_WIDTH = 24                       # the click zone at the start of every row
+ANCHOR_COLUMN_WIDTH = 26                      # the fixed anchor column
+TREE_COLUMN_WIDTH = 24                        # the fixed expander column
 _TOP = 0  # internalId of a top-level index; a sub-hit carries its parent's row + 1
 
 
@@ -100,12 +101,14 @@ class SampleTreeModel(QAbstractItemModel):
     orders them by similarity). A CLAP window of a long file (§6.4) shows only
     while it carries a score."""
 
-    # Folder first and the caption after the file (2026-09-08, the user's steer);
-    # the four CLAP columns left the list earlier that day.
-    COLUMNS = ("Folder", "File", "Caption", "Length", "Type", "BPM", "Key", "Tags", "Hits", "Similarity", "Match")
-    COL_FOLDER, COL_FILE, COL_CAPTION, COL_LENGTH, COL_TYPE, COL_BPM, COL_KEY, COL_TAGS, COL_HITS = range(9)
-    COL_SIMILARITY = 9
-    COL_MATCH = 10
+    # Two fixed columns first (2026-09-09, the user's steer): the tree expander and
+    # the anchor circle — unmovable, unsortable, no filter. Then Folder, File and
+    # the caption (2026-09-08); the four CLAP columns left the list earlier.
+    COLUMNS = ("", "", "Folder", "File", "Caption", "Length", "Type", "BPM", "Key", "Tags", "Hits", "Similarity", "Match")
+    COL_TREE, COL_ANCHOR, COL_FOLDER, COL_FILE, COL_CAPTION, COL_LENGTH, COL_TYPE, COL_BPM, COL_KEY, COL_TAGS, COL_HITS = range(11)
+    COL_SIMILARITY = 11
+    COL_MATCH = 12
+    FIXED = (COL_TREE, COL_ANCHOR)                 # pinned at the left; the score columns are the view's to show
 
     def __init__(
         self,
@@ -250,15 +253,16 @@ class SampleTreeModel(QAbstractItemModel):
             return None
         if role == Qt.ItemDataRole.DisplayRole:
             return self.COLUMNS[section]
-        if role == Qt.ItemDataRole.ToolTipRole and section != 0:
-            return "Click the header to sort this column or filter on it."
-        if role == Qt.ItemDataRole.ToolTipRole and section == 0:
+        if role == Qt.ItemDataRole.ToolTipRole and section == self.COL_TREE:
+            return "Click here to expand or collapse every sample's sections."
+        if role == Qt.ItemDataRole.ToolTipRole and section == self.COL_ANCHOR:
             return (
-                "The circle at the start of a row anchors that sample (or hit) and ranks every "
+                "The anchor: the circle on a row anchors that sample (or hit) and ranks every "
                 "sample against it, with the weight bars as they are (§9.2); a click on the "
-                "filled circle clears the anchor. "
-                "Click the header to sort or filter by folder"
+                "filled circle clears the anchor."
             )
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return "Click the header to sort this column or filter on it."
         return None
 
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
@@ -280,6 +284,8 @@ class SampleTreeModel(QAbstractItemModel):
             if role not in (Qt.ItemDataRole.DisplayRole, SORT_ROLE):
                 return None
             length_s = (section.end_ms - section.start_ms) / 1000
+            if col in self.FIXED:
+                return "" if display else None
             if col == self.COL_FOLDER:
                 return "" if display else section.start_ms   # the label is SECTION_LABEL_ROLE (drawn by the delegate)
             if col == self.COL_FILE:
@@ -300,6 +306,8 @@ class SampleTreeModel(QAbstractItemModel):
             return self._anchor == ("sample", r.id)
         if role not in (Qt.ItemDataRole.DisplayRole, SORT_ROLE):
             return None
+        if col in self.FIXED:
+            return "" if display else None
         if col == self.COL_FOLDER:
             return r.folder
         if col == self.COL_FILE:
@@ -589,58 +597,48 @@ def _paint_anchor(painter: QPainter, zone: QRectF, colour, bold: bool = False) -
 
 
 class AnchorDelegate(QStyledItemDelegate):
-    """The anchor circle at the start of every row of the list (2026-09-08, the user's
-    steer: anchoring and ranking should be one click on the row, not a
-    button, a tab and a step). Set on the whole view: in the **first column
-    shown** (`first_column()`, whichever the user dragged there) it paints the
-    cell shifted right by a click zone that shows the circle — accent for the
-    row that is the anchor, dim otherwise, brighter under the mouse — draws a
-    section row's label there, and turns a click in that zone into
-    `anchor_clicked(index)`; every other column paints as usual."""
+    """The list's delegate (2026-09-08/09, the user's steer). In the fixed
+    **anchor column** it paints the circle — accent and filled for the row
+    that is the anchor, dim otherwise, brighter under the mouse — and turns a
+    click there into `anchor_clicked(index)`. In the **first movable column
+    shown** (`first_column()`, whichever the user dragged there) it draws a
+    section row's label. Every other cell paints as usual."""
 
     anchor_clicked = Signal(QModelIndex)
 
-    def __init__(self, parent=None, first_column: Callable[[], int] | None = None) -> None:
+    def __init__(self, parent=None, first_column: Callable[[], int] | None = None, anchor_column: int = 1) -> None:
         super().__init__(parent)
         self._first = first_column or (lambda: 0)
+        self._anchor_column = anchor_column
 
     def paint(self, painter, option, index) -> None:  # noqa: N802
-        if index.column() != self._first():
-            super().paint(painter, option, index)
+        column = index.column()
+        if column == self._anchor_column:
+            full = QStyleOptionViewItem(option)
+            self.initStyleOption(full, index)
+            full.text = ""
+            style = full.widget.style() if full.widget is not None else QStyle()
+            style.drawPrimitive(QStyle.PrimitiveElement.PE_PanelItemViewItem, full, painter, full.widget)
+            anchored = bool(index.data(ANCHOR_ROLE))
+            hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+            _paint_anchor(painter, QRectF(option.rect), ACCENT if anchored else (TEXT if hovered else TEXT_DIM), bold=anchored)
             return
-        zone = QRectF(option.rect.left(), option.rect.top(), ANCHOR_GLYPH_WIDTH, option.rect.height())
-        full = QStyleOptionViewItem(option)
-        self.initStyleOption(full, index)
-        full.text = ""
-        style = full.widget.style() if full.widget is not None else QStyle()
-        style.drawPrimitive(QStyle.PrimitiveElement.PE_PanelItemViewItem, full, painter, full.widget)
-        shifted = QStyleOptionViewItem(option)
-        shifted.rect = option.rect.adjusted(ANCHOR_GLYPH_WIDTH, 0, 0, 0)
-        label = index.data(SECTION_LABEL_ROLE)
-        if label:                                       # a section row: its label lives here
-            opt = QStyleOptionViewItem(shifted)
+        label = index.data(SECTION_LABEL_ROLE) if column == self._first() else None
+        if label:                                       # a section row: its label lives in the first movable column
+            opt = QStyleOptionViewItem(option)
             self.initStyleOption(opt, index)
-            opt.rect = shifted.rect
+            opt.rect = option.rect
             opt.text = str(label)
-            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, full.widget)
-        else:
-            super().paint(painter, shifted, index)
-        anchored = bool(index.data(ANCHOR_ROLE))
-        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
-        _paint_anchor(painter, zone, ACCENT if anchored else (TEXT if hovered else TEXT_DIM), bold=anchored)
-
-    def sizeHint(self, option, index):  # noqa: N802
-        size = super().sizeHint(option, index)
-        if index.column() == self._first():
-            size.setWidth(size.width() + ANCHOR_GLYPH_WIDTH)
-        return size
+            style = opt.widget.style() if opt.widget is not None else QStyle()
+            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+            return
+        super().paint(painter, option, index)
 
     def editorEvent(self, event, model, option, index) -> bool:  # noqa: N802
         if (
-            index.column() == self._first()
+            index.column() == self._anchor_column
             and event.type() == QEvent.Type.MouseButtonRelease
             and event.button() == Qt.MouseButton.LeftButton
-            and event.position().x() < option.rect.left() + ANCHOR_GLYPH_WIDTH
         ):
             self.anchor_clicked.emit(index)
             return True

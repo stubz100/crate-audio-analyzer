@@ -52,7 +52,7 @@ from .db import default_db_path, open_db
 from .embedding import ClapEncoder, EmbedSettings
 from .layout import LayoutSettings, fit_layout, load_current_layout, place_anchor
 from .headerfilter import ColumnSpec, FilterHeader
-from .listmodel import AnchorDelegate, ListProxy, SampleTreeModel
+from .listmodel import ANCHOR_COLUMN_WIDTH, TREE_COLUMN_WIDTH, AnchorDelegate, ListProxy, SampleTreeModel
 from .mapview import MapView
 from .library import scope_paths
 from .recompute import EncoderFactory, RecomputePanel, RunPlan
@@ -88,7 +88,7 @@ COLUMN_SPECS = {
     SampleTreeModel.COL_MATCH: ColumnSpec("range", "%", maximum=100, scale=100.0),
 }
 SETTINGS_KEY_PANES = "window/panes3"        # waveform | tabs, as dragged (3: as above)
-SETTINGS_KEY_HEADER = "list/header"         # the list's columns: order, widths, hidden, sort (2026-09-09)
+SETTINGS_KEY_HEADER = "list/header2"        # the list's columns: order, widths, hidden, sort (2: two fixed columns first)
 SETTINGS_KEY_GEOMETRY = "window/geometry"   # size and position
 SETTINGS_KEY_TAB = "window/tab"             # the open tab
 SETTINGS_KEY_VIEW = "window/view"           # list or map
@@ -288,22 +288,27 @@ class MainWindow(QMainWindow):
         self._header = FilterHeader(
             COLUMN_SPECS, self._table,
             fixed=(SampleTreeModel.COL_SIMILARITY, SampleTreeModel.COL_MATCH),   # shown by the scores, not the menu
+            pinned={SampleTreeModel.COL_TREE: TREE_COLUMN_WIDTH, SampleTreeModel.COL_ANCHOR: ANCHOR_COLUMN_WIDTH},
+            tree_column=SampleTreeModel.COL_TREE, anchor_column=SampleTreeModel.COL_ANCHOR,
         )
         self._header.install_on(self._table)
         self._header.sort_requested.connect(self._table.sortByColumn)
         self._header.filter_changed.connect(self._on_column_filter)
-        self._table.setTreePosition(-1)             # the tree follows the first column shown, wherever it is dragged
+        self._header.tree_clicked.connect(lambda: self._toggle_sections(not self._header.sections_open))
+        self._table.setTreePosition(SampleTreeModel.COL_TREE)   # the expander has its own fixed column (2026-09-09)
         self._table.setUniformRowHeights(True)
         self._table.setRootIsDecorated(True)
         self._table.setExpandsOnDoubleClick(False)
         self._table.setMouseTracking(True)              # the ⚓ brightens under the mouse
-        self._anchor_delegate = AnchorDelegate(self._table, self._header.first_visible_column)
+        self._anchor_delegate = AnchorDelegate(
+            self._table, self._header.first_visible_column, anchor_column=SampleTreeModel.COL_ANCHOR
+        )
         self._anchor_delegate.anchor_clicked.connect(self._on_anchor_clicked)
-        self._table.setItemDelegate(self._anchor_delegate)   # the circle sits in whichever column is first
+        self._table.setItemDelegate(self._anchor_delegate)   # the circle in its column, section labels in the first movable one
         header = self._table.header()
         header.setResizeContentsPrecision(200)   # measure a sample of rows, not all of them
-        header.moveSection(header.visualIndex(SampleTreeModel.COL_MATCH), 2)       # after Folder and File
-        header.moveSection(header.visualIndex(SampleTreeModel.COL_SIMILARITY), 2)
+        header.moveSection(header.visualIndex(SampleTreeModel.COL_MATCH), 4)       # after Folder and File
+        header.moveSection(header.visualIndex(SampleTreeModel.COL_SIMILARITY), 4)
         self._header.remember_default()
         saved_header = self._settings.value(SETTINGS_KEY_HEADER, None)
         if saved_header:                             # the columns as they were left (2026-09-09)
@@ -329,10 +334,6 @@ class MainWindow(QMainWindow):
         self._views.addWidget(self._map)
         self._list_button.clicked.connect(lambda: self._show_view("list"))
         self._map_button.clicked.connect(lambda: self._show_view("map"))
-        self._sections_button = QPushButton("Sections ▸")
-        self._sections_button.setCheckable(True)
-        self._sections_button.setToolTip("Expand or collapse every sample's sections in the list")
-        self._sections_button.toggled.connect(self._toggle_sections)
         if self._settings.value(SETTINGS_KEY_VIEW, "list", type=str) == "map":
             self._map_button.setChecked(True)
             self._views.setCurrentWidget(self._map)
@@ -402,8 +403,7 @@ class MainWindow(QMainWindow):
         switch.setSpacing(2)
         switch.addWidget(self._list_button)
         switch.addWidget(self._map_button)
-        switch.addWidget(self._sections_button)      # the third button (2026-09-09)
-        switch.addStretch(1)
+        switch.addStretch(1)                         # room for a third button
         bars_column = QVBoxLayout()
         bars_column.setSpacing(2)
         bars_column.addWidget(self._tag_bars, stretch=1)
@@ -485,7 +485,8 @@ class MainWindow(QMainWindow):
         self._update_score_columns()
         self._load_map()
         for column in range(len(SampleTreeModel.COLUMNS)):
-            self._table.resizeColumnToContents(column)
+            if column not in SampleTreeModel.FIXED:      # the pinned columns keep their width
+                self._table.resizeColumnToContents(column)
         counts = index_summary(self._conn, scope)
         in_scope = (
             f"{counts['samples']} samples in scope of {counts['indexed']} indexed"
@@ -1054,8 +1055,8 @@ class MainWindow(QMainWindow):
         self._settings.setValue(SETTINGS_KEY_VIEW, which)
 
     def _toggle_sections(self, expanded: bool) -> None:
-        """The header's third button: every sample's sections open or folded."""
-        self._sections_button.setText("Sections ▾" if expanded else "Sections ▸")
+        """The expander column's header cell: every sample's sections open or folded."""
+        self._header.set_sections_open(expanded)
         self._table.setUpdatesEnabled(False)
         try:
             if expanded:

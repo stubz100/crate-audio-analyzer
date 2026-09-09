@@ -33,10 +33,12 @@ ROWS = [
     _row(3, "pad.wav", "multi-hit", 12.0, None, "C", "synth pad, strings", 3),
 ]
 
+C = SampleTreeModel
 SPECS = {
-    0: ColumnSpec("text"), 1: ColumnSpec("text"), 3: ColumnSpec("range", "s", decimals=2, maximum=99_999),
-    4: ColumnSpec("values"), 5: ColumnSpec("range", "BPM", maximum=999), 6: ColumnSpec("values"), 7: ColumnSpec("text"),
-    8: ColumnSpec("range", maximum=9_999), SampleTreeModel.COL_SIMILARITY: ColumnSpec("range", "%", maximum=100, scale=100.0),
+    C.COL_FOLDER: ColumnSpec("text"), C.COL_FILE: ColumnSpec("text"),
+    C.COL_LENGTH: ColumnSpec("range", "s", decimals=2, maximum=99_999), C.COL_TYPE: ColumnSpec("values"),
+    C.COL_BPM: ColumnSpec("range", "BPM", maximum=999), C.COL_KEY: ColumnSpec("values"), C.COL_TAGS: ColumnSpec("text"),
+    C.COL_HITS: ColumnSpec("range", maximum=9_999), C.COL_SIMILARITY: ColumnSpec("range", "%", maximum=100, scale=100.0),
 }
 
 
@@ -48,7 +50,8 @@ def _view(app):
     view = QTreeView()
     view.setModel(proxy)
     view.setSortingEnabled(False)
-    header = FilterHeader(SPECS, view)
+    header = FilterHeader(SPECS, view, fixed=(C.COL_SIMILARITY, C.COL_MATCH),
+                          pinned={C.COL_TREE: 24, C.COL_ANCHOR: 26}, tree_column=C.COL_TREE, anchor_column=C.COL_ANCHOR)
     header.install_on(view)
     header.filter_changed.connect(proxy.set_column_filter)
     header.sort_requested.connect(view.sortByColumn)
@@ -59,7 +62,7 @@ def _view(app):
 
 
 def _names(proxy) -> list[str]:
-    return [proxy.data(proxy.index(r, 1)) for r in range(proxy.rowCount())]
+    return [proxy.data(proxy.index(r, C.COL_FILE)) for r in range(proxy.rowCount())]
 
 
 def test_column_filter_accepts():
@@ -75,16 +78,16 @@ def test_column_filter_accepts():
 def test_proxy_applies_column_filters_and_the_model_lists_distinct_values(app):
     model, proxy, view, header = _view(app)
     try:
-        assert model.distinct_values(4) == ["loop", "multi-hit", "one-shot"]
-        assert model.distinct_values(6) == ["", "Am", "C"]
-        proxy.set_column_filter(7, ColumnFilter(text="percussion"))
-        assert _names(proxy) == ["kick.wav", "loop.wav"] and proxy.filtered_columns == {7}
-        proxy.set_column_filter(8, ColumnFilter(low=1))
+        assert model.distinct_values(C.COL_TYPE) == ["loop", "multi-hit", "one-shot"]
+        assert model.distinct_values(C.COL_KEY) == ["", "Am", "C"]
+        proxy.set_column_filter(C.COL_TAGS, ColumnFilter(text="percussion"))
+        assert _names(proxy) == ["kick.wav", "loop.wav"] and proxy.filtered_columns == {C.COL_TAGS}
+        proxy.set_column_filter(C.COL_HITS, ColumnFilter(low=1))
         assert _names(proxy) == ["loop.wav"]
-        proxy.set_column_filter(7, None)
-        proxy.set_column_filter(8, ColumnFilter())                       # inactive: clears
+        proxy.set_column_filter(C.COL_TAGS, None)
+        proxy.set_column_filter(C.COL_HITS, ColumnFilter())              # inactive: clears
         assert _names(proxy) == ["kick.wav", "loop.wav", "pad.wav"] and not proxy.filtered_columns
-        proxy.set_column_filter(5, ColumnFilter(low=100.0))              # no tempo: never in a range
+        proxy.set_column_filter(C.COL_BPM, ColumnFilter(low=100.0))      # no tempo: never in a range
         assert _names(proxy) == ["loop.wav"]
     finally:
         view.close()
@@ -93,35 +96,35 @@ def test_proxy_applies_column_filters_and_the_model_lists_distinct_values(app):
 def test_popups_edit_each_kind_and_the_header_opens_them(app):
     model, proxy, view, header = _view(app)
     try:
-        view.sortByColumn(3, Qt.SortOrder.DescendingOrder)
-        assert header.sortIndicatorSection() == 3 and _names(proxy)[0] == "pad.wav"
+        view.sortByColumn(C.COL_LENGTH, Qt.SortOrder.DescendingOrder)
+        assert header.sortIndicatorSection() == C.COL_LENGTH and _names(proxy)[0] == "pad.wav"
 
         # a click on a section opens its popup and leaves the sort where it was
-        x = header.sectionViewportPosition(4) + 10
+        x = header.sectionViewportPosition(C.COL_TYPE) + 10
         QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x, 8))
         app.processEvents()
         popup = header.popup
         assert popup is not None and popup._list is not None and popup._list.count() == 3
-        assert (header.sortIndicatorSection(), header.sortIndicatorOrder()) == (3, Qt.SortOrder.DescendingOrder)
+        assert (header.sortIndicatorSection(), header.sortIndicatorOrder()) == (C.COL_LENGTH, Qt.SortOrder.DescendingOrder)
         popup._list.item(0).setCheckState(Qt.CheckState.Unchecked)         # "loop" off
-        assert _names(proxy) == ["pad.wav", "kick.wav"] and 4 in header.filters
+        assert _names(proxy) == ["pad.wav", "kick.wav"] and C.COL_TYPE in header.filters
         assert not view.grab().isNull()                                     # the section paints its dot
         popup._check_all(True)
-        assert 4 not in header.filters and len(_names(proxy)) == 3
+        assert C.COL_TYPE not in header.filters and len(_names(proxy)) == 3
         popup.close()
 
         # the popup's buttons sort
-        header.open_filter(1)
+        header.open_filter(C.COL_FILE)
         header.popup._sort(Qt.SortOrder.AscendingOrder)
-        assert _names(proxy) == ["kick.wav", "loop.wav", "pad.wav"] and header.sortIndicatorSection() == 1
+        assert _names(proxy) == ["kick.wav", "loop.wav", "pad.wav"] and header.sortIndicatorSection() == C.COL_FILE
 
         # text and range editors
-        text = FilterPopup(1, "File", SPECS[1], None)
+        text = FilterPopup(C.COL_FILE, "File", SPECS[C.COL_FILE], None)
         text._edit.setText("oop")
         assert text.current_filter() == ColumnFilter(text="oop")
         text._edit.clear()
         assert text.current_filter() is None
-        length = FilterPopup(3, "Length", SPECS[3], ColumnFilter(low=1.0))
+        length = FilterPopup(C.COL_LENGTH, "Length", SPECS[C.COL_LENGTH], ColumnFilter(low=1.0))
         assert length._low.value() == 1.0 and length._high.specialValueText() == "any"
         length._high.setValue(5.0)
         assert length.current_filter() == ColumnFilter(low=1.0, high=5.0)
@@ -170,18 +173,25 @@ def test_a_drag_moves_a_section_without_opening_its_popup(app):
                                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
 
         assert header.sectionsMovable()
-        before = header.visualIndex(4)
-        x0 = header.sectionViewportPosition(4) + 10
-        x1 = header.sectionViewportPosition(7) + 10
+        before = header.visualIndex(C.COL_TYPE)
+        x0 = header.sectionViewportPosition(C.COL_TYPE) + 10
+        x1 = header.sectionViewportPosition(C.COL_TAGS) + 10
         header.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, x0))
         for x in range(int(x0), int(x1), 8):
             header.mouseMoveEvent(mouse(QEvent.Type.MouseMove, x))
         header.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, x1))
         app.processEvents()
         assert header.popup is None                                        # a drag is not a click
-        assert header.visualIndex(4) != before                             # the section moved
-        assert header.first_visible_column() == 0
-        header.set_column_visible(0, False)
-        assert header.first_visible_column() == header.logicalIndex(1) if not header.isSectionHidden(header.logicalIndex(1)) else True
+        assert header.visualIndex(C.COL_TYPE) != before                    # the section moved
+        assert header.first_visible_column() == C.COL_FOLDER               # the first movable column
+        header.set_column_visible(C.COL_FOLDER, False)
+        assert header.first_visible_column() == C.COL_FILE
+        header.set_sections_open(True)
+        assert header.sections_open and not view.grab().isNull()           # the ▾ and the ring paint
+        toggles: list[int] = []
+        header.tree_clicked.connect(lambda: toggles.append(1))
+        header._dragged = False                                            # a fresh click, not the drag above
+        header.open_filter(C.COL_TREE)
+        assert toggles == [1] and header.popup is None                     # the expander's header cell toggles, no popup
     finally:
         view.close()
