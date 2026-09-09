@@ -1307,7 +1307,7 @@ The user: anchoring a sample locks the system into a calculation — manage it, 
 
 ## 2026-09-09 — A spectral view on the waveform panel
 
-**Phase:** 9 polish (the waveform panel) · `SPECTRUM_HASH`
+**Phase:** 9 polish (the waveform panel) · `f40a605`
 
 The user: a spectral view, swappable by a button on the waveform panel.
 
