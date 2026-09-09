@@ -1217,7 +1217,7 @@ The user: the play icon twice as big; a sample should keep all its sections unde
 
 ## 2026-09-09 — Review of 2026-09-08's work
 
-**Phase:** review · `REVIEW_HASH`
+**Phase:** review · `e4b6d28`
 
 The user: a quick review before wrapping up. The multi-agent review hit the session limit; this is a direct read of the day's diff (25 files, +2,798 / −772): the anchored-only recompute and schema v10, the marker editing, the waveform zoom and threaded reads, the header and column filters, the tab reshuffle, the sections tree.
 
