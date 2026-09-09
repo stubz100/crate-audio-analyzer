@@ -1262,7 +1262,7 @@ The user: an expand/collapse-all for the hits in the list; the columns configura
 
 ## 2026-09-09 — The expander and the anchor as two fixed columns
 
-**Phase:** 7 polish (the list) · `FIXED_HASH`
+**Phase:** 7 polish (the list) · `ab0467e`
 
 The user: the collapse/expand and the anchor circle should both be separate columns — fixed: unmovable, unsortable, unsearchable; the Sections button comes out of the header.
 
