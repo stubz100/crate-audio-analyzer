@@ -1325,3 +1325,32 @@ The user: a spectral view, swappable by a button on the waveform panel.
 **Next**
 
 - Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-10 — Design studies: a token layer, and three directions on the real window
+
+**Phase:** design system (a polish track alongside §12) · `<hash>`
+
+The user: the beta is usable but needs a much sleeker UI — "is there any way we could build a design system specifically for Crate?" Then: put the work in the repo, not a scratch directory.
+
+**Done**
+
+- **`scripts/design_studies.py`** — renders the *actual* window against a real index under a candidate **token set**, so a direction is chosen by looking. `Tokens` is the layer `theme.py` never had: a surface ramp (canvas → sunken → bg → panel → raised → overlay) wide enough that elevation is a step in value instead of a 1px outline, semantic text/state roles, data colours held apart from chrome colours, one spacing/radius/type scale, and the switches that separate directions (uppercase micro-labels, alternating rows, bevels). `build_qss` / `build_palette` feed Qt's two styling channels; `patch_theme` rebinds what the painted views import so a study covers them too. `--variant all` renders each in **its own process** — the painted views do `from .theme import ACCENT`, which binds at import, so one process could only ever render the first direction. Settings and render cache go to a `tempfile.mkdtemp()`, never the user's own QSettings.
+- **`.docs/design_studies.md`** and **`.docs/design/`** — the diagnosis, the token model, what Qt's QSS actually supports, the three directions, and the eleven renders (four `_window`, four `_recompute`, three `compare_*` sheets stacking the same crop from each).
+
+**Decided**
+
+- **Direction A, "instrument panel"** — near-black ground, hairlines instead of boxes, uppercase micro-labels, one restrained accent reserved for state, no alternating rows. Settled on density: in the same 250px, the current theme and A both fit **ten** list rows, B (calm editorial) **seven**, C (studio hardware) **nine** — and A additionally pulls the Key column into view that the current theme pushes off the right edge. B's ~⅓ loss of rows per screen is a real cost at §3's scale.
+- **A token layer is not enough, and the studies prove it.** The transport row is equally ragged in all four renders — *Spectrum* / *Save segment* / *Discard* / *Delete segment* still four widths, ungrouped, the destructive one still indistinguishable from the benign. The Attributes panel and the tag bars are unchanged in every direction. Tokens fix colour, density, type and material; the ragged rows, form-like tabs, chunky meters and too-loud vector strip are **component** problems. So the system is four layers: tokens (`src/crate/design.py`, with `theme.py` deriving from it and keeping every constant it exports), components, a painting kit, and a gallery — the gallery first among the last three, because it makes iterating on the rest cheap.
+- Nothing in `src/` was touched. This is a study.
+
+**Verified**
+
+- `uv run python scripts/design_studies.py --variant all` → four variants at 943 rows each, three comparison sheets; pyflakes clean. Re-run from a clean `.docs/design/` produces only PNGs.
+- **`text-transform`, `letter-spacing` and `font-variant: small-caps` all work in Qt QSS** (checked by rendering, not by width alone); `box-shadow` and transitions do not exist, so elevation is a ramp step and motion needs explicit animation.
+- **Segoe UI's digits are already tabular** — `111.11` and `000.00` both measure 38px at 10pt. The list's misaligned numbers are a left-alignment problem in the Length and BPM columns, not a typeface one.
+- **Every offscreen screenshot in this journal to date was tofu.** `QFontDatabase.families()` returns `[]` under `QT_QPA_PLATFORM=offscreen` here: metrics stay correct (a 10pt label still measures 323×19, so size assertions were unaffected) but no glyph rasterises. `addApplicationFont` on the files in `C:\Windows\Fonts` fixes it, and is also the argument for shipping the typeface rather than depending on Segoe UI being installed.
+
+**Next**
+
+- `src/crate/design.py` (the A token set, `theme.py` derived from it) and `crate --gallery`; then the component layer against the gallery; then panel-by-panel, transport row and Attributes tab first. Three adjustments to A recorded in the study: a 2px accent left-edge on the selected row, the waveform inset off the panel edges, the vector strip dropped to a low-contrast texture.
+- Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
