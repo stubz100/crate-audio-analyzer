@@ -1417,7 +1417,7 @@ Continuing the plan the studies set: components, built against the gallery, then
 
 ## 2026-09-10 — Shorter segment actions, and List / Map as tabs on the right
 
-**Phase:** design system, layer 2 polish · `<hash>`
+**Phase:** design system, layer 2 polish · `19596cc`
 
 The user, on the converted transport row: the segment buttons' labels are unnecessarily long — just "Segment" and three icons (disk / cross / bin). And the List / Map buttons should leave the top left and become tabs on the right, which gives the tag bars the whole header.
 
