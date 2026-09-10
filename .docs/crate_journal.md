@@ -1357,7 +1357,7 @@ The user: the beta is usable but needs a much sleeker UI — "is there any way w
 
 ## 2026-09-10 — The token layer and the gallery
 
-**Phase:** design system, layers 1 and 4 · `<hash>`
+**Phase:** design system, layers 1 and 4 · `4984409`
 
 The user, after the studies: commit them, and continue as suggested — `design.py` and the gallery.
 
