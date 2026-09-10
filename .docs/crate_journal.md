@@ -1328,7 +1328,7 @@ The user: a spectral view, swappable by a button on the waveform panel.
 
 ## 2026-09-10 — Design studies: a token layer, and three directions on the real window
 
-**Phase:** design system (a polish track alongside §12) · `<hash>`
+**Phase:** design system (a polish track alongside §12) · `a85451e`
 
 The user: the beta is usable but needs a much sleeker UI — "is there any way we could build a design system specifically for Crate?" Then: put the work in the repo, not a scratch directory.
 
