@@ -53,7 +53,8 @@ from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPai
 from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QPushButton, QScrollBar, QVBoxLayout, QWidget
 
 from .catalog import SegmentRow
-from .theme import ACCENT, ACCENT_DIM, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel, SqueezableWidget
+from .theme import ACCENT, ACCENT_DIM, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel
+from .widgets import Toolbar, make_button
 
 log = logging.getLogger(__name__)
 
@@ -957,16 +958,16 @@ class WaveformPanel(QWidget):
         self.view.view_changed.connect(self._sync_scroll)
 
         # play / stop / auto-play, here since 2026-09-08 (the user's steer: the transport row went)
-        self.play_button = QPushButton("▶")
-        self.play_button.setObjectName("play")
-        self.play_button.setToolTip("Play the selected sample or hit (Space)")
+        self.play_button = make_button(
+            icon_name="play", intent="primary", tooltip="Play the selected sample or hit (Space)"
+        )
         self.play_button.clicked.connect(self.play_requested)
-        self.stop_button = QPushButton("■")
-        self.stop_button.setToolTip("Stop")
+        self.stop_button = make_button(icon_name="stop", tooltip="Stop")
         self.stop_button.clicked.connect(self.stop_requested)
         self.autoplay = QCheckBox("Auto-play on select")
-        self.mode_button = QPushButton("Spectrum")          # the spectral view (2026-09-09)
-        self.mode_button.setCheckable(True)
+        self.mode_button = make_button(               # the spectral view (2026-09-09)
+            "Spectrum", icon_name="spectrum", checkable=True
+        )
         self.mode_button.setToolTip(
             "Show the spectrum instead of the waveform: one FFT per pixel column over the view, "
             "log frequency from 30 Hz to half the sample rate, the loudest bin in view white. "
@@ -976,31 +977,39 @@ class WaveformPanel(QWidget):
             lambda on: self.view.set_mode(MODE_SPECTRUM if on else MODE_WAVEFORM)
         )
         self.view.mode_changed.connect(self._on_mode_changed)
-        self._save = QPushButton("Save segment")
-        self._save.setToolTip(
-            "Write the moved or drawn markers to the index as manual segments (§6.3): exempt "
-            "from the automatic length and cap rules, never overwritten by a recompute."
+        self._save = make_button(
+            "Save segment",
+            icon_name="save",
+            tooltip=(
+                "Write the moved or drawn markers to the index as manual segments (§6.3): exempt "
+                "from the automatic length and cap rules, never overwritten by a recompute."
+            ),
         )
-        self._discard = QPushButton("Discard")
-        self._discard.setToolTip("Drop the unsaved markers (Esc).")
-        self._delete = QPushButton("Delete segment")
-        self._delete.setToolTip("Remove the selected segment, automatic or manual, from the index (Del).")
+        self._discard = make_button(
+            "Discard", icon_name="close", intent="quiet", tooltip="Drop the unsaved markers (Esc)."
+        )
+        self._delete = make_button(
+            "Delete segment",
+            icon_name="trash",
+            intent="danger",
+            tooltip="Remove the selected segment, automatic or manual, from the index (Del).",
+        )
         self.view.setToolTip(
             "Drag a marker to move it; drag on the waveform to draw a segment — nothing is written "
             "until Save. Wheel zooms, Shift+wheel pans, right-click fits."
         )
-        buttons = SqueezableWidget()                 # the row squeezes with the pane; it never pushes the splitter
-        row = QHBoxLayout(buttons)
-        row.setContentsMargins(4, 0, 4, 2)
-        row.setSpacing(6)
-        row.addWidget(self.play_button)
-        row.addWidget(self.stop_button)
-        row.addWidget(self.mode_button)
-        row.addWidget(self._save)
-        row.addWidget(self._discard)
-        row.addWidget(self._delete)
-        row.addStretch(1)
-        row.addWidget(self.autoplay)
+        # The row as three groups rather than six self-sized buttons in one run
+        # (2026-09-10, layer 2, item 5 of the diagnosis): transport, then the
+        # view toggle, then the segment edits — where Delete is `danger` and so
+        # no longer looks exactly like Spectrum. `Toolbar` squeezes with the
+        # pane the way `SqueezableWidget` did, so the splitter is unaffected.
+        buttons = Toolbar()
+        buttons.add_group(self.play_button, self.stop_button, equal_width=False)
+        buttons.add_group(self.mode_button)
+        buttons.add_group(self._save, self._discard, self._delete)
+        buttons.add_stretch()
+        buttons.add_widget(self.autoplay)
+        self._buttons = buttons
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
@@ -1074,3 +1083,4 @@ class WaveformPanel(QWidget):
         self._save.setText("Save segment" if n <= 1 else f"Save {n} segments")
         self._discard.setEnabled(n > 0)
         self._delete.setEnabled(self.view.can_delete)
+        self._buttons.equalise()      # Save carries a count now; keep the group level

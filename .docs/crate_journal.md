@@ -1384,3 +1384,33 @@ The user, after the studies: commit them, and continue as suggested — `design.
 
 - Layer 2, the components, built against the gallery: `SegmentedControl`, `Toolbar` with grouping and intents, SVG `IconButton`, `Meter`, `Chip`, `SectionHeader`, `StatusPill`, `HelpText`. Then layer 3's painting kit, then panel-by-panel — the transport row and the Attributes tab first.
 - Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-10 — The component layer, and the three worst offenders converted
+
+**Phase:** design system, layer 2 · `<hash>`
+
+Continuing the plan the studies set: components, built against the gallery, then used.
+
+**Done**
+
+- **`src/crate/icons.py`** — fifteen icons as painter paths in a unit square, `icon(name, colour, size)` / `pixmap(...)`, filled or stroked, scaled and antialiased. Item 8 of the diagnosis: a glyph cannot be tinted by state, shifts metrics with whatever face resolves it, and draws a box in a face that lacks it (⚓ and ↳ did exactly that in the first gallery grab). No SVG, no asset files — the package stays a pure import.
+- **`src/crate/widgets.py`** — `Toolbar` (groups divided by a rule, widths equalised within a group, `equalise()` re-levels when a label gains a count), `make_button` with `intent` (`default` / `primary` / `quiet` / `danger`, a QSS property selector), `SegmentedControl` (painted, exclusive), `Meter` / `MeterList`, `SectionHeader`, `Chip`, `StatusPill`, `HelpText`.
+- **Converted**: the **transport row** (`waveform.py`) to three groups — transport, view toggle, segment edits — with drawn icons, `Delete segment` as `danger` and `Discard` as `quiet`; the **view switch** (`main.py`) to one `SegmentedControl` instead of two `autoExclusive` buttons; the **Attributes difference bars** (`attributes.py`) to `Meter`s, so an axis the item lacks shows an em dash rather than a full-width empty box reading "n/a".
+- The gallery grew an Icons section and a Components section, and its own headings are `SectionHeader`s now.
+
+**Decided**
+
+- **`Toolbar` claims no minimum width.** Equalising a group would otherwise bring back the splitter bug of 2026-09-07 and -09-08 — a row insisting on its natural width raises the left pane's minimum, the splitter squeezes the right panel to its floor and then remembers it. `SqueezableWidget` existed for exactly this; `Toolbar` does it itself and `waveform.py` no longer imports it.
+- **`danger` is quiet at rest and colours on hover.** A destructive action must be identifiable without a resting toolbar shouting; the *icon* carries the intent colour at rest, the chrome does not.
+- **Three GUI tests updated rather than worked around**: they asserted the old design — `play_button.text() == "▶"` and `_list_button` / `_map_button`. They now assert the button has an icon and the intent property, and drive `_view_switch.set_current(...)`.
+- The tag bars and the vector strip are **not** converted: both need the header's layout reworked rather than a component swapped in, and they sit with layer 3's painting kit and the three adjustments to A.
+
+**Verified**
+
+- `uv run pytest tests -q` → **238 passed, 3 skipped** (218 before; `tests/test_widgets.py` adds 20); pyflakes clean over `src`, `tests` and `scripts`. The new tests assert behaviour, not pixels: every icon actually paints (>8 opaque pixels) and is tinted the colour asked for, a toolbar group equalises and an empty group is ignored, `danger` has no resting rule, a segmented control is exclusive and signals once, a meter paints with a value and without one, and the section header carries the transform on its label.
+- Offscreen on the user's index: the transport row grouped and iconised, the difference meters, the view switch. **A misread corrected by measuring**: the three edit buttons looked ragged in the screenshot but are all 123 px — `Discard` is `quiet`, so its border is transparent at rest and the box merely looks narrower.
+
+**Next**
+
+- Layer 3, the painting kit — shared ramp LUTs, `hairline()`, `focus_ring()`, `axis_ticks()` — and with it the three adjustments to A: the accent left-edge on the selected row, the waveform inset off the panel edges, the vector strip dropped to a low-contrast texture. Then the header's tag bars onto `MeterList`.
+- Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.

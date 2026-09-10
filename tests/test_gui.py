@@ -656,10 +656,10 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         assert "anchor placed in layout #1" in panel.log_text()
         assert window._map.point_count == 3
 
-        window._map_button.click()
+        window._view_switch.set_current("map")
         assert window._views.currentWidget() is window._map
         assert not window._map.grab().isNull()                    # paints offscreen
-        window._list_button.click()
+        window._view_switch.set_current("list")
         assert window._views.currentWidget() is window._table
     finally:
         window.close()
@@ -963,7 +963,10 @@ def test_a_second_click_on_the_anchor_circle_clears_the_anchor(app, index, tmp_p
     window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
     try:
         window._autoplay.setChecked(False)
-        assert window._waveform_panel.play_button.text() == "▶" and window._autoplay is window._waveform_panel.autoplay
+        # the transport buttons carry drawn icons since 2026-09-10 (layer 2), not ▶/■ glyphs
+        assert not window._waveform_panel.play_button.icon().isNull()
+        assert window._waveform_panel.play_button.property("intent") == "primary"
+        assert window._autoplay is window._waveform_panel.autoplay
         row = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
         window._table.setCurrentIndex(row)
         _anchor_current(app, window)
@@ -1087,7 +1090,7 @@ def test_columns_are_configurable_and_the_window_remembers_itself(app, index, tm
         assert not window._table.isExpanded(loop) and not header.sections_open
 
         window._tabs.setCurrentIndex(2)
-        window._map_button.click()
+        window._view_switch.set_current("map")
         window._waveform_panel.mode_button.setChecked(True)                 # the spectral view
         window.resize(700, 520)                                          # inside the offscreen 800 × 600 screen:
         app.processEvents()                                              # a restored geometry is clamped to it

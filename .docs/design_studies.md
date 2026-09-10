@@ -104,6 +104,24 @@ Three things settled in the building:
 
 **A note on the comparison sheets above.** They are the historical record of the choice, rendered before `design.py` existed. Because `theme.py` now derives from the tokens, re-running `--variant baseline` renders the *shipped* direction, not the pre-token theme — so the sheets are not reproducible and should not be regenerated. `--variant gallery` regenerates `gallery.png`, which should be.
 
+## Layer 2 — the components (2026-09-10)
+
+`icons.py` and `widgets.py`, and the three worst offenders converted onto them.
+
+**Icons are drawn paths, not glyphs.** `icon(name, colour, size)` renders one of fifteen shapes at whatever colour the caller's state calls for. That is item 8 of the diagnosis: ▶ ■ ▸ ▾ ⚓ ↳ could not be tinted, shifted metrics with whichever face resolved them, and drew boxes in a face that lacked them. No SVG and no asset files — Qt's painter is enough for shapes this simple, and the package stays a pure import.
+
+**The transport row is three groups, not six buttons in a run.** `Toolbar` gives transport (▶ ■), the view toggle (Spectrum) and the segment edits (Save / Discard / Delete) their own runs divided by a rule, equalises the widths *within* a group so the row decides them rather than each label, and re-levels when *Save segment* becomes *Save 2 segments*. `Delete segment` is `intent="danger"` and `Discard` is `intent="quiet"`; danger stays quiet at rest and colours on hover, so a destructive action is identifiable without a resting toolbar shouting.
+
+`Toolbar` overrides `minimumSizeHint` to claim no width, because equalising a group would otherwise reintroduce the splitter bug of 2026-09-07 and -09-08 — a control row that insists on its natural width raises the left pane's minimum, the splitter squeezes the right panel to its floor, and then remembers the squeeze.
+
+**The view switch is one control.** `SegmentedControl` replaces two `QPushButton`s that happened to be `autoExclusive`.
+
+**The Attributes tab's difference bars are `Meter`s.** A label beside a full-width `QProgressBar` reading "n/a" becomes a labelled track with its value at the right, and an axis the item lacks shows an em dash instead of a wide empty box. `Meter` is one implementation for both this and the tag scores, which were the same object drawn two different ways.
+
+Also `SectionHeader` (the uppercase micro-label the group box could never have), `Chip`, `StatusPill` and `HelpText`, which folds the Recompute tab's explanatory paragraph behind a "?".
+
+Still on the list: the tag bars and the vector strip, which need the header's layout reworked rather than a component swapped in, and the painting kit (layer 3) that the three adjustments to A belong to.
+
 ## Next
 
 Direction A is chosen and built. Layers 1 and 4 are done. Next is layer 2 — the components — built against the gallery: `SegmentedControl`, `Toolbar` with grouping and intents, `IconButton` over SVG, `Meter`, `Chip`, `SectionHeader`, `StatusPill`, `HelpText`. Then layer 3, the painting kit. Then panel-by-panel conversion, starting with the transport row and the Attributes tab as the worst offenders — which is also where the three adjustments to A get made. This is a polish track alongside the roadmap in spec §12 — it does not displace Phase 10.

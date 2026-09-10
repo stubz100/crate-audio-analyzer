@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -64,6 +63,7 @@ from .segmentation import create_manual_segment, delete_segment, update_segment
 from .render import default_cache_dir, render_segment
 from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable, Scores
 from .theme import apply_theme
+from .widgets import SegmentedControl
 from .vectorstrip import VectorStrip
 from .waveform import WaveformPanel
 
@@ -271,12 +271,10 @@ class MainWindow(QMainWindow):
         # --- the header across the window (2026-09-08, the user's steer): the
         # view switch stacked at the left with room for a third button, the
         # selected sample's tag-score bars, its CLAP strip underneath ---
-        self._list_button = QPushButton("List")
-        self._map_button = QPushButton("Map")
-        for button in (self._list_button, self._map_button):
-            button.setCheckable(True)
-            button.setAutoExclusive(True)
-        self._list_button.setChecked(True)
+        # One control for one exclusive choice (2026-09-10, layer 2), not two
+        # buttons that happen to be mutually exclusive.
+        self._view_switch = SegmentedControl([("list", "List"), ("map", "Map")])
+        self._view_switch.setToolTip("Show the list or the map (§9.3, §9.4)")
         self._last_similarity: Scores | None = None
         self._tag_bars = TagBars()
         self._header_strip = VectorStrip(compact=True)
@@ -336,10 +334,9 @@ class MainWindow(QMainWindow):
         self._views = QStackedWidget()
         self._views.addWidget(self._table)
         self._views.addWidget(self._map)
-        self._list_button.clicked.connect(lambda: self._show_view("list"))
-        self._map_button.clicked.connect(lambda: self._show_view("map"))
+        self._view_switch.changed.connect(self._show_view)
         if self._settings.value(SETTINGS_KEY_VIEW, "list", type=str) == "map":
-            self._map_button.setChecked(True)
+            self._view_switch.set_current("map")
             self._views.setCurrentWidget(self._map)
 
         # --- the waveform panel (§9.2's preview strip, at the bottom on the user's steer;
@@ -409,16 +406,15 @@ class MainWindow(QMainWindow):
         header_layout.setSpacing(8)
         switch = QVBoxLayout()
         switch.setSpacing(2)
-        switch.addWidget(self._list_button)
-        switch.addWidget(self._map_button)
-        switch.addStretch(1)                         # room for a third button
+        switch.addWidget(self._view_switch)
+        switch.addStretch(1)                         # room for a second control
         bars_column = QVBoxLayout()
         bars_column.setSpacing(2)
         bars_column.addWidget(self._tag_bars, stretch=1)
         bars_column.addWidget(self._header_strip)
         header_layout.addLayout(switch)
         header_layout.addLayout(bars_column, stretch=1)
-        header_widget.setFixedHeight(max(112, 3 * self._list_button.sizeHint().height() + 2 * 2 + 6 + 8))   # three buttons, or room for the bars
+        header_widget.setFixedHeight(max(112, 3 * self._view_switch.sizeHint().height() + 2 * 2 + 6 + 8))   # room for the bars
         self._header_widget = header_widget
 
         # --- the window (2026-09-08, the user's steer): the right half is the list

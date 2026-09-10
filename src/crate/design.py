@@ -307,8 +307,23 @@ QPushButton#play {{ background: {st.accent_fill.name()}; border-color: {st.accen
                     color: {st.accent.name()}; font-size: 15pt; padding: 0px {m.lg}px; }}
 QPushButton#play:hover {{ background: {st.accent_dim.name()}; color: {ink.bright.name()}; }}
 QPushButton#anchor {{ border-color: {t.data.segment.name()}; color: {t.data.segment.name()}; }}
-QPushButton#danger:hover {{ border-color: {st.danger.name()}; color: {st.danger.name()};
-                            background: {s.raised.name()}; }}
+
+/* Button intent (2026-09-10, layer 2). A property selector, so `intent` is set
+   once at construction — Qt re-polishes on show, not on a later change.
+   `danger` stays quiet at rest and colours on hover: a destructive action must
+   be identifiable without a resting toolbar shouting. */
+QPushButton[intent="primary"] {{ background: {st.accent_fill.name()};
+    border-color: {st.accent.name()}; color: {st.accent.name()}; }}
+QPushButton[intent="primary"]:hover {{ background: {st.accent_dim.name()};
+    color: {ink.bright.name()}; }}
+QPushButton[intent="quiet"] {{ background: transparent; border-color: transparent;
+    color: {ink.muted.name()}; }}
+QPushButton[intent="quiet"]:hover {{ background: {s.raised.name()};
+    border-color: {s.hairline.name()}; color: {ink.primary.name()}; }}
+QPushButton[intent="danger"]:hover {{ background: {s.raised.name()};
+    border-color: {st.danger.name()}; color: {st.danger.name()}; }}
+QPushButton[intent="danger"]:pressed {{ background: {st.danger.name()};
+    color: {s.canvas.name()}; }}
 
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit {{
     background: {s.sunken.name()}; border: 1px solid {s.hairline.name()};

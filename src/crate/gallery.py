@@ -40,15 +40,24 @@ from PySide6.QtWidgets import (
 )
 
 from .design import TOKENS, font, mix
+from .icons import SHAPES, pixmap
+from .widgets import (
+    Chip,
+    HelpText,
+    MeterList,
+    SectionHeader,
+    SegmentedControl,
+    StatusPill,
+    Toolbar,
+    make_button,
+)
 
 SWATCH = QSize(104, 46)
 
 
-def _section(title: str) -> QLabel:
-    """A small-caps rule of a heading — the `SectionHeader` component to be."""
-    label = QLabel(title)
-    label.setObjectName("sectionHeader")
-    return label
+def _section(title: str) -> SectionHeader:
+    """A heading — the component, eating its own cooking."""
+    return SectionHeader(title)
 
 
 def _swatch(colour: QColor, name: str, note: str = "") -> QWidget:
@@ -117,7 +126,8 @@ class GalleryWindow(QMainWindow):
 
         for build in (
             self._surfaces, self._ink, self._state, self._data,
-            self._typography, self._scale, self._controls, self._list,
+            self._typography, self._scale, self._icons, self._components,
+            self._controls, self._list,
         ):
             column.addWidget(build())
         column.addStretch(1)
@@ -251,10 +261,122 @@ class GalleryWindow(QMainWindow):
         )
         return box
 
+
+    # --- components (layer 2) ---
+
+    def _icons(self) -> QWidget:
+        box = QGroupBox("Icons — drawn paths, tinted per state")
+        layout = QVBoxLayout(box)
+        strip = QWidget()
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(TOKENS.metric.lg)
+        for name in SHAPES:
+            cell = QVBoxLayout()
+            cell.setSpacing(TOKENS.metric.xs)
+            glyph = QLabel()
+            glyph.setPixmap(pixmap(name, TOKENS.ink.secondary, 20))
+            glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            caption = QLabel(name)
+            caption.setFont(font("micro"))
+            caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            caption.setStyleSheet(f"color: {TOKENS.ink.muted.name()};")
+            cell.addWidget(glyph)
+            cell.addWidget(caption)
+            holder = QWidget()
+            holder.setLayout(cell)
+            row.addWidget(holder)
+        row.addStretch(1)
+        layout.addWidget(strip)
+        layout.addWidget(_section("The same icon at four token colours"))
+        tints = QWidget()
+        tint_row = QHBoxLayout(tints)
+        tint_row.setContentsMargins(0, 0, 0, 0)
+        tint_row.setSpacing(TOKENS.metric.lg)
+        for name, colour in (
+            ("muted", TOKENS.ink.muted),
+            ("secondary", TOKENS.ink.secondary),
+            ("accent", TOKENS.state.accent),
+            ("danger", TOKENS.state.danger),
+        ):
+            cell = QLabel()
+            cell.setPixmap(pixmap("anchor", colour, 22))
+            cell.setToolTip(name)
+            tint_row.addWidget(cell)
+        tint_row.addStretch(1)
+        layout.addWidget(tints)
+        return box
+
+    def _components(self) -> QWidget:
+        box = QGroupBox("Components — layer 2")
+        layout = QVBoxLayout(box)
+
+        layout.addWidget(_section("Segmented control — one control, not two buttons"))
+        switch = SegmentedControl([("list", "List"), ("map", "Map")])
+        wide = SegmentedControl(
+            [("new", "New/changed"), ("all", "Everything"), ("anchor", "Anchor only")]
+        )
+        wide.set_current("all")
+        layout.addWidget(_row(switch, wide))
+
+        layout.addWidget(_section("Toolbar — the row decides the widths, groups are divided"))
+        bar = Toolbar()
+        bar.add_group(
+            make_button(icon_name="play", intent="primary", tooltip="Play"),
+            make_button(icon_name="stop", tooltip="Stop"),
+            equal_width=False,
+        )
+        bar.add_group(make_button("Spectrum", icon_name="spectrum", checkable=True))
+        bar.add_group(
+            make_button("Save", icon_name="save"),
+            make_button("Discard", icon_name="close", intent="quiet"),
+            make_button("Delete", icon_name="trash", intent="danger"),
+        )
+        bar.add_stretch()
+        bar.add_widget(StatusPill("2 unsaved", "warn"))
+        layout.addWidget(bar)
+
+        layout.addWidget(_section("Meters — the tag scores and the axis differences, one object"))
+        meters = MeterList()
+        meters.set_rows(
+            [("snare drum", 0.37), ("hand clap", 0.31), ("percussion", 0.29), ("tom drum", 0.26)],
+            clickable=True,
+        )
+        differences = MeterList()
+        differences.set_rows(
+            [("Amplitude", 0.62), ("Pitch", None), ("Timbre", 0.18)],
+            tone=TOKENS.data.segment,
+        )
+        pair = QWidget()
+        pair_row = QHBoxLayout(pair)
+        pair_row.setContentsMargins(0, 0, 0, 0)
+        pair_row.setSpacing(TOKENS.metric.xl)
+        pair_row.addWidget(meters, stretch=1)
+        pair_row.addWidget(differences, stretch=1)
+        layout.addWidget(pair)
+
+        layout.addWidget(_section("Chips, pills and folded prose"))
+        layout.addWidget(
+            _row(
+                Chip("kick drum"), Chip("percussion"), Chip("one-shot"),
+                StatusPill("indexed", "neutral"),
+                StatusPill("anchored", "active"),
+                StatusPill("needs review", "warn"),
+                StatusPill("stale", "danger"),
+            )
+        )
+        help_ = HelpText(
+            "Tick a folder to put it in scope: the list, the map, Rescan and Recompute cover "
+            "the ticked folders. Unticked folders stay in the index, dormant."
+        )
+        help_.set_open(True)
+        layout.addWidget(help_)
+        return box
+
     # --- controls ---
 
     def _controls(self) -> QWidget:
-        box = QGroupBox("Controls")
+        box = QGroupBox("Styled Qt primitives — what the style sheet does to stock widgets")
         layout = QVBoxLayout(box)
 
         layout.addWidget(_section("Buttons — intent, not just state"))

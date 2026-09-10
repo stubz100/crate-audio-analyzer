@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QLabel,
     QLayout,
-    QProgressBar,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -31,7 +30,9 @@ from PySide6.QtWidgets import (
 
 from .embedding import CLASS_PROMPTS
 from .similarity import AXES, AXIS_LABELS
+from .design import TOKENS
 from .theme import SqueezableWidget
+from .widgets import Meter
 
 
 AXIS_HELP: dict[str, str] = {
@@ -69,20 +70,18 @@ class AttributesPanel(QWidget):
         self._diff_caption = QLabel("anchor a row (the circle at its start) and select a sample or a hit to compare")
         self._diff_caption.setWordWrap(True)
         diff_layout.addWidget(self._diff_caption, 0, 0, 1, 2)
-        self._diff_bars: dict[str, QProgressBar] = {}
+        # One `Meter` per axis (2026-09-10, layer 2) instead of a label beside a
+        # full-width QProgressBar reading "n/a": the meter carries its own label
+        # and value, and an axis the item lacks shows its track and an em dash
+        # rather than a wide empty box across the panel.
+        self._diff_bars: dict[str, Meter] = {}
         for row, axis in enumerate(AXES, start=1):
-            label = QLabel(AXIS_LABELS[axis])
-            label.setToolTip(AXIS_HELP[axis])
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setTextVisible(True)
-            bar.setMinimumWidth(60)
+            bar = Meter(AXIS_LABELS[axis], None, TOKENS.data.segment)
             bar.setToolTip(
                 AXIS_HELP[axis] + "\n\n0 % = identical on this axis, 100 % = as far apart as "
                 "the 95th percentile of the library."
             )
-            diff_layout.addWidget(label, row, 0)
-            diff_layout.addWidget(bar, row, 1)
+            diff_layout.addWidget(bar, row, 0, 1, 2)
             self._diff_bars[axis] = bar
         diff_layout.setColumnStretch(1, 1)
         self.show_difference(None, None, None)
@@ -110,7 +109,7 @@ class AttributesPanel(QWidget):
     def difference_values(self) -> dict[str, int | None]:
         """What the difference bars show (tests read this)."""
         return {
-            axis: (None if bar.format() == "n/a" else bar.value())
+            axis: (None if bar.value() is None else int(round(bar.value() * 100)))
             for axis, bar in self._diff_bars.items()
         }
 
@@ -132,9 +131,4 @@ class AttributesPanel(QWidget):
             self._diff_caption.setText(f"anchor: {anchor_label}\nselected: {selected_label}")
         for axis, bar in self._diff_bars.items():
             value = None if distances is None else distances.get(axis)
-            if value is None or value != value:
-                bar.setValue(0)
-                bar.setFormat("n/a")
-            else:
-                bar.setValue(int(round(min(max(value, 0.0), 1.0) * 100)))
-                bar.setFormat("%v %")
+            bar.set_value(None if value is None or value != value else min(max(value, 0.0), 1.0))
