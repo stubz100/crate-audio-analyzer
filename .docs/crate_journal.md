@@ -1387,7 +1387,7 @@ The user, after the studies: commit them, and continue as suggested — `design.
 
 ## 2026-09-10 — The component layer, and the three worst offenders converted
 
-**Phase:** design system, layer 2 · `<hash>`
+**Phase:** design system, layer 2 · `d892103`
 
 Continuing the plan the studies set: components, built against the gallery, then used.
 
