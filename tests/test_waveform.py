@@ -242,9 +242,11 @@ def test_panel_buttons_follow_staging_and_selection(app, tmp_path):
 
     assert not panel._save.isEnabled() and not panel._discard.isEnabled() and not panel._delete.isEnabled()
     view.stage_edit(1, 600, 1000)
-    assert panel._save.isEnabled() and panel._save.text() == "Save segment" and panel._discard.isEnabled()
+    # icon-only since 2026-09-10 (the user's steer); the count moved to the tooltip
+    assert panel._save.isEnabled() and panel._discard.isEnabled()
+    assert "Save the segment" in panel._save.toolTip()
     view.add_draft(1200, 1300)
-    assert panel._save.text() == "Save 2 segments"
+    assert "Save the 2 segments" in panel._save.toolTip()
     panel._save.click()
     assert saves == [1]
     panel._discard.click()

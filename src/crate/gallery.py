@@ -327,10 +327,18 @@ class GalleryWindow(QMainWindow):
             equal_width=False,
         )
         bar.add_group(make_button("Spectrum", icon_name="spectrum", checkable=True))
+        # A label naming the group, then icon-only actions joined to it without a
+        # rule — the transport row's shape since 2026-09-10 (the user's steer:
+        # "Save segment" / "Discard" / "Delete segment" were needlessly long).
+        segment_label = QLabel("Segment")
+        segment_label.setObjectName("sectionHeader")
+        bar.add_group(segment_label, equal_width=False)
         bar.add_group(
-            make_button("Save", icon_name="save"),
-            make_button("Discard", icon_name="close", intent="quiet"),
-            make_button("Delete", icon_name="trash", intent="danger"),
+            make_button(icon_name="save", tooltip="Save"),
+            make_button(icon_name="close", intent="quiet", tooltip="Discard"),
+            make_button(icon_name="trash", intent="danger", tooltip="Delete"),
+            equal_width=False,
+            divided=False,
         )
         bar.add_stretch()
         bar.add_widget(StatusPill("2 unsaved", "warn"))

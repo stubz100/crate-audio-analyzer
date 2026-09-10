@@ -120,6 +120,10 @@ Three things settled in the building:
 
 Also `SectionHeader` (the uppercase micro-label the group box could never have), `Chip`, `StatusPill` and `HelpText`, which folds the Recompute tab's explanatory paragraph behind a "?".
 
+**Refined the same day, on the user's steer.** The segment actions lost their labels: one "Segment" micro-label names the group and three icons carry it (disk, cross, bin), joined to the label without a rule. The count that used to sit in *Save segment* / *Save 2 segments* moved to the tooltip, where it does not change the button's width — and the plot's own header already states it. `Toolbar.add_group` grew `divided=False` for exactly this join, and now takes any `QWidget` rather than only buttons.
+
+And the **List / Map switch moved out of the header** to a tab bar over the right half, which is the view it switches, freeing the whole header width for the tag bars. A bare `QTabBar` expands its tabs to fill; a `QTabWidget`'s does not, so `setExpanding(False)` keeps these compact at the left, reading as the same object as the Attributes / Search / Recompute tabs opposite. `SegmentedControl` is no longer used by the window as a result — it stays in the library, demonstrated in the gallery and tested, and the Recompute tab's three-way scope choice is its natural next home.
+
 Still on the list: the tag bars and the vector strip, which need the header's layout reworked rather than a component swapped in, and the painting kit (layer 3) that the three adjustments to A belong to.
 
 ## Next

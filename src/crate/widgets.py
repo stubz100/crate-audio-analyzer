@@ -456,7 +456,7 @@ class Toolbar(QWidget):
         m = TOKENS.metric
         self._layout.setContentsMargins(m.sm, m.xs, m.sm, m.xs)
         self._layout.setSpacing(m.sm)
-        self._groups: list[tuple[list[QPushButton], bool]] = []
+        self._groups: list[tuple[list[QWidget], bool]] = []
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         """Never claim a width — a toolbar squeezes with its pane.
@@ -469,19 +469,28 @@ class Toolbar(QWidget):
         """
         return QSize(0, super().minimumSizeHint().height())
 
-    def add_group(self, *buttons: QPushButton, equal_width: bool = True) -> None:
-        """Add a run of related controls, divided from the previous run."""
-        if not buttons:
+    def add_group(
+        self,
+        *widgets: QWidget,
+        equal_width: bool = True,
+        divided: bool = True,
+    ) -> None:
+        """Add a run of related controls, divided from the previous run.
+
+        `divided=False` joins this run to the one before it without a rule —
+        for a label that names the group that follows it.
+        """
+        if not widgets:
             return
-        if self._groups:
+        if self._groups and divided:
             rule = QFrame()
             rule.setFrameShape(QFrame.Shape.VLine)
             rule.setFixedWidth(1)
             rule.setStyleSheet(f"color: {TOKENS.surface.hairline.name()};")
             self._layout.addWidget(rule)
-        for button in buttons:
-            self._layout.addWidget(button)
-        self._groups.append((list(buttons), equal_width))
+        for widget in widgets:
+            self._layout.addWidget(widget)
+        self._groups.append((list(widgets), equal_width))
         self.equalise()
 
     def equalise(self) -> None:
@@ -491,14 +500,14 @@ class Toolbar(QWidget):
         *Save 2 segments* — so the group does not go ragged the moment it
         carries a count.
         """
-        for buttons, equal_width in self._groups:
-            if not equal_width or len(buttons) < 2:
+        for widgets, equal_width in self._groups:
+            if not equal_width or len(widgets) < 2:
                 continue
-            for button in buttons:
-                button.setMinimumWidth(0)
-            widest = max(b.sizeHint().width() for b in buttons)
-            for button in buttons:
-                button.setMinimumWidth(widest)
+            for widget in widgets:
+                widget.setMinimumWidth(0)
+            widest = max(w.sizeHint().width() for w in widgets)
+            for widget in widgets:
+                widget.setMinimumWidth(widest)
 
     def add_widget(self, widget: QWidget) -> None:
         self._layout.addWidget(widget)
@@ -507,5 +516,5 @@ class Toolbar(QWidget):
         self._layout.addStretch(1)
 
     @property
-    def groups(self) -> list[list[QPushButton]]:
-        return [list(buttons) for buttons, _ in self._groups]
+    def groups(self) -> list[list[QWidget]]:
+        return [list(widgets) for widgets, _ in self._groups]

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSplitter,
     QStackedWidget,
+    QTabBar,
     QTabWidget,
     QTreeView,
     QVBoxLayout,
@@ -63,7 +64,6 @@ from .segmentation import create_manual_segment, delete_segment, update_segment
 from .render import default_cache_dir, render_segment
 from .similarity import AXES, KIND_SAMPLE, KIND_SEGMENT, FeatureTable, Scores
 from .theme import apply_theme
-from .widgets import SegmentedControl
 from .vectorstrip import VectorStrip
 from .waveform import WaveformPanel
 
@@ -271,10 +271,6 @@ class MainWindow(QMainWindow):
         # --- the header across the window (2026-09-08, the user's steer): the
         # view switch stacked at the left with room for a third button, the
         # selected sample's tag-score bars, its CLAP strip underneath ---
-        # One control for one exclusive choice (2026-09-10, layer 2), not two
-        # buttons that happen to be mutually exclusive.
-        self._view_switch = SegmentedControl([("list", "List"), ("map", "Map")])
-        self._view_switch.setToolTip("Show the list or the map (§9.3, §9.4)")
         self._last_similarity: Scores | None = None
         self._tag_bars = TagBars()
         self._header_strip = VectorStrip(compact=True)
@@ -334,10 +330,33 @@ class MainWindow(QMainWindow):
         self._views = QStackedWidget()
         self._views.addWidget(self._table)
         self._views.addWidget(self._map)
-        self._view_switch.changed.connect(self._show_view)
+
+        # List / Map as tabs over the right half (2026-09-10, the user's steer:
+        # they were two buttons stacked at the top left of the header, and
+        # moving them here gives the whole header width to the tag bars). They
+        # sit above the view they switch, and read as the window's other tabs.
+        self._view_tabs = QTabBar()
+        self._view_tabs.addTab("List")
+        self._view_tabs.addTab("Map")
+        # A bare QTabBar expands its tabs to fill the width; a QTabWidget's does
+        # not. Off, so these sit compact at the left and read as the same object
+        # as the Attributes / Search / Recompute tabs opposite them.
+        self._view_tabs.setExpanding(False)
+        self._view_tabs.setDrawBase(False)
+        self._view_tabs.setToolTip("Show the list or the map (§9.3, §9.4)")
+        self._view_tabs.currentChanged.connect(
+            lambda i: self._show_view("map" if i else "list")
+        )
         if self._settings.value(SETTINGS_KEY_VIEW, "list", type=str) == "map":
-            self._view_switch.set_current("map")
+            self._view_tabs.setCurrentIndex(1)
             self._views.setCurrentWidget(self._map)
+        views_pane = QWidget()
+        views_layout = QVBoxLayout(views_pane)
+        views_layout.setContentsMargins(0, 0, 0, 0)
+        views_layout.setSpacing(0)
+        views_layout.addWidget(self._view_tabs)
+        views_layout.addWidget(self._views, stretch=1)
+        self._views_pane = views_pane
 
         # --- the waveform panel (§9.2's preview strip, at the bottom on the user's steer;
         # its markers editable since 2026-09-08, Phase 9) ---
@@ -404,17 +423,12 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(6, 4, 6, 2)
         header_layout.setSpacing(8)
-        switch = QVBoxLayout()
-        switch.setSpacing(2)
-        switch.addWidget(self._view_switch)
-        switch.addStretch(1)                         # room for a second control
         bars_column = QVBoxLayout()
         bars_column.setSpacing(2)
         bars_column.addWidget(self._tag_bars, stretch=1)
         bars_column.addWidget(self._header_strip)
-        header_layout.addLayout(switch)
         header_layout.addLayout(bars_column, stretch=1)
-        header_widget.setFixedHeight(max(112, 3 * self._view_switch.sizeHint().height() + 2 * 2 + 6 + 8))   # room for the bars
+        header_widget.setFixedHeight(112)            # room for the bars
         self._header_widget = header_widget
 
         # --- the window (2026-09-08, the user's steer): the right half is the list
@@ -441,7 +455,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(panes, stretch=1)
         body = QSplitter(Qt.Orientation.Horizontal)
         body.addWidget(left)
-        body.addWidget(self._views)
+        body.addWidget(self._views_pane)
         body.setStretchFactor(0, 1)
         body.setStretchFactor(1, 1)
         body.setSizes([800, 800])

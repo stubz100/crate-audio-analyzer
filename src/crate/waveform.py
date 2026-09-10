@@ -50,7 +50,15 @@ import numpy as np
 import soundfile as sf
 from PySide6.QtCore import QCoreApplication, QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QWheelEvent
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QPushButton, QScrollBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .catalog import SegmentRow
 from .theme import ACCENT, ACCENT_DIM, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel
@@ -977,19 +985,18 @@ class WaveformPanel(QWidget):
             lambda on: self.view.set_mode(MODE_SPECTRUM if on else MODE_WAVEFORM)
         )
         self.view.mode_changed.connect(self._on_mode_changed)
-        self._save = make_button(
-            "Save segment",
-            icon_name="save",
-            tooltip=(
-                "Write the moved or drawn markers to the index as manual segments (§6.3): exempt "
-                "from the automatic length and cap rules, never overwritten by a recompute."
-            ),
-        )
+        # Icon-only since 2026-09-10 (the user's steer: the labels were
+        # unnecessarily long). One "Segment" label names the group and the three
+        # icons carry the actions; the count that used to be in Save's label —
+        # "Save 2 segments" — lives in its tooltip, and the plot's own header
+        # already states it.
+        self._segment_label = QLabel("Segment")
+        self._segment_label.setObjectName("sectionHeader")
+        self._save = make_button(icon_name="save", tooltip=self._save_tooltip(0))
         self._discard = make_button(
-            "Discard", icon_name="close", intent="quiet", tooltip="Drop the unsaved markers (Esc)."
+            icon_name="close", intent="quiet", tooltip="Drop the unsaved markers (Esc)."
         )
         self._delete = make_button(
-            "Delete segment",
             icon_name="trash",
             intent="danger",
             tooltip="Remove the selected segment, automatic or manual, from the index (Del).",
@@ -1006,7 +1013,10 @@ class WaveformPanel(QWidget):
         buttons = Toolbar()
         buttons.add_group(self.play_button, self.stop_button, equal_width=False)
         buttons.add_group(self.mode_button)
-        buttons.add_group(self._save, self._discard, self._delete)
+        buttons.add_group(self._segment_label, equal_width=False)
+        buttons.add_group(
+            self._save, self._discard, self._delete, equal_width=False, divided=False
+        )
         buttons.add_stretch()
         buttons.add_widget(self.autoplay)
         self._buttons = buttons
@@ -1077,10 +1087,19 @@ class WaveformPanel(QWidget):
         if self.view.can_delete:
             self.delete_requested.emit(self.view.selected_segment)
 
+    @staticmethod
+    def _save_tooltip(n: int) -> str:
+        """Save's tooltip carries the count its label used to (2026-09-10)."""
+        what = "Save the segment" if n <= 1 else f"Save the {n} segments"
+        return (
+            f"{what}: write the moved or drawn markers to the index as manual segments "
+            "(§6.3) — exempt from the automatic length and cap rules, never overwritten "
+            "by a recompute."
+        )
+
     def _refresh(self, *_args) -> None:
         n = len(self.view.staged())
         self._save.setEnabled(n > 0)
-        self._save.setText("Save segment" if n <= 1 else f"Save {n} segments")
+        self._save.setToolTip(self._save_tooltip(n))
         self._discard.setEnabled(n > 0)
         self._delete.setEnabled(self.view.can_delete)
-        self._buttons.equalise()      # Save carries a count now; keep the group level

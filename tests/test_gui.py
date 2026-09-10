@@ -656,10 +656,10 @@ def test_map_view_draws_the_layout_and_syncs_with_the_list(app, tmp_path):
         assert "anchor placed in layout #1" in panel.log_text()
         assert window._map.point_count == 3
 
-        window._view_switch.set_current("map")
+        window._view_tabs.setCurrentIndex(1)                      # the Map tab
         assert window._views.currentWidget() is window._map
         assert not window._map.grab().isNull()                    # paints offscreen
-        window._view_switch.set_current("list")
+        window._view_tabs.setCurrentIndex(0)                      # the List tab
         assert window._views.currentWidget() is window._table
     finally:
         window.close()
@@ -911,7 +911,7 @@ def test_save_and_delete_segments_from_the_waveform(app, index, tmp_path):
 
         view.stage_edit(first.id, first.start_ms + 20, first.end_ms + 40)
         view.add_draft(3000, 3500)
-        assert panel._save.text() == "Save 2 segments"
+        assert "Save the 2 segments" in panel._save.toolTip()
         panel._save.click()
         assert not view.has_staged                                 # handed to the job
 
@@ -1090,7 +1090,7 @@ def test_columns_are_configurable_and_the_window_remembers_itself(app, index, tm
         assert not window._table.isExpanded(loop) and not header.sections_open
 
         window._tabs.setCurrentIndex(2)
-        window._view_switch.set_current("map")
+        window._view_tabs.setCurrentIndex(1)                      # the Map tab
         window._waveform_panel.mode_button.setChecked(True)                 # the spectral view
         window.resize(700, 520)                                          # inside the offscreen 800 × 600 screen:
         app.processEvents()                                              # a restored geometry is clamped to it

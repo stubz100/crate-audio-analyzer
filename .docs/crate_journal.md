@@ -1414,3 +1414,32 @@ Continuing the plan the studies set: components, built against the gallery, then
 
 - Layer 3, the painting kit — shared ramp LUTs, `hairline()`, `focus_ring()`, `axis_ticks()` — and with it the three adjustments to A: the accent left-edge on the selected row, the waveform inset off the panel edges, the vector strip dropped to a low-contrast texture. Then the header's tag bars onto `MeterList`.
 - Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-10 — Shorter segment actions, and List / Map as tabs on the right
+
+**Phase:** design system, layer 2 polish · `<hash>`
+
+The user, on the converted transport row: the segment buttons' labels are unnecessarily long — just "Segment" and three icons (disk / cross / bin). And the List / Map buttons should leave the top left and become tabs on the right, which gives the tag bars the whole header.
+
+**Done**
+
+- **The segment group is a label and three icons** (`waveform.py`): a "Segment" micro-label names it, `_save` / `_discard` / `_delete` are icon-only, joined to the label without a rule. The count that was in the button's own text — *Save segment* / *Save 2 segments* — is now in its tooltip (`_save_tooltip`), where it cannot change the button's width; the plot header already states it. The row is roughly 210 px narrower.
+- **`Toolbar.add_group` takes `divided=False`** for a group joined to the one before it, and accepts any `QWidget` rather than only `QPushButton` — the label is not a button.
+- **List / Map are a `QTabBar` over the right half** (`main.py`), above the view they switch. `setExpanding(False)` and `setDrawBase(False)`: a bare `QTabBar` stretches its tabs to fill the width where a `QTabWidget`'s does not, so without it they spanned the whole pane. They now sit compact at the left and read as the same object as the Attributes / Search / Recompute tabs opposite them. The header's `switch` column is gone and `bars_column` has the full width; the fixed height is a plain 112 px rather than derived from the switch's size hint.
+
+**Decided**
+
+- **`SegmentedControl` is no longer used by the window.** It stays in the library — tested, and demonstrated in the gallery — rather than being deleted: the Recompute tab's three-way scope choice (new/changed, everything, anchor only) is its natural next home. Flagged to the user rather than left silently.
+- The gallery's toolbar demo was updated to the new shape, so it keeps telling the truth about the app.
+
+**Verified**
+
+- `uv run pytest tests -q` → **238 passed, 3 skipped**; pyflakes clean. Four tests updated, all of which asserted the shape that just changed: `panel._save.text()` twice (now the tooltip) and the view switch three times (now `_view_tabs.setCurrentIndex`).
+- Offscreen on the user's index: the row reads ▶ ■ │ Spectrum │ SEGMENT 💾 ✕ 🗑 … Auto-play; LIST / MAP compact at the top left of the right pane; the tag bars across the full header width. Screenshots checked.
+
+**A note on tooling.** Three edits in this session were corrupted by `python - <<'PY'` heredocs eating backslashes — a `` backreference arriving as U+0001 inside `main.py`'s import block, and an em dash written as a lone cp1252 byte earlier. Exact-match edits on source now go through the editing tools, not heredocs; heredocs stay for appending prose with explicit `encoding="utf-8"`.
+
+**Next**
+
+- Layer 3, the painting kit, with the three adjustments to A: the accent left-edge on the selected row, the waveform inset off the panel edges, the vector strip dropped to a low-contrast texture. Then the tag bars onto `MeterList`.
+- Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
