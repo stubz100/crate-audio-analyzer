@@ -1354,3 +1354,33 @@ The user: the beta is usable but needs a much sleeker UI — "is there any way w
 
 - `src/crate/design.py` (the A token set, `theme.py` derived from it) and `crate --gallery`; then the component layer against the gallery; then panel-by-panel, transport row and Attributes tab first. Three adjustments to A recorded in the study: a 2px accent left-edge on the selected row, the waveform inset off the panel edges, the vector strip dropped to a low-contrast texture.
 - Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-10 — The token layer and the gallery
+
+**Phase:** design system, layers 1 and 4 · `<hash>`
+
+The user, after the studies: commit them, and continue as suggested — `design.py` and the gallery.
+
+**Done**
+
+- **`src/crate/design.py`** — direction A as tokens. Grouped rather than flat: `surface` (canvas → sunken → ground → panel → raised → overlay, plus `hairline` / `divider`), `ink`, `state`, **`data`**, `metric`, `type`. Three things the old flat namespace could not express, now explicit: the surface ramp spans 46 levels of lightness against the old four's 24, so **elevation is a step in value** instead of the 1px border that sat on every widget; **`surface.canvas` is not `surface.ground`** — the painted views draw on the darkest surface, the widgets sit on the window ground, and the old `BG` was asked to be both; and **data colours are held apart from chrome** — `AMBER` used to mean "segment" *and* feed the spectrogram gradient *and* stand in as a second accent. `palette()`, `stylesheet()`, `font(role)`, `mix()`, `load_fonts()`.
+- **`theme.py` derives from it.** Every constant the painted views import is kept — `__all__` is now a stated contract — but each is a view onto a token. `mapview.py`'s `_UNSCORED` is gone (`data.unscored`), so **every colour in the application resolves through `design.py`**.
+- **`src/crate/gallery.py` + `crate --gallery`** — surfaces, ink, state, data with the score ramp, the type roles and a numerals block, the spacing and radius scale, every control state a static widget can show, and a small list demonstrating right-aligned numeric columns. `scripts/design_studies.py --variant gallery` grabs it to `.docs/design/gallery.png`.
+
+**Decided**
+
+- **The group-title rule stops claiming a transform it never got.** `text-transform` reaches a `QLabel` but **not** the `QGroupBox::title` subcontrol (checked by rendering) — the *old* theme carried `text-transform: uppercase` there since 2026-09-07 and it never did anything. Size, weight and tracking do apply, so the title keeps those; `QLabel#sectionHeader` is the real uppercase micro-label and a `SectionHeader` component retiring the boxes is the component layer's job. A test keeps the rule honest.
+- **`seguisym.ttf` joins `FONT_FILES`** — without it ⚓ and ↳ rasterise as boxes offscreen, which is a small argument for the component layer's SVG icons.
+- **The committed comparison sheets will not be regenerated.** `theme.py` derives from the tokens now, so `--variant baseline` renders the *shipped* direction, not the pre-token theme. The sheets are the historical record of the choice; `--variant gallery` is the reproducible one.
+- The three adjustments to A (accent left-edge on the selected row, the waveform inset off the panel edges, the vector strip dropped to a texture) stay recorded for the component and painting layers — they are not token work.
+
+**Verified**
+
+- `uv run pytest tests -q` → **218 passed, 3 skipped** (206 before; `tests/test_design.py` adds 12); pyflakes clean over `src`, `tests` and `scripts`. The new tests assert the contract, not hex values: the ramp climbs and is wide enough, canvas ≠ ground, `theme.__all__` covers what the painters import, every `theme` colour is a token, the group-title rule makes no transform claim, the palette's roles, and the gallery builds and paints more than a flat rectangle.
+- One test had to be rewritten: **Fusion is not observable after `setStyleSheet`** — Qt wraps the style in a `QStyleSheetStyle` whose `baseStyle()` PySide6 does not expose. It asserts the palette, font and style sheet `apply_theme` actually sets.
+- Offscreen on the user's index: the window under the shipped tokens, and the gallery at 1080×1560. Screenshots checked — and legible for the first time, since `apply_theme` now calls `load_fonts()`.
+
+**Next**
+
+- Layer 2, the components, built against the gallery: `SegmentedControl`, `Toolbar` with grouping and intents, SVG `IconButton`, `Meter`, `Chip`, `SectionHeader`, `StatusPill`, `HelpText`. Then layer 3's painting kit, then panel-by-panel — the transport row and the Attributes tab first.
+- Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.

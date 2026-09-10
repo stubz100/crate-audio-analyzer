@@ -1239,14 +1239,23 @@ def main(argv: list[str] | None = None) -> int:
         "--db", type=Path, default=None,
         help=f"index database path (default: {default_db_path()})",
     )
+    parser.add_argument(
+        "--gallery", action="store_true",
+        help="open the design system's gallery instead of the window (spec §9.1)",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     for noisy in _NOISY_LOGGERS:
         logging.getLogger(noisy).setLevel(logging.WARNING)
     app = QApplication(sys.argv[:1])
     apply_theme(app)
-    window = MainWindow(args.db)
-    window.show()
+    if args.gallery:
+        from .gallery import show_gallery
+
+        window = show_gallery()
+    else:
+        window = MainWindow(args.db)
+        window.show()
     return app.exec()
 
 

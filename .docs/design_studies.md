@@ -4,7 +4,7 @@
 
 The user, on the beta: *"it needs much sleeker UI — is there any way we could build a design system specifically for Crate?"* This is the first step: a diagnosis of the window as it stands, a token layer as the thing `theme.py` never had, and three directions rendered against the real window so one can be chosen by looking. **Direction A (instrument panel) was chosen** — the record of why is below.
 
-Nothing in `src/` has changed. This is a study, not an implementation.
+*The diagnosis and the three directions below were written before anything was built; the **Built** section near the end records what landed the same day.*
 
 ## What the current window does well
 
@@ -88,6 +88,22 @@ That is the ceiling of a token layer: it fixes colour, density, type and materia
 
 `QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\segoeui.ttf")` fixes it and works fine under offscreen. `load_fonts()` in the study script does this for seven faces. Any offscreen grab meant to be *looked at* rather than measured needs it first — and it is also the argument for shipping the typeface with the application rather than depending on Segoe UI being installed.
 
+## Built (2026-09-10, same day)
+
+Layers 1 and 4 landed straight after the studies: `src/crate/design.py` holds direction A as tokens, `theme.py` derives every constant it exports from there, and `crate --gallery` opens the page below.
+
+![The gallery](design/gallery.png)
+
+Three things settled in the building:
+
+* **`mapview.py`'s `_UNSCORED` is gone** — it was the app's last raw hex, and `data.unscored` is now its home. Every colour in the application resolves through `design.py`.
+* **`text-transform` does not reach `QGroupBox::title`.** It works on a `QLabel`, and the old theme's group-title rule had carried a `text-transform: uppercase` that never did anything. The rule no longer claims it; `QLabel#sectionHeader` is the real uppercase micro-label, and replacing the boxes with a `SectionHeader` component is the component layer's job. A test asserts the rule stays honest.
+* **Fusion is not observable after `setStyleSheet`** — Qt wraps the style in a `QStyleSheetStyle` whose `baseStyle()` PySide6 does not expose. `test_apply_theme_applies_both_channels_and_repeats_cleanly` asserts the palette, font and style sheet instead.
+
+`seguisym.ttf` joined `FONT_FILES`: without it the ⚓ and ↳ glyph icons rasterise as boxes offscreen, which is itself a small argument for the component layer's SVG icons.
+
+**A note on the comparison sheets above.** They are the historical record of the choice, rendered before `design.py` existed. Because `theme.py` now derives from the tokens, re-running `--variant baseline` renders the *shipped* direction, not the pre-token theme — so the sheets are not reproducible and should not be regenerated. `--variant gallery` regenerates `gallery.png`, which should be.
+
 ## Next
 
-Direction A is chosen. The build order is layer 1 then layer 4 (tokens, then the gallery), because the gallery is what makes iterating on the rest cheap; then layer 2 against it; then panel-by-panel conversion, starting with the transport row and the Attributes tab as the worst offenders. This is a polish track alongside the roadmap in spec §12 — it does not displace Phase 10.
+Direction A is chosen and built. Layers 1 and 4 are done. Next is layer 2 — the components — built against the gallery: `SegmentedControl`, `Toolbar` with grouping and intents, `IconButton` over SVG, `Meter`, `Chip`, `SectionHeader`, `StatusPill`, `HelpText`. Then layer 3, the painting kit. Then panel-by-panel conversion, starting with the transport row and the Attributes tab as the worst offenders — which is also where the three adjustments to A get made. This is a polish track alongside the roadmap in spec §12 — it does not displace Phase 10.

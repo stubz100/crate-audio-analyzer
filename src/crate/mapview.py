@@ -26,13 +26,24 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen, QWheelEvent
 from PySide6.QtWidgets import QToolTip, QWidget
 
-from .theme import ACCENT, AMBER, BG, BORDER, SCORE_HIGH, SCORE_LOW, TEXT, TEXT_DIM, WHITE, mix
+from .theme import (
+    ACCENT,
+    AMBER,
+    BG,
+    BORDER,
+    SCORE_HIGH,
+    SCORE_LOW,
+    TEXT,
+    TEXT_DIM,
+    UNSCORED,
+    WHITE,
+    mix,
+)
 
 _POINT = 5.0        # half-size of a marker, px
 _HALO = 10.0
 _PICK_RADIUS = 10.0
 _MARGIN = 30.0
-_UNSCORED = QColor("#3a3b45")
 
 
 def _marker(path_type: str, x: float, y: float, r: float) -> QPainterPath:
@@ -190,7 +201,7 @@ class MapView(QWidget):
             return ACCENT
         value = self._scores.get(sample_id)
         if value is None:
-            return _UNSCORED
+            return UNSCORED
         t = (value - self._score_lo) / (self._score_hi - self._score_lo)
         return mix(SCORE_LOW, SCORE_HIGH, t)
 

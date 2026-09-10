@@ -180,6 +180,11 @@ HARDWARE = Tokens(
 SETS = {t.name: t for t in (INSTRUMENT, CALM, HARDWARE)}
 VARIANTS = ("baseline", *SETS)
 
+#: `theme.py` derives from `design.py` since 2026-09-10, so "baseline" now
+#: renders whatever the shipped direction is — not the pre-token theme the
+#: committed comparison sheets record. The sheets are the historical record.
+RENDERABLE = (*VARIANTS, "gallery")
+
 
 # --- Qt's two styling channels ---------------------------------------------
 
@@ -371,6 +376,24 @@ def load_fonts() -> int:
 # --- rendering -------------------------------------------------------------
 
 
+def render_gallery(out_dir: Path) -> None:
+    """Grab the design system's own page — the reference image for the tokens."""
+    app = application()
+    load_fonts()
+    from crate.gallery import GalleryWindow
+    from crate.theme import apply_theme
+
+    apply_theme(app)
+    window = GalleryWindow()
+    window.resize(1080, 1560)
+    window.show()
+    for _ in range(60):
+        app.processEvents()
+    page = window.centralWidget().widget()
+    page.grab().save(str(out_dir / "gallery.png"))
+    print(f"gallery: rendered {page.width()}x{page.height()}")
+
+
 def render(variant: str, db: Path, out_dir: Path) -> None:
     """Grab the window (and its Recompute tab) under one direction."""
     app = application()
@@ -474,7 +497,7 @@ def montage(out_dir: Path, variants: list[str]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--variant", default="all", choices=("all", *VARIANTS),
+        "--variant", default="all", choices=("all", *RENDERABLE),
         help="which direction to render ('all' runs each in its own process)",
     )
     parser.add_argument(
@@ -486,6 +509,11 @@ def main() -> int:
         "--no-montage", action="store_true", help="skip the comparison sheets",
     )
     args = parser.parse_args()
+
+    if args.variant == "gallery":
+        args.out.mkdir(parents=True, exist_ok=True)
+        render_gallery(args.out)
+        return 0
 
     if not args.db.exists():
         parser.error(
