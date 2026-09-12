@@ -61,7 +61,8 @@ from PySide6.QtWidgets import (
 )
 
 from .catalog import SegmentRow
-from .theme import ACCENT, ACCENT_DIM, AMBER, BG, BORDER, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel
+from .theme import ACCENT, ACCENT_DIM, AMBER, BG, GREEN, PINK, TEXT, TEXT_DIM, WHITE, ElidedLabel
+from .paint import PLOT_INSET, hairline
 from .widgets import Toolbar, make_button
 
 log = logging.getLogger(__name__)
@@ -553,9 +554,11 @@ class WaveformView(QWidget):
             painter.end()
             return
         mid = rect.center().y()
-        half = rect.height() / 2 - 2
-        painter.setPen(QPen(BORDER, 1))
-        painter.drawLine(QPointF(rect.left(), mid), QPointF(rect.right(), mid))
+        # Held off the top and bottom (2026-09-12, layer 3): the body used to
+        # come within 2px of both edges, which read as clipped even when the
+        # peak was well under full scale.
+        half = max(rect.height() / 2 - PLOT_INSET, 1.0)
+        hairline(painter, QPointF(rect.left(), mid), QPointF(rect.right(), mid))
 
         painter.save()
         painter.setClipRect(rect)

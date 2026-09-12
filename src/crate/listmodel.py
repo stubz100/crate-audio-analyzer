@@ -39,6 +39,7 @@ from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from .catalog import Criteria, SampleRow, Section, SegmentRow, hit_label
 from .similarity import Hit, Scores
+from .paint import selection_edge
 from .theme import ACCENT, TEXT, TEXT_DIM
 
 log = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ class SampleTreeModel(QAbstractItemModel):
     COL_SIMILARITY = 11
     COL_MATCH = 12
     FIXED = (COL_TREE, COL_ANCHOR)                 # pinned at the left; the score columns are the view's to show
+    NUMERIC = (COL_LENGTH, COL_BPM, COL_HITS, COL_SIMILARITY, COL_MATCH)   # right-aligned (2026-09-12)
 
     def __init__(
         self,
@@ -348,6 +350,15 @@ class SampleTreeModel(QAbstractItemModel):
             return None
         col = index.column()
         display = role == Qt.ItemDataRole.DisplayRole
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            # Numeric columns align right (2026-09-12). The design study found
+            # these looked misaligned and the cause was *not* the typeface —
+            # Segoe UI's digits are already tabular — but that "0.30 s" and
+            # "12.80 s" both started at the same left edge, so the decimal
+            # points never lined up. Alignment is the whole fix.
+            if col in self.NUMERIC:
+                return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         if self.is_hit(index):
             r = self.row_at(index)
             section = self.hit_at(index)
@@ -698,6 +709,14 @@ class AnchorDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index) -> None:  # noqa: N802
         column = index.column()
+        if column == 0 and option.state & QStyle.StateFlag.State_Selected:
+            # The accent edge down the selected row (2026-09-12, layer 3).
+            # Direction A quietened the selection from a saturated full-width
+            # bar to a low fill, which on its own read too quietly to find at
+            # a glance; the mark restores that without the bar coming back.
+            super().paint(painter, option, index)
+            selection_edge(painter, QRectF(option.rect))
+            return
         if column == self._anchor_column:
             full = QStyleOptionViewItem(option)
             self.initStyleOption(full, index)

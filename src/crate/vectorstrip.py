@@ -15,7 +15,11 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
-from .theme import ACCENT, AMBER, BORDER, FIELD, TEXT, TEXT_DIM, mix
+from .design import TOKENS
+from .paint import damp
+from .theme import ACCENT, AMBER, TEXT, TEXT_DIM, mix
+
+SUNKEN = TOKENS.surface.sunken
 
 _ROW = 18.0
 _GAP = 4.0
@@ -65,12 +69,18 @@ class VectorStrip(QWidget):
         step = width / max(n, 1)
         painter.setPen(Qt.PenStyle.NoPen)
         for i, value in enumerate(vector):
-            t = min(abs(float(value)) / scale, 1.0)
-            colour = mix(FIELD, AMBER if value >= 0 else ACCENT, t)
+            # Damped (2026-09-12, layer 3): at full contrast these 512 stripes
+            # were the loudest thing in the window while carrying the least
+            # actionable information — item 7 of the diagnosis. The pattern is
+            # what is read here, not any single number, and it survives being
+            # quiet. The blend also starts from the sunken ground rather than
+            # the field, so the strip sits *in* the header instead of on it.
+            t = damp(min(abs(float(value)) / scale, 1.0))
+            colour = mix(SUNKEN, AMBER if value >= 0 else ACCENT, t)
             painter.setBrush(colour)
             painter.drawRect(QRectF(4 + i * step, top, max(step, 1.0), self._row))
-        painter.setPen(QPen(BORDER, 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(TOKENS.surface.hairline, 1))
         painter.drawRect(QRectF(4, top, width, self._row))
 
     def paintEvent(self, _event) -> None:  # noqa: N802

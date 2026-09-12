@@ -1443,3 +1443,33 @@ The user, on the converted transport row: the segment buttons' labels are unnece
 
 - Layer 3, the painting kit, with the three adjustments to A: the accent left-edge on the selected row, the waveform inset off the panel edges, the vector strip dropped to a low-contrast texture. Then the tag bars onto `MeterList`.
 - Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-12 — The painting kit, and the three adjustments to direction A
+
+**Phase:** design system, layer 3 · `<hash>`
+
+The user: attend to the small changes recorded against direction A.
+
+**Done**
+
+- **`src/crate/paint.py`** — the shared answer to the four things every painted surface was solving its own way: `hairline()`, `selection_edge()`, `ramp()` / `along()` (a cached LUT between two token colours), `damp()`, plus `PLOT_INSET`. Deliberately small, and every function has a caller — a painting kit that grows speculative helpers is how a design system starts lying about itself.
+- **The three adjustments**, all recorded when A was chosen:
+  - **An accent edge down the selected row** (`listmodel.AnchorDelegate`, column 0). A quietened the selection from a saturated full-width bar to a low fill, which on its own read too quietly to find at a glance; the mark restores that without the bar.
+  - **The waveform is held off the top and bottom** (`PLOT_INSET`, 8 px against the old 2), which read as clipped even when the peak was well under full scale. Its centre line goes through `hairline()`.
+  - **The CLAP strip is damped** (`vectorstrip.py`): blended from the sunken ground to at most `TEXTURE_CEILING` (0.45) rather than full contrast. At full contrast 512 stripes were the loudest thing in the window while carrying the least actionable information — item 7 of the diagnosis. The pattern is what is read there, and it survives being quiet.
+- **Numeric columns are right-aligned** (`SampleTreeModel.NUMERIC`, a `TextAlignmentRole`): Length, BPM, Hits, Similarity, Match. The study had established the cause was *not* the typeface — Segoe UI's digits are already tabular — but that every value started at the same left edge, so the decimals never lined up. This was the one diagnosis item the earlier layers had left open.
+- **The map colours through the shared ramp** rather than a fresh `mix()` per point per repaint: thousands of interpolations a frame for at most 256 distinct results.
+
+**Verified**
+
+- `uv run pytest tests -q` → **246 passed, 3 skipped** (238 before; `tests/test_paint.py` adds 8); pyflakes clean over `src`, `tests` and `scripts`. Each helper is asserted through what it is for: a hairline touches one row, the selection edge marks the left and not the row, the ramp runs low to high and is the *same cached object* on a second call, `along()` clamps, `damp()` preserves order while compressing, and a damped stripe is measurably darker than a full-contrast one.
+- Offscreen on the user's index: the accent edge on the selected row, the inset waveform, the strip as a quiet texture, right-aligned Length and BPM. The Map tab was checked too — it had never been looked at under the new tokens — and shows its empty state correctly (this index has no layout computed).
+
+**Still open on the UI**
+
+Named here rather than left implied: the caption row still spends a whole row on "—" and its button; the **tag bars** are the last unconverted painted widget (the score floats above each bar, the label below, no baseline or scale); the panels' `QGroupBox` titles are still sentence case inside an outlined box, where `SectionHeader` and elevation-by-value are the system's answer; `HelpText` is built but not yet applied to the Recompute tab's paragraph; and `SegmentedControl` is still unused by the window, with that tab's three-way scope choice its natural home.
+
+**Next**
+
+- Those five, if the user wants them; otherwise the design system is at a natural stopping point.
+- Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.

@@ -124,7 +124,13 @@ Also `SectionHeader` (the uppercase micro-label the group box could never have),
 
 And the **List / Map switch moved out of the header** to a tab bar over the right half, which is the view it switches, freeing the whole header width for the tag bars. A bare `QTabBar` expands its tabs to fill; a `QTabWidget`'s does not, so `setExpanding(False)` keeps these compact at the left, reading as the same object as the Attributes / Search / Recompute tabs opposite. `SegmentedControl` is no longer used by the window as a result — it stays in the library, demonstrated in the gallery and tested, and the Recompute tab's three-way scope choice is its natural next home.
 
-Still on the list: the tag bars and the vector strip, which need the header's layout reworked rather than a component swapped in, and the painting kit (layer 3) that the three adjustments to A belong to.
+## Layer 3 — the painting kit (2026-09-12)
+
+`paint.py`: `hairline()`, `selection_edge()`, `ramp()` / `along()`, `damp()`, `PLOT_INSET`. The three adjustments to A recorded above are made — the accent edge down the selected row, the waveform held 8px off the plot edges instead of 2, and the CLAP strip damped to at most 45% contrast from the sunken ground so it recedes to a texture. The map now colours through the shared cached ramp rather than interpolating per point per repaint.
+
+The **numeric columns are right-aligned** at last (Length, BPM, Hits, Similarity, Match) — the one diagnosis item the token and component layers had both left open, and the fix the study had already identified as alignment rather than typeface.
+
+Still on the list: the tag bars, which need the header's layout reworked rather than a component swapped in, and the painting kit (layer 3) that the three adjustments to A belong to.
 
 ## Next
 

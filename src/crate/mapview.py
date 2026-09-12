@@ -26,6 +26,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen, QWheelEvent
 from PySide6.QtWidgets import QToolTip, QWidget
 
+from .paint import along, ramp
 from .theme import (
     ACCENT,
     AMBER,
@@ -203,7 +204,10 @@ class MapView(QWidget):
         if value is None:
             return UNSCORED
         t = (value - self._score_lo) / (self._score_hi - self._score_lo)
-        return mix(SCORE_LOW, SCORE_HIGH, t)
+        # Through the shared cached ramp (2026-09-12, layer 3) rather than a
+        # fresh `mix()` per point per repaint: thousands of interpolations a
+        # frame for at most 256 distinct results.
+        return along(ramp(SCORE_LOW, SCORE_HIGH), t)
 
     # --- painting ---
 
