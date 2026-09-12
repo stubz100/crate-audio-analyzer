@@ -1446,7 +1446,7 @@ The user, on the converted transport row: the segment buttons' labels are unnece
 
 ## 2026-09-12 — The painting kit, and the three adjustments to direction A
 
-**Phase:** design system, layer 3 · `<hash>`
+**Phase:** design system, layer 3 · `ba2db04`
 
 The user: attend to the small changes recorded against direction A.
 
