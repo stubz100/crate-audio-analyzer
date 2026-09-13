@@ -28,12 +28,13 @@ here holds a value of its own.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -123,6 +124,184 @@ class Chip(QPushButton):
         self.setFlat(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFont(font("label"))
+
+
+class FlowLayout(QLayout):
+    """Items in rows that wrap at the width — for chips, which are many and
+    short, and must never widen the pane (Phase 11, 2026-09-13)."""
+
+    def __init__(self, parent=None, spacing: int | None = None) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self._gap = TOKENS.metric.sm if spacing is None else spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, i: int):  # noqa: N802
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i: int):  # noqa: N802
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def clear(self) -> None:
+        """Take every widget out and let it go."""
+        while self._items:
+            item = self._items.pop()
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def expandingDirections(self):  # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._arrange(QRect(0, 0, width, 0), place=False)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._arrange(rect, place=True)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _arrange(self, rect: QRect, place: bool) -> int:
+        m = self.contentsMargins()
+        x = rect.x() + m.left()
+        y = rect.y() + m.top()
+        right = rect.right() - m.right()
+        line_height = 0
+        for item in self._items:
+            hint = item.sizeHint()
+            if x + hint.width() > right and line_height > 0:
+                x = rect.x() + m.left()
+                y += line_height + self._gap
+                line_height = 0
+            if place:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._gap
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + m.bottom()
+
+
+class TagChip(QWidget):
+    """A tag as a pill (Phase 11, 2026-09-13).
+
+    Curated (`removable`): the text is a search, the × at its end takes the
+    tag off the sample. Suggested (`suggested`): the machine's chip, quieter,
+    with a + — a click promotes it into the curated layer (§8's flow).
+    """
+
+    clicked = Signal(str)
+    removed = Signal(str)
+
+    HEIGHT = 22
+    PAD = 9
+    GLYPH = 12
+
+    def __init__(self, text: str, *, removable: bool = False, suggested: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self._text = text
+        self._removable = removable
+        self._suggested = suggested
+        self._hover = False
+        self._hover_glyph = False
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        if suggested:
+            self.setToolTip(f"Add “{text}” to my tags")
+        elif removable:
+            self.setToolTip(f"Search for “{text}” — the × takes it off this sample")
+
+    def text(self) -> str:
+        return self._text
+
+    @property
+    def has_glyph(self) -> bool:
+        return self._removable or self._suggested
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        width = QFontMetrics(font("label")).horizontalAdvance(self._text) + 2 * self.PAD
+        if self.has_glyph:
+            width += self.GLYPH + 2
+        return QSize(width, self.HEIGHT)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return self.sizeHint()
+
+    def _glyph_rect(self) -> QRectF:
+        return QRectF(self.width() - self.PAD - self.GLYPH, (self.height() - self.GLYPH) / 2, self.GLYPH, self.GLYPH)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        s, ink, st = TOKENS.surface, TOKENS.ink, TOKENS.state
+        radius = self.height() / 2
+        if self._suggested:
+            painter.setPen(QPen(s.divider if self._hover else s.hairline, 1))
+            painter.setBrush(s.raised if self._hover else Qt.BrushStyle.NoBrush)
+            text_colour = ink.primary if self._hover else ink.muted
+        else:
+            painter.setPen(QPen(st.accent_dim if self._hover else s.divider, 1))
+            painter.setBrush(s.overlay if self._hover else s.raised)
+            text_colour = ink.bright if self._hover else ink.primary
+        painter.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), radius, radius)
+        painter.setFont(font("label"))
+        painter.setPen(text_colour)
+        text_rect = QRectF(self.PAD, 0, self.width() - 2 * self.PAD - (self.GLYPH + 2 if self.has_glyph else 0), self.height())
+        painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self._text)
+        if self.has_glyph:
+            g = self._glyph_rect().adjusted(3, 3, -3, -3)
+            colour = st.danger if (self._removable and self._hover_glyph) else (ink.primary if self._hover else ink.muted)
+            painter.setPen(QPen(colour, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            if self._removable:
+                painter.drawLine(g.topLeft(), g.bottomRight())
+                painter.drawLine(g.topRight(), g.bottomLeft())
+            else:
+                centre = g.center()
+                painter.drawLine(QPointF(g.left(), centre.y()), QPointF(g.right(), centre.y()))
+                painter.drawLine(QPointF(centre.x(), g.top()), QPointF(centre.x(), g.bottom()))
+        painter.end()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        over_glyph = self._removable and self._glyph_rect().contains(event.position())
+        if over_glyph != self._hover_glyph:
+            self._hover_glyph = over_glyph
+            self.update()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = self._hover_glyph = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._removable and self._glyph_rect().contains(event.position()):
+            self.removed.emit(self._text)
+        else:
+            self.clicked.emit(self._text)
 
 
 class StatusPill(QLabel):
@@ -323,7 +502,7 @@ class SegmentedControl(QWidget):
         if not options:
             raise ValueError("a segmented control needs at least one option")
         self._options = list(options)
-        self._current = self._options[0][0]
+        self._current: str | None = self._options[0][0]
         self._hover = -1
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -331,16 +510,19 @@ class SegmentedControl(QWidget):
 
     # --- data ---
 
-    def current(self) -> str:
+    def current(self) -> str | None:
         return self._current
 
-    def set_current(self, key: str) -> None:
-        if key not in dict(self._options):
+    def set_current(self, key: str | None) -> None:
+        """`None` shows no choice at all — a facet the machine has not
+        decided yet (Phase 11). Only a real key is announced."""
+        if key is not None and key not in dict(self._options):
             raise KeyError(f"no option named {key!r}")
         if key != self._current:
             self._current = key
             self.update()
-            self.changed.emit(key)
+            if key is not None:
+                self.changed.emit(key)
 
     def sizeHint(self) -> QSize:  # noqa: N802
         metrics = QFontMetrics(font("label"))

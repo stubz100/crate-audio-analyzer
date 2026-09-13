@@ -538,6 +538,16 @@ class RecomputePanel(QWidget):
         """A line in the log from outside a job (the window's notes)."""
         self._append_log(text)
 
+    def confidence_threshold(self) -> float:
+        """Node E's flag threshold as set on the tab — a class reset (Phase 11)
+        re-applies it to the stored scores."""
+        return self._confidence.value()
+
+    def one_shot_max_duration_s(self) -> float | None:
+        """The one-shot cap as set on the tab, None when off — a type reset
+        (Phase 11) re-runs the rule under it."""
+        return self._one_shot_seconds.value() if self._one_shot_cap.isChecked() else None
+
     def plan(self) -> RunPlan:
         """The ticked steps as the window will run them."""
         layout = None

@@ -721,8 +721,11 @@ def _store(
         f"VALUES (?, {placeholders})",
         [sample_id, *(row[c] for c in _ANALYSIS_COLUMNS)],
     )
+    # Facet B's own flag (Phase 11, 2026-09-13): a corrected *class* no longer
+    # freezes the type — `corrections.py` owns the flags and `provenance`, so
+    # the upsert touches neither.
     existing = conn.execute(
-        "SELECT is_user_confirmed FROM classification WHERE sample_id = ?",
+        "SELECT structural_type_confirmed FROM classification WHERE sample_id = ?",
         (sample_id,),
     ).fetchone()
     if existing is not None and existing[0]:
@@ -733,7 +736,6 @@ def _store(
         VALUES (?, ?, 'automatic', 'rules/phase2')
         ON CONFLICT(sample_id) DO UPDATE
             SET structural_type = excluded.structural_type,
-                provenance = 'automatic',
                 source_model = excluded.source_model
         """,
         (sample_id, facet_b),

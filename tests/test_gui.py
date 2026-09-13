@@ -27,6 +27,7 @@ from test_embedding import FakeEncoder
 
 from crate.analysis import analyze_pending
 from crate.catalog import load_samples, load_segments
+from crate.corrections import load_classification, load_user_tags
 from crate.db import open_db
 from crate.design import TOKENS
 from crate.embedding import embed_pending
@@ -1175,5 +1176,84 @@ def test_the_selection_edge_marks_both_row_kinds_at_the_left(app, index, tmp_pat
             other = sample if row is child else child
             other_y = window._table.visualRect(other).center().y()
             assert image.pixelColor(0, other_y).name() != accent, f"{label} row: only the selected row is marked"
+    finally:
+        window.close()
+
+
+def test_corrections_from_the_attributes_tab(app, index, tmp_path):
+    """Phase 11 (§11): the Correct section writes the index at once, refreshes
+    the row in place, protects the facet it wrote, hands a facet back to the
+    machine on reset, curates tags that filter from the list's header like any
+    text column, and applies to every selected row when asked."""
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    C = SampleTreeModel
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
+    try:
+        window._autoplay.setChecked(False)
+        window.show()
+        app.processEvents()
+        panel = window._attributes
+        assert not panel.correction_values()["enabled"]
+
+        hit_row = _proxy_row_named(window, "hit.wav")
+        hit_id = conn.execute("SELECT id FROM samples WHERE filename = 'hit.wav'").fetchone()[0]
+        window._table.setCurrentIndex(window._proxy.index(hit_row, C.COL_FILE))
+        before = load_classification(conn, hit_id)
+        shown = panel.correction_values()
+        assert shown["enabled"] and shown["class"] == before.content_class and shown["type"] == before.structural_type
+        assert shown["suggested"] and not shown["tags"]
+        assert not panel._class_reset.isEnabled() and not panel._type_reset.isEnabled()
+
+        from crate.corrections import CONTENT_CLASSES, STRUCTURAL_TYPES
+
+        new_class = next(c for c in CONTENT_CLASSES if c != before.content_class)
+        new_type = next(t for t in STRUCTURAL_TYPES if t != before.structural_type)
+        panel._class_control.set_current(new_class)                     # a click on the control
+        after = load_classification(conn, hit_id)
+        assert after.content_class == new_class and after.content_class_confirmed
+        assert panel.correction_values()["class_note"].startswith("yours") and panel._class_reset.isEnabled()
+        assert window._rows_by_id[hit_id].class_confirmed
+
+        panel._type_control.set_current(new_type)
+        assert window._proxy.data(window._proxy.index(hit_row, C.COL_TYPE)) == new_type   # the row, in place
+        assert load_classification(conn, hit_id).structural_type_confirmed
+        panel._type_reset.click()
+        assert load_classification(conn, hit_id).structural_type == before.structural_type
+        assert not panel._type_reset.isEnabled()
+        assert window._proxy.data(window._proxy.index(hit_row, C.COL_TYPE)) == before.structural_type
+        assert load_classification(conn, hit_id).content_class_confirmed         # the other facet stays yours
+
+        panel._tag_box.setText("  punchy  ")
+        panel._tag_box.returnPressed.emit()
+        assert load_user_tags(conn, hit_id) == ["punchy"] and panel._tag_box.text() == ""
+        assert panel.correction_values()["tags"] == ["punchy"]
+        assert window._proxy.data(window._proxy.index(hit_row, C.COL_USER_TAGS)) == "punchy"
+        window._on_column_filter(C.COL_USER_TAGS, ColumnFilter(text="punch"))
+        assert window._proxy.rowCount() == 1
+        window._on_column_filter(C.COL_USER_TAGS, None)
+        assert window._proxy.rowCount() == 2
+
+        suggested = panel._suggest_flow.itemAt(0).widget()
+        promoted = suggested.text()
+        suggested.clicked.emit(promoted)                                 # the + on a suggestion
+        assert promoted in load_user_tags(conn, hit_id)
+        assert promoted not in panel.correction_values()["suggested"]
+        panel._tags_flow.itemAt(0).widget().removed.emit(panel.correction_values()["tags"][0])   # the ×
+        assert len(load_user_tags(conn, hit_id)) == 1
+
+        # Both rows selected and the box ticked: one click classes both.
+        loop_row = _proxy_row_named(window, "loop.wav")
+        flags = window._table.selectionModel().SelectionFlag
+        window._table.selectionModel().select(window._proxy.index(loop_row, C.COL_FILE), flags.Select | flags.Rows)
+        app.processEvents()
+        assert panel._apply_all.isVisible() and "2 selected" in panel._apply_all.text()
+        panel._apply_all.setChecked(True)
+        current = {r[0] for r in conn.execute("SELECT content_class FROM classification")}
+        bulk_class = next(c for c in CONTENT_CLASSES if c not in current)
+        panel._class_control.set_current(bulk_class)
+        assert {r[0] for r in conn.execute("SELECT content_class FROM classification")} == {bulk_class}
+        assert {r[0] for r in conn.execute("SELECT content_class_confirmed FROM classification")} == {1}
     finally:
         window.close()

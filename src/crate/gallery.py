@@ -43,11 +43,13 @@ from .design import TOKENS, font, mix
 from .icons import SHAPES, pixmap
 from .widgets import (
     Chip,
+    FlowLayout,
     HelpText,
     MeterList,
     SectionHeader,
     SegmentedControl,
     StatusPill,
+    TagChip,
     Toolbar,
     make_button,
 )
@@ -373,6 +375,16 @@ class GalleryWindow(QMainWindow):
                 StatusPill("stale", "danger"),
             )
         )
+        # Phase 11's tag chips: curated (a × takes one off) and suggested (a +
+        # promotes one), in a flow that wraps rather than widening the pane.
+        layout.addWidget(_section("Tag chips — curated with ×, suggested with +, wrapping"))
+        chips = QWidget()
+        flow = FlowLayout(chips)
+        for name in ("punchy", "field recording", "Acoustic"):
+            flow.addWidget(TagChip(name, removable=True))
+        for name in ("kick drum", "percussion", "snare drum", "hand clap"):
+            flow.addWidget(TagChip(name, suggested=True))
+        layout.addWidget(chips)
         help_ = HelpText(
             "Tick a folder to put it in scope: the list, the map, Rescan and Recompute cover "
             "the ticked folders. Unticked folders stay in the index, dormant."

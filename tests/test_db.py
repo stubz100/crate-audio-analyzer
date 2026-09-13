@@ -203,6 +203,53 @@ def test_old_index_gains_needs_review(tmp_path):
         conn.close()
 
 
+# --- Migration v11 (2026-09-13, Phase 11): per-facet protection flags, the curated tags ---
+
+
+def test_v10_index_gains_per_facet_flags_without_loosening_a_correction(tmp_path):
+    """A row the old single flag protected was frozen whole; after v11 it is
+    protected on *both* facets. An unprotected row stays unprotected, and
+    the curated tag tables arrive empty."""
+    db_path = tmp_path / "v10.db"
+    raw = sqlite3.connect(db_path)
+    raw.executescript(SCHEMA)
+    # The v10 classification table, spelled out: SQLite's DROP COLUMN trips over
+    # the trailing comments SCHEMA carries on the last column.
+    raw.executescript(
+        "DROP TABLE classification;"
+        "CREATE TABLE classification ("
+        "  sample_id INTEGER NOT NULL UNIQUE REFERENCES samples(id) ON DELETE CASCADE,"
+        "  content_class TEXT, structural_type TEXT, confidence REAL,"
+        "  provenance TEXT NOT NULL DEFAULT 'automatic', source_model TEXT,"
+        "  is_user_confirmed INTEGER NOT NULL DEFAULT 0);"
+        "DROP TABLE sample_tags; DROP TABLE tags; PRAGMA user_version = 10;"
+    )
+    for sample_id, confirmed in ((1, 1), (2, 0)):
+        raw.execute(
+            "INSERT INTO samples (id, filepath, filename, added_at, last_scanned_at, file_size, file_mtime) "
+            "VALUES (?, ?, ?, 't', 't', 1, 1.0)", (sample_id, f"C:/lib/{sample_id}.wav", f"{sample_id}.wav"),
+        )
+        raw.execute(
+            "INSERT INTO classification (sample_id, content_class, structural_type, provenance, is_user_confirmed) "
+            "VALUES (?, 'other', 'loop', ?, ?)", (sample_id, "manual" if confirmed else "automatic", confirmed),
+        )
+    raw.commit()
+    raw.close()
+
+    conn = open_db(db_path)                                  # v10 -> current in one open
+    try:
+        rows = conn.execute(
+            "SELECT sample_id, is_user_confirmed, content_class_confirmed, structural_type_confirmed "
+            "FROM classification ORDER BY sample_id"
+        ).fetchall()
+        assert [tuple(r) for r in rows] == [(1, 1, 1, 1), (2, 0, 0, 0)]
+        assert conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM sample_tags").fetchone()[0] == 0
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
 # --- Migration v8 (2026-09-08): segments.detection_method accepts 'window' ---
 
 
@@ -239,7 +286,7 @@ def test_v7_index_gains_the_window_kind_without_losing_a_row(tmp_path):
 
     conn = open_db(db_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 11
         assert _columns(conn, "libraries") >= {"path", "is_root", "in_scope"}       # v9 came along
         assert segments_accept_windows(conn)
         rows = conn.execute(
@@ -311,7 +358,7 @@ def test_v9_index_gets_autoincrement_ids_and_keeps_every_row(tmp_path):
 
     conn = open_db(db_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 11
         assert ids_autoincrement(conn, "samples") and ids_autoincrement(conn, "segments")
         assert [tuple(r) for r in conn.execute("SELECT id, filepath FROM samples")] == [(1, "x.wav")]
         assert [tuple(r) for r in conn.execute(

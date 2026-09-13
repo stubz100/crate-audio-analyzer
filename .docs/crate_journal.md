@@ -26,7 +26,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 8 | Recompute Tab | ✅ done — Rescan, folder-scope list, Recompute attributes + settings, Stop, log `7bfd001`, review fixes `0c2d33f`; ranking with Phase 7 (`4756a35`), map layout (both scopes) with Phase 6 (`72ad400`); reshaped into a Library panel + one Recompute panel `b04ab9c`; ⚓ anchored-only Recompute *attributes*, the last piece, `b1c037f` (2026-09-08; schema v10 with it) |
 | 9 | Header Interactions | ✅ done — preview + drag-out since 4.5, the ⚓ anchor since Phase 7 (`4756a35`; on every row since 2026-09-08), the waveform panel with segment markers, envelope and playhead `5acfcd4`; marker editing — drag, draw, Save / Discard / Delete segment — `06a7ec5` (2026-09-08) |
 | 10 | Bitwig Integration | ⬜ not started |
-| 11 | Correction Workflow | ⬜ not started |
+| 11 | Correction Workflow | ✅ done — pulled ahead of Phase 10 (2026-09-13): `corrections.py`, schema v11 (per-facet protection flags, `tags` / `sample_tags`), the Attributes tab's Correct section, a "My tags" column |
 | 12 | Scale & Polish Hardening | ⬜ not started |
 | 13 | Stretch | ⬜ not started |
 
@@ -1514,3 +1514,46 @@ Eight points, two of them real visual defects. Each was verified before it was r
 
 - The five UI items still open from the previous entry, unchanged.
 - Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-13 — Phase 11, pulled ahead: the correction workflow
+
+**Phase:** 11 — Correction Workflow · uncommitted at the time of writing
+
+The user: "I want to pull phase 11 ahead, can you start with that?" — ahead of Phase 10 (Bitwig: reveal in Explorer, crate export), which stays next.
+
+**Found first**
+
+- The pipeline already had half the phase: `classification.provenance` / `is_user_confirmed`, and both `analysis._store` and `embedding._write_facet_a` skipping a confirmed row. What was missing was everything user-facing, and the curated `tags` / `sample_tags` layer §8 has described since the spec was written but the schema never got.
+- The protection was **coarser than the spec implies**: one flag froze the whole row, so correcting the class would also have blocked every later structural-type re-analysis, and vice versa.
+
+**Done**
+
+- **Schema v11** (`db.py`): `classification.content_class_confirmed` and `structural_type_confirmed`, one flag per facet; `is_user_confirmed` kept as "either" for the summaries. `tags` (`name UNIQUE COLLATE NOCASE`) and `sample_tags`. The migration raises *both* facet flags on a row the old flag protected — a migration must never loosen a correction.
+- **`corrections.py`** — no Qt. `set_content_class` / `set_structural_type` write the user's call, raise the facet's flag, and (for the class) push it to the sample's segments that are not themselves confirmed. `reset_content_class` hands the facet back to CLAP from the stored four class scores under the confidence threshold; `reset_structural_type` re-runs the Phase 2 rule over the stored descriptor row under the one-shot cap — no audio either way. `add_tag` / `remove_tag` / `load_user_tags` / `all_tags` / `suggested_tags` (the machine's chips minus the curated). Every writer takes a list of sample ids.
+- **`analysis._store` and `embedding._write_facet_a`** check their own facet's flag; the analysis upsert no longer resets `provenance`, which `corrections.py` owns.
+- **The list**: `SampleRow` carries `user_tags`, `class_confirmed`, `type_confirmed`; a **"My tags"** column after Tags, text-filterable like any other; `catalog.load_sample` and `SampleTreeModel.update_row` refresh one row in place, so a correction keeps the selection, the expansion and the scroll position.
+- **The Attributes tab's Correct section** (`attributes.py`, `CorrectionState`): class and type as `SegmentedControl`s — the component's first use in the window — each with a note saying whose call it is and a ↺ back to the machine's; My tags as `TagChip`s in a `FlowLayout` (the text searches, the × removes) with a completing box to add one; Suggested chips a click promotes; an *Apply to all N selected rows* box when more than one row is selected. The panel emits, the window writes and refreshes — one UPDATE, no job, no reload.
+- **Design system**: `FlowLayout`, `TagChip` (curated with ×, suggested with +), `SegmentedControl.set_current(None)` for a facet the machine has not decided; the gallery shows the chips; `RecomputePanel.confidence_threshold()` / `one_shot_max_duration_s()` expose the tab's two settings the resets re-apply.
+- Spec: §4 (the correction path exists; the taxonomy question stays open), §8 (both tables and the per-facet flags), §9.5 (the Correct section), §12 (Phase 11 built, pulled ahead).
+
+**Decided**
+
+- **Protection per facet, not per row.** Correcting one facet must leave the other free to improve on the next recompute; the flags are the honest expression of "this one is mine".
+- **A reset restores the machine's value now, not at the next recompute**, from what the index already holds — the stored class scores and the stored descriptors — so the user sees the alternative immediately and unprotected. The class reset differs from node E only in its rhythmic-vs-melodic tie-break, which needs the harmonic ratio; ties are rare and the next embed settles them.
+- **Corrections are direct writes, not jobs.** A job exists for work that decodes audio and needs the log and the reload; a correction is a millisecond UPDATE, and a reload would cost the selection. WAL and the busy timeout cover a correction landing while a Recompute runs, and the flag protects it from that run.
+- **`update_row` does not re-sort.** A list sorted by Type keeps a re-typed row where it was until the next sort or reload — cheaper than losing the selection on every click.
+- **The two legacy protection tests now write through `corrections.py`** rather than setting the old flag by hand: the facet flag is the path, and the migration covers old rows.
+- A tag no sample carries any more is forgotten, so the box's completions are what the library actually carries.
+- The header's tag bars are untouched: promoting lives on the panel's Suggested row. `text_tags.is_user_confirmed` stays unused — promotion is a row in `sample_tags`, and the machine layer stays disposable.
+- Not committed by me: the user asked to start the phase; the working tree holds it.
+
+**Verified**
+
+- `uv run pytest tests -q` → **269 passed, 3 skipped** (252 before); pyflakes clean. New: `tests/test_corrections.py` (11: each facet's write, flag and protection through `reclassify` / `analyze_pending(reanalyze=True)`, both resets against the machine's own value, one facet's reset leaving the other protected, bulk writes, case-insensitive tags forgotten when unused, suggestions minus the curated, the list rows), a v10→v11 migration test (a protected row protected on both facets, an unprotected one untouched, the tag tables empty), four widget tests (a segmented control showing no choice, the flow wrapping and clearing, a chip's text and × as two signals, a suggested chip promoting on any click), and one GUI test driving the panel end to end: the write, the row refreshed in place, the reset, the tag typed and filtered from the header, a suggestion promoted, a × removing, and a bulk class over two selected rows.
+- Offscreen on the test library under the shipped theme: the Correct section after a correction — the class control on Vocal with "CLAP's call: Vocal 70 %", the type on Multi-hit with "yours — the next Recompute segments the sample as this" and its ↺ live, "punchy" and a promoted chip under My tags, the remaining suggestions below; the list's Type cell reading multi-hit without a reload. Screenshots checked.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export) — the phase this one was pulled ahead of.
+- Possible follow-ups, not started: a mark on a corrected Type cell in the list; promoting from the header's tag bars; a Type header filter value for "corrected".
+- Unchanged: captions as a search channel; the five open design-system items from 2026-09-12.

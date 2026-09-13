@@ -21,7 +21,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # The third kind of segment (spec §6.4): one of the 10-s CLAP windows a file
 # longer than the model's input is embedded through, kept with its vector so a
@@ -47,6 +47,12 @@ WINDOW_METHOD = "window"
 #      re-scanned row never takes an id a deleted row had — the anchor, the
 #      settings and `map_position` hold ids across recomputes. A rebuild of
 #      both tables, since a PRIMARY KEY cannot be altered in place
+# v11 = Phase 11 (spec §8, §11; 2026-09-13): `classification` gains one protection
+#      flag per facet (`content_class_confirmed`, `structural_type_confirmed`) —
+#      the single `is_user_confirmed` froze the whole row, so correcting the
+#      class also blocked every later structural-type re-analysis — and the
+#      curated tag layer, `tags` + `sample_tags`, user-owned and never written
+#      by a stage
 
 
 def scope_clause(
@@ -184,9 +190,15 @@ CREATE TABLE IF NOT EXISTS classification (        -- samples only (spec §8), P
     content_class     TEXT,                        -- Facet A (spec §4) — Phase 4 (CLAP + node E)
     structural_type   TEXT,                        -- Facet B (spec §4) — Phase 2 rules
     confidence        REAL,                        -- node E's flag-threshold input — Phase 4
-    provenance        TEXT NOT NULL DEFAULT 'automatic',  -- automatic | manual (spec §11)
+    provenance        TEXT NOT NULL DEFAULT 'automatic',  -- automatic | manual (spec §11): manual
+                                                          -- while either facet below is confirmed
     source_model      TEXT,
-    is_user_confirmed INTEGER NOT NULL DEFAULT 0   -- protection flag (spec §11)
+    is_user_confirmed INTEGER NOT NULL DEFAULT 0,  -- either facet confirmed (the pre-v11 flag,
+                                                   -- kept in step by `corrections.py`)
+    content_class_confirmed   INTEGER NOT NULL DEFAULT 0,  -- Phase 11: Facet A is the user's —
+                                                           -- node E leaves it (v11)
+    structural_type_confirmed INTEGER NOT NULL DEFAULT 0   -- Phase 11: Facet B is the user's —
+                                                           -- re-analysis leaves it (v11)
 );
 
 -- Phase 3 (spec §6): a segment is an INDEX INTO a sample — a start/end marker
@@ -283,6 +295,24 @@ CREATE TABLE IF NOT EXISTS text_tags (
     UNIQUE (sample_id, source_model, tag_or_caption)
 );
 CREATE INDEX IF NOT EXISTS idx_text_tags_sample ON text_tags(sample_id);
+
+-- Phase 11 (spec §8, §11; v11): the CURATED tag layer — user-owned, never
+-- written by any stage. `text_tags` above is the machine layer (regenerable,
+-- disposable); a chip the user accepts is promoted here (`corrections.add_tag`).
+CREATE TABLE IF NOT EXISTS tags (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT NOT NULL UNIQUE COLLATE NOCASE   -- "Kick" and "kick" are one tag
+);
+
+CREATE TABLE IF NOT EXISTS sample_tags (
+    sample_id         INTEGER NOT NULL
+                      REFERENCES samples(id) ON DELETE CASCADE,
+    tag_id            INTEGER NOT NULL
+                      REFERENCES tags(id) ON DELETE CASCADE,
+    added_at          TEXT,
+    PRIMARY KEY (sample_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sample_tags_tag ON sample_tags(tag_id);
 
 CREATE TABLE IF NOT EXISTS segment_classification (  -- Phase 4; structural_type is fixed
     segment_id        INTEGER NOT NULL UNIQUE
@@ -468,6 +498,25 @@ def _migrate_v10(conn: sqlite3.Connection) -> None:
             _rebuild_table(conn, table, indexes)
 
 
+def _migrate_v11(conn: sqlite3.Connection) -> None:
+    """Phase 11: `classification` gains one protection flag per facet. A row
+    the old single flag protected stays protected on *both* facets — it was
+    frozen whole before, and a migration must never loosen a correction.
+    `tags` / `sample_tags` are new tables; SCHEMA's CREATE IF NOT EXISTS
+    covers them."""
+    columns = _columns(conn, "classification")
+    if not columns:
+        return
+    fresh = "content_class_confirmed" not in columns
+    _add_column(conn, "classification", "content_class_confirmed", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "classification", "structural_type_confirmed", "INTEGER NOT NULL DEFAULT 0")
+    if fresh:
+        conn.execute(
+            "UPDATE classification SET content_class_confirmed = 1, structural_type_confirmed = 1 "
+            "WHERE is_user_confirmed = 1"
+        )
+
+
 _MIGRATIONS: dict[int, list] = {
     2: [],              # v1 -> v2: new tables only; SCHEMA's CREATE IF NOT EXISTS covers it
     3: [_migrate_v3],   # v2 -> v3: staleness timestamps + spec §8 classification columns
@@ -478,6 +527,7 @@ _MIGRATIONS: dict[int, list] = {
     8: [_migrate_v8],   # v7 -> v8: segments.detection_method accepts 'window' (table rebuild)
     9: [],              # v8 -> v9: libraries; CREATE IF NOT EXISTS covers it, the panel seeds it
     10: [_migrate_v10], # v9 -> v10: samples.id / segments.id AUTOINCREMENT (table rebuilds)
+    11: [_migrate_v11], # v10 -> v11: per-facet protection flags; tags + sample_tags (CREATE IF NOT EXISTS)
 }
 
 

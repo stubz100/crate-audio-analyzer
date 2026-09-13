@@ -13,20 +13,23 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QColor, QIcon
-from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QWidget
 
 from crate import icons
 from crate.design import TOKENS
 from crate.widgets import (
     Chip,
+    FlowLayout,
     HelpText,
     Meter,
     MeterList,
     SectionHeader,
     SegmentedControl,
     StatusPill,
+    TagChip,
     Toolbar,
     make_button,
 )
@@ -154,6 +157,66 @@ def test_segmented_control_is_exclusive_and_signals_once(app):
 def test_segmented_control_needs_an_option(app):
     with pytest.raises(ValueError):
         SegmentedControl([])
+
+
+def test_segmented_control_can_show_no_choice(app):
+    """Phase 11: a facet the machine has not decided shows nothing, and
+    showing nothing is not a choice to announce."""
+    control = SegmentedControl([("a", "A"), ("b", "B")])
+    seen: list[str] = []
+    control.changed.connect(seen.append)
+    control.set_current(None)
+    assert control.current() is None and seen == []
+    assert not control.grab().isNull()
+    control.set_current("b")
+    assert seen == ["b"]
+
+
+# --- Phase 11: tag chips in a flow ---
+
+
+def test_flow_layout_wraps_at_the_width_and_clears(app):
+    host = QWidget()
+    flow = FlowLayout(host)
+    for name in ("kick drum", "percussion", "snare drum", "hand clap", "tom drum", "cymbal"):
+        flow.addWidget(TagChip(name, removable=True))
+    wide, narrow = flow.heightForWidth(2000), flow.heightForWidth(180)
+    assert narrow > wide, "a narrow width must take more rows"
+    host.resize(180, narrow)
+    host.show()
+    app.processEvents()
+    tops = {flow.itemAt(i).widget().y() for i in range(flow.count())}
+    assert len(tops) > 1, "the chips should sit on more than one row"
+    assert all(flow.itemAt(i).widget().x() + flow.itemAt(i).widget().width() <= 180 for i in range(flow.count()))
+    flow.clear()
+    assert flow.count() == 0
+
+
+def test_tag_chip_click_searches_and_its_cross_removes(app):
+    chip = TagChip("kick drum", removable=True)
+    chip.resize(chip.sizeHint())
+    chip.show()
+    clicked: list[str] = []
+    removed: list[str] = []
+    chip.clicked.connect(clicked.append)
+    chip.removed.connect(removed.append)
+    QTest.mouseClick(chip, Qt.MouseButton.LeftButton, pos=QPoint(chip.PAD + 2, chip.height() // 2))
+    QTest.mouseClick(chip, Qt.MouseButton.LeftButton, pos=QPoint(chip.width() - chip.PAD - chip.GLYPH // 2, chip.height() // 2))
+    assert clicked == ["kick drum"] and removed == ["kick drum"]
+    assert not chip.grab().isNull()
+
+
+def test_suggested_chip_promotes_on_any_click(app):
+    chip = TagChip("percussion", suggested=True)
+    chip.resize(chip.sizeHint())
+    chip.show()
+    clicked: list[str] = []
+    removed: list[str] = []
+    chip.clicked.connect(clicked.append)
+    chip.removed.connect(removed.append)
+    QTest.mouseClick(chip, Qt.MouseButton.LeftButton, pos=QPoint(chip.width() - chip.PAD - chip.GLYPH // 2, chip.height() // 2))
+    assert clicked == ["percussion"] and removed == []
+    assert TagChip("x").sizeHint().width() < TagChip("x", suggested=True).sizeHint().width()
 
 
 def test_segmented_control_click_selects_the_slot_under_it(app):

@@ -260,12 +260,12 @@ def test_second_run_does_nothing_and_a_content_change_re_embeds(library):
 
 
 def test_manual_classification_is_protected(library):
+    """Written the way Phase 11 writes it — Facet A's own flag (2026-09-13)."""
+    from crate.corrections import set_content_class
+
     lib, conn = library
-    conn.execute(
-        "UPDATE classification SET content_class = 'other', is_user_confirmed = 1 "
-        "WHERE sample_id = (SELECT id FROM samples WHERE filename = 'hit.wav')"
-    )
-    conn.commit()
+    hit_id = conn.execute("SELECT id FROM samples WHERE filename = 'hit.wav'").fetchone()[0]
+    set_content_class(conn, [hit_id], "other")
 
     summary = embed_pending(conn, encoder=FakeEncoder({0.4: "a drum hit", 4.0: "a melodic loop"}))
 

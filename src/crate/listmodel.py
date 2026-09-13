@@ -105,10 +105,15 @@ class SampleTreeModel(QAbstractItemModel):
     # Two fixed columns first (2026-09-09, the user's steer): the tree expander and
     # the anchor circle — unmovable, unsortable, no filter. Then Folder, File and
     # the caption (2026-09-08); the four CLAP columns left the list earlier.
-    COLUMNS = ("", "", "Folder", "File", "Caption", "Length", "Type", "BPM", "Key", "Tags", "Hits", "Similarity", "Match")
-    COL_TREE, COL_ANCHOR, COL_FOLDER, COL_FILE, COL_CAPTION, COL_LENGTH, COL_TYPE, COL_BPM, COL_KEY, COL_TAGS, COL_HITS = range(11)
-    COL_SIMILARITY = 11
-    COL_MATCH = 12
+    # "My tags" (Phase 11, 2026-09-13) is the curated layer beside the machine's
+    # "Tags": what the user wrote, filterable like any text column.
+    COLUMNS = ("", "", "Folder", "File", "Caption", "Length", "Type", "BPM", "Key", "Tags", "My tags", "Hits", "Similarity", "Match")
+    (
+        COL_TREE, COL_ANCHOR, COL_FOLDER, COL_FILE, COL_CAPTION, COL_LENGTH, COL_TYPE, COL_BPM, COL_KEY,
+        COL_TAGS, COL_USER_TAGS, COL_HITS,
+    ) = range(12)
+    COL_SIMILARITY = 12
+    COL_MATCH = 13
     FIXED = (COL_TREE, COL_ANCHOR)                 # pinned at the left; the score columns are the view's to show
     NUMERIC = (COL_LENGTH, COL_BPM, COL_HITS, COL_SIMILARITY, COL_MATCH)   # right-aligned (2026-09-12)
 
@@ -141,6 +146,17 @@ class SampleTreeModel(QAbstractItemModel):
         self._rebuild_children()
         self._apply_sort()
         self.endResetModel()
+
+    def update_row(self, row: SampleRow) -> None:
+        """One sample's row replaced in place (Phase 11: a correction changes
+        its Type or My tags cell). No reset, so the selection, the expansion
+        and the scroll position stay; a sort by the changed column catches up
+        at the next reload or sort, which is the cheaper of the two wrongs."""
+        i = self._row_index.get(row.id)
+        if i is None:
+            return
+        self._rows[i] = row
+        self.dataChanged.emit(self.index(i, 0), self.index(i, len(self.COLUMNS) - 1))
 
     def set_similarity(self, scores: Scores | None) -> None:
         """The last explicit ranking (§9.6); None clears the column."""
@@ -189,6 +205,8 @@ class SampleTreeModel(QAbstractItemModel):
             return lambda r: r.key or ""
         if column == self.COL_TAGS:
             return lambda r: r.tags.lower()
+        if column == self.COL_USER_TAGS:
+            return lambda r: r.user_tags.lower()
         if column == self.COL_HITS:
             return lambda r: r.segment_count
         if column == self.COL_SIMILARITY:
@@ -415,6 +433,8 @@ class SampleTreeModel(QAbstractItemModel):
             return r.key or ""
         if col == self.COL_TAGS:
             return r.tags
+        if col == self.COL_USER_TAGS:
+            return r.user_tags
         if col == self.COL_HITS:
             if display:
                 if not r.segment_count:

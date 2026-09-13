@@ -36,18 +36,33 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .attributes import AttributesPanel
+from .attributes import AttributesPanel, CorrectionState
 from .catalog import (
     describe_item,
     hit_label,
     index_summary,
     load_caption,
+    load_sample,
     load_samples,
     load_sections,
     load_segments,
     load_tags,
     load_vector,
     load_windows,
+)
+from .corrections import (
+    CLASS_LABELS,
+    TYPE_LABELS,
+    add_tag,
+    all_tags,
+    load_classification,
+    load_user_tags,
+    remove_tag,
+    reset_content_class,
+    reset_structural_type,
+    set_content_class,
+    set_structural_type,
+    suggested_tags,
 )
 from .db import default_db_path, open_db
 from .embedding import ClapEncoder, EmbedSettings
@@ -91,6 +106,7 @@ COLUMN_SPECS = {
     SampleTreeModel.COL_BPM: ColumnSpec("range", "BPM", maximum=999),
     SampleTreeModel.COL_KEY: ColumnSpec("values"),
     SampleTreeModel.COL_TAGS: ColumnSpec("text"),
+    SampleTreeModel.COL_USER_TAGS: ColumnSpec("text"),
     SampleTreeModel.COL_HITS: ColumnSpec("range", maximum=9_999),
     SampleTreeModel.COL_SIMILARITY: ColumnSpec("range", "%", maximum=100, scale=100.0),
     SampleTreeModel.COL_MATCH: ColumnSpec("range", "%", maximum=100, scale=100.0),
@@ -324,6 +340,7 @@ class MainWindow(QMainWindow):
         self._header.sortIndicatorChanged.connect(lambda *_: self._save_header())
         self._configure_drag_view(self._table)
         self._table.selectionModel().currentRowChanged.connect(self._on_sample_selected)
+        self._table.selectionModel().selectionChanged.connect(lambda *_: self._show_correction())   # the "apply to all N" count
         self._table.doubleClicked.connect(lambda _index: self._play_current())
 
         # --- the selected sample's segments (§6.4 drill-down) ---
@@ -392,7 +409,17 @@ class MainWindow(QMainWindow):
 
         # --- the tabs: Attributes (§9.5), Search, Recompute (§9.6) ---
         self._attributes = AttributesPanel(self._settings)
+        # Corrections (Phase 11, §11): the panel asks, the window writes the
+        # index and refreshes the rows in place — no job, no reload: a
+        # correction is one UPDATE.
+        self._attributes.class_chosen.connect(self._correct_class)
+        self._attributes.type_chosen.connect(self._correct_type)
+        self._attributes.class_reset.connect(self._reset_class)
+        self._attributes.type_reset.connect(self._reset_type)
+        self._attributes.tag_added.connect(self._add_user_tag)
+        self._attributes.tag_removed.connect(self._remove_user_tag)
         self._search_panel = SearchPanel(self._settings)
+        self._attributes.tag_searched.connect(self._search_panel.search_for)
         self._search_panel.search_requested.connect(self._search)
         self._search_panel.search_cleared.connect(self._clear_search)
         self._search_panel.criteria_changed.connect(self._proxy.set_criteria)
@@ -403,6 +430,7 @@ class MainWindow(QMainWindow):
         )
         self._recompute.index_changed.connect(self.reload)
         self._recompute.index_changed.connect(self._close_if_pending)
+        self._recompute.index_changed.connect(self._show_correction)    # after the reload: a job may have re-typed the sample
         self._recompute.scope_changed.connect(self.reload)
         self._recompute.run_requested.connect(self._run_plan)
         self._recompute.job_ended.connect(self._advance_plan)
@@ -651,6 +679,7 @@ class MainWindow(QMainWindow):
             self._current_label = row.filename
         self._update_difference()
         self._show_vector()
+        self._show_correction()
         if self._autoplay.isChecked() and not self._quiet_select:
             self._play_current()
 
@@ -699,6 +728,111 @@ class MainWindow(QMainWindow):
             "SELECT attack_ms, decay_ms FROM analysis WHERE sample_id = ?", (sample_id,)
         ).fetchone()
         return (None, None) if row is None else (row[0], row[1])
+
+    # --- corrections (Phase 11, §11) ---
+
+    def _selected_sample_ids(self) -> list[int]:
+        """The samples behind the selected rows, in list order, each once — a
+        selected section row counts as its sample."""
+        ids: list[int] = []
+        for index in self._table.selectionModel().selectedRows():
+            row = self._samples.row_at(self._proxy.mapToSource(index))
+            if row is not None and row.id not in ids:
+                ids.append(row.id)
+        return ids
+
+    def _correction_targets(self) -> list[int]:
+        """The current sample — or every selected row's sample, when the panel's
+        box is ticked and more than one is selected."""
+        if self._current_sample is None:
+            return []
+        if self._attributes.apply_to_selection():
+            selected = self._selected_sample_ids()
+            if len(selected) > 1:
+                return selected
+        return [self._current_sample]
+
+    def _show_correction(self) -> None:
+        """The Correct section follows the current sample and the selection."""
+        sample_id = self._current_sample
+        row = None if sample_id is None else self._rows_by_id.get(sample_id)
+        if row is None:
+            self._attributes.show_correction(None)
+            return
+        self._attributes.show_correction(CorrectionState(
+            label=row.filename,
+            classification=load_classification(self._conn, sample_id),
+            user_tags=load_user_tags(self._conn, sample_id),
+            suggested=suggested_tags(self._conn, sample_id),
+            known_tags=[name for name, _ in all_tags(self._conn)],
+            selected_count=len(self._selected_sample_ids()),
+        ))
+
+    def _after_correction(self, targets: list[int], message: str) -> None:
+        """Refresh the corrected rows in place (Type, My tags) and the panel."""
+        for sample_id in targets:
+            row = load_sample(self._conn, sample_id)
+            if row is not None:
+                self._rows_by_id[sample_id] = row
+                self._samples.update_row(row)
+        self._show_correction()
+        self.statusBar().showMessage(message)
+
+    @staticmethod
+    def _plural(n: int) -> str:
+        return "1 sample" if n == 1 else f"{n} samples"
+
+    def _correct_class(self, content_class: str) -> None:
+        targets = self._correction_targets()
+        if not targets:
+            return
+        n = set_content_class(self._conn, targets, content_class)
+        self._after_correction(
+            targets, f"class {CLASS_LABELS[content_class]} for {self._plural(n)} — yours now; CLAP will not overwrite it",
+        )
+
+    def _correct_type(self, structural_type: str) -> None:
+        targets = self._correction_targets()
+        if not targets:
+            return
+        n = set_structural_type(self._conn, targets, structural_type)
+        self._after_correction(
+            targets,
+            f"type {TYPE_LABELS[structural_type]} for {self._plural(n)} — yours now; "
+            "the next Recompute attributes segments accordingly",
+        )
+
+    def _reset_class(self) -> None:
+        targets = self._correction_targets()
+        if not targets:
+            return
+        n = reset_content_class(self._conn, targets, self._recompute.confidence_threshold())
+        self._after_correction(targets, f"class back to CLAP's call for {self._plural(n)}")
+
+    def _reset_type(self) -> None:
+        targets = self._correction_targets()
+        if not targets:
+            return
+        n = reset_structural_type(self._conn, targets, self._recompute.one_shot_max_duration_s())
+        self._after_correction(targets, f"type back to the rule's call for {self._plural(n)}")
+
+    def _add_user_tag(self, name: str) -> None:
+        targets = self._correction_targets()
+        if not targets:
+            return
+        try:
+            n = add_tag(self._conn, targets, name)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self._after_correction(targets, f"tag “{name}” on {self._plural(n)}")
+
+    def _remove_user_tag(self, name: str) -> None:
+        targets = self._correction_targets()
+        if not targets:
+            return
+        n = remove_tag(self._conn, targets, name)
+        self._after_correction(targets, f"tag “{name}” taken off {self._plural(n)}")
 
     def _update_difference(self) -> None:
         """The selected item's per-axis distance from the anchor (§9.5)."""

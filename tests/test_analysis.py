@@ -358,7 +358,10 @@ def test_changed_file_is_reanalyzed_on_the_next_explicit_run(tmp_path):
 
 
 def test_reanalyze_never_overwrites_a_confirmed_classification(tmp_path):
-    """Spec §11 / CLAUDE.md: manual corrections survive re-analysis."""
+    """Spec §11 / CLAUDE.md: manual corrections survive re-analysis. Written
+    the way Phase 11 writes them — the facet's own flag (2026-09-13)."""
+    from crate.corrections import set_structural_type
+
     lib = tmp_path / "lib"
     lib.mkdir()
     _write(lib / "tone.wav", _tone(330.0, 0.4))
@@ -367,19 +370,17 @@ def test_reanalyze_never_overwrites_a_confirmed_classification(tmp_path):
     scan_library(conn, lib)
     analyze_pending(conn)
 
-    conn.execute(
-        "UPDATE classification SET structural_type = 'loop', provenance = 'manual', "
-        "is_user_confirmed = 1"
-    )
-    conn.commit()
+    sample_id = conn.execute("SELECT id FROM samples").fetchone()[0]
+    set_structural_type(conn, [sample_id], "loop")
 
     summary = analyze_pending(conn, reanalyze=True)
 
     assert summary.skipped_confirmed == 1
     row = conn.execute(
-        "SELECT structural_type, provenance, is_user_confirmed FROM classification"
+        "SELECT structural_type, provenance, is_user_confirmed, structural_type_confirmed "
+        "FROM classification"
     ).fetchone()
-    assert tuple(row) == ("loop", "manual", 1)
+    assert tuple(row) == ("loop", "manual", 1, 1)
     conn.close()
 
 

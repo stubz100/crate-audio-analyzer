@@ -34,6 +34,9 @@ class SampleRow:
     segment_count: int
     flagged_segments: int     # manual segments needing review (§6.3)
     caption: str = ""         # the Qwen2-Audio sentence, when there is one (a list column since 2026-09-08)
+    user_tags: str = ""       # the curated tags (Phase 11, §8 tags/sample_tags), alphabetical, comma-joined
+    class_confirmed: bool = False   # Phase 11: Facet A / Facet B are the user's call, protected
+    type_confirmed: bool = False
     clap_scores: dict[str, float] = field(default_factory=dict)  # CLAP class probabilities, by name
 
 
@@ -116,6 +119,11 @@ SELECT s.id, s.filepath, s.filename, s.folder, s.duration_s,
        (SELECT COUNT(*) FROM segments g WHERE g.sample_id = s.id AND g.needs_review = 1) AS flagged,
        COALESCE((SELECT tag_or_caption FROM text_tags t
                  WHERE t.sample_id = s.id AND t.source_model = 'qwen2audio-caption' LIMIT 1), '') AS caption,
+       COALESCE((SELECT group_concat(name, ', ') FROM (
+                    SELECT t.name FROM sample_tags st JOIN tags t ON t.id = st.tag_id
+                    WHERE st.sample_id = s.id ORDER BY t.name COLLATE NOCASE)), '') AS user_tags,
+       COALESCE(k.content_class_confirmed, 0) AS class_confirmed,
+       COALESCE(k.structural_type_confirmed, 0) AS type_confirmed,
        COALESCE((SELECT group_concat(tag_or_caption || '=' || score, ';') FROM text_tags t
                  WHERE t.sample_id = s.id AND t.source_model = 'clap-class'), '') AS clap
 FROM samples s
@@ -156,6 +164,15 @@ def load_samples(conn: sqlite3.Connection, top_tags: int = 3, scope=None) -> lis
         *fields, clap = row
         rows.append(SampleRow(*fields, clap_scores=_parse_scores(clap)))
     return rows
+
+
+def load_sample(conn: sqlite3.Connection, sample_id: int, top_tags: int = 3) -> SampleRow | None:
+    """One sample's row as the list shows it — to refresh a row in place after
+    a correction (Phase 11) without reloading the whole list."""
+    for row in conn.execute(_SAMPLES_SQL.replace("{scope}", " AND s.id = ?"), [top_tags, sample_id]):
+        *fields, clap = row
+        return SampleRow(*fields, clap_scores=_parse_scores(clap))
+    return None
 
 
 _SEGMENT_COLUMNS = (

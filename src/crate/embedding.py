@@ -435,9 +435,11 @@ def _write_tags(conn: sqlite3.Connection, sample_id: int, result: ZeroShot) -> N
 
 
 def _write_facet_a(conn: sqlite3.Connection, sample_id: int, result: ZeroShot) -> bool:
-    """Node E's assignment. Returns True if a manual correction protected the row."""
+    """Node E's assignment. Returns True if a manual correction protected the
+    row — Facet A's own flag (Phase 11, 2026-09-13): a corrected *type* no
+    longer freezes the class."""
     row = conn.execute(
-        "SELECT is_user_confirmed FROM classification WHERE sample_id = ?", (sample_id,)
+        "SELECT content_class_confirmed FROM classification WHERE sample_id = ?", (sample_id,)
     ).fetchone()
     if row is not None and row[0]:
         return True
