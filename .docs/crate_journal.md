@@ -1559,7 +1559,7 @@ The user: "I want to pull phase 11 ahead, can you start with that?" — ahead of
 
 ## 2026-09-13 — Phase 12: the profiling pass, and what it changed
 
-**Phase:** 12 — Scale & Polish Hardening · uncommitted at the time of writing
+**Phase:** 12 — Scale & Polish Hardening · `82cc5ea`
 
 The user: "Let's start with phase 12" — after asking whether Phase 10 held anything Phase 12 needed (it does not; if anything the dependency runs the other way, since crate export's dangling-link check wants the rescan semantics settled first). Phase 10 stays next.
 
@@ -1599,7 +1599,7 @@ The user: "Let's start with phase 12" — after asking whether Phase 10 held any
 
 ## 2026-09-13 — Phase 12, second round: the recompute pass after the first full run
 
-**Phase:** 12 — Scale & Polish Hardening · uncommitted at the time of writing
+**Phase:** 12 — Scale & Polish Hardening · `82cc5ea`
 
 The user, after recomputing the whole library: the window "locks up instantly for over 10 minutes while it scans the folder with no feedback", analysis and segmentation took over an hour at ~0.08 s per item, and CLAP at 0.48 s a clip projected to 16 hours. Asked for recommendations, and whether a local vector database for CLAP would help. Six were given (`.docs/phase12_profile.md`, "The recompute pass"); the steer was items 1–3, then 4.
 
