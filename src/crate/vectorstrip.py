@@ -17,9 +17,7 @@ from PySide6.QtWidgets import QWidget
 
 from .design import TOKENS
 from .paint import damp
-from .theme import ACCENT, AMBER, TEXT, TEXT_DIM, mix
-
-SUNKEN = TOKENS.surface.sunken
+from .theme import ACCENT, AMBER, FIELD, TEXT, TEXT_DIM, mix
 
 _ROW = 18.0
 _GAP = 4.0
@@ -73,10 +71,10 @@ class VectorStrip(QWidget):
             # were the loudest thing in the window while carrying the least
             # actionable information — item 7 of the diagnosis. The pattern is
             # what is read here, not any single number, and it survives being
-            # quiet. The blend also starts from the sunken ground rather than
-            # the field, so the strip sits *in* the header instead of on it.
+            # quiet. The blend still starts from the field, the sunken ground
+            # (`theme.FIELD` *is* `surface.sunken`): damping is the whole change.
             t = damp(min(abs(float(value)) / scale, 1.0))
-            colour = mix(SUNKEN, AMBER if value >= 0 else ACCENT, t)
+            colour = mix(FIELD, AMBER if value >= 0 else ACCENT, t)
             painter.setBrush(colour)
             painter.drawRect(QRectF(4 + i * step, top, max(step, 1.0), self._row))
         painter.setBrush(Qt.BrushStyle.NoBrush)

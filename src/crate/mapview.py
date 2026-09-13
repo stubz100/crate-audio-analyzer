@@ -45,6 +45,7 @@ _POINT = 5.0        # half-size of a marker, px
 _HALO = 10.0
 _PICK_RADIUS = 10.0
 _MARGIN = 30.0
+_SCORE_RAMP = ramp(SCORE_LOW, SCORE_HIGH)   # built once: the map's per-point lookup is a table index
 
 
 def _marker(path_type: str, x: float, y: float, r: float) -> QPainterPath:
@@ -204,10 +205,11 @@ class MapView(QWidget):
         if value is None:
             return UNSCORED
         t = (value - self._score_lo) / (self._score_hi - self._score_lo)
-        # Through the shared cached ramp (2026-09-12, layer 3) rather than a
-        # fresh `mix()` per point per repaint: thousands of interpolations a
-        # frame for at most 256 distinct results.
-        return along(ramp(SCORE_LOW, SCORE_HIGH), t)
+        # Through the shared ramp (2026-09-12, layer 3) rather than a fresh
+        # `mix()` per point per repaint: thousands of interpolations a frame
+        # for at most 256 distinct results. The table is a module constant so
+        # the hot loop does one index, not a cache lookup keyed by two names.
+        return along(_SCORE_RAMP, t)
 
     # --- painting ---
 

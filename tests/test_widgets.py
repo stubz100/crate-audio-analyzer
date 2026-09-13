@@ -13,8 +13,8 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import QApplication
 
 from crate import icons
@@ -234,3 +234,68 @@ def test_chip_is_clickable(app):
     chip.click()
     assert seen == [True]
     assert chip.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
+# --- the icon engine (the 2026-09-12 review) ---
+
+
+def test_icons_redraw_at_the_display_scale(app):
+    """A 16 px icon asked for at 200 % is drawn at 32 physical pixels, not
+    stretched from a 16 px raster — the soft icons a one-pixmap QIcon gave
+    on a scaled display."""
+    result = icons.icon("play", QColor("#ffffff"))
+    served = result.pixmap(QSize(16, 16), 2.0)
+    assert served.size() == QSize(32, 32)
+    assert served.devicePixelRatio() == 2.0
+    image = served.toImage()
+    assert any(
+        image.pixelColor(x, y).alpha() == 255 for x in range(16, 32) for y in range(16, 32)
+    ), "drawn across the whole 32 px, not into the top-left 16"
+    stretched = (
+        icons.pixmap("play", QColor("#ffffff"), 16)
+        .scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        .toImage()
+    )
+    assert image != stretched, "the engine must draw, not scale"
+
+
+def test_icon_colours_follow_mode_and_state(app):
+    """`disabled` when the control is, `on` when it is checked — what the
+    style asks the icon for in those states."""
+    result = icons.icon(
+        "play", TOKENS.ink.secondary, disabled=TOKENS.ink.muted, on=TOKENS.state.accent
+    )
+
+    def opaque(mode, state):
+        image = result.pixmap(QSize(24, 24), 1.0, mode, state).toImage()
+        return {
+            image.pixelColor(x, y).name()
+            for x in range(24)
+            for y in range(24)
+            if image.pixelColor(x, y).alpha() == 255
+        }
+
+    assert opaque(QIcon.Mode.Normal, QIcon.State.Off) == {TOKENS.ink.secondary.name()}
+    assert opaque(QIcon.Mode.Disabled, QIcon.State.Off) == {TOKENS.ink.muted.name()}
+    assert opaque(QIcon.Mode.Normal, QIcon.State.On) == {TOKENS.state.accent.name()}
+    assert opaque(QIcon.Mode.Disabled, QIcon.State.On) == {TOKENS.ink.muted.name()}
+
+
+def test_icon_survives_copies_and_the_engine_clone(app):
+    original = icons.icon("save", QColor("#ffffff"))
+    copies = [QIcon(original) for _ in range(3)]
+    del original
+    assert all(not c.pixmap(QSize(20, 20)).isNull() for c in copies)
+
+
+def test_checkable_button_icon_turns_accent_when_checked(app):
+    """Item 6 of the review: the checked Spectrum button's text went bright
+    while its icon stayed resting grey."""
+    button = make_button("Spectrum", icon_name="spectrum", checkable=True)
+    on = button.icon().pixmap(QSize(16, 16), 1.0, QIcon.Mode.Normal, QIcon.State.On).toImage()
+    off = button.icon().pixmap(QSize(16, 16), 1.0, QIcon.Mode.Normal, QIcon.State.Off).toImage()
+    assert on != off
+    plain = make_button("Stop", icon_name="stop")                       # not checkable: no `on` colour
+    on = plain.icon().pixmap(QSize(16, 16), 1.0, QIcon.Mode.Normal, QIcon.State.On).toImage()
+    off = plain.icon().pixmap(QSize(16, 16), 1.0, QIcon.Mode.Normal, QIcon.State.Off).toImage()
+    assert on == off

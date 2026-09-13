@@ -303,19 +303,22 @@ QPushButton:disabled {{ color: {ink.muted.name()}; background: transparent;
 QPushButton:flat {{ background: transparent; border: 1px solid {s.divider.name()};
                     border-radius: {m.radius_md}px; padding: {m.xs}px {m.md}px; }}
 QPushButton:flat:hover {{ background: {s.raised.name()}; }}
-QPushButton#play {{ background: {st.accent_fill.name()}; border-color: {st.accent.name()};
-                    color: {st.accent.name()}; font-size: 15pt; padding: 0px {m.lg}px; }}
-QPushButton#play:hover {{ background: {st.accent_dim.name()}; color: {ink.bright.name()}; }}
-QPushButton#anchor {{ border-color: {t.data.segment.name()}; color: {t.data.segment.name()}; }}
 
 /* Button intent (2026-09-10, layer 2). A property selector, so `intent` is set
    once at construction — Qt re-polishes on show, not on a later change.
    `danger` stays quiet at rest and colours on hover: a destructive action must
-   be identifiable without a resting toolbar shouting. */
+   be identifiable without a resting toolbar shouting. The play button and the
+   anchor were `#play` / `#anchor` object-name rules before this; play is
+   `primary` now and the anchor is painted by the list's delegate, so those
+   rules went (the 2026-09-12 review). */
 QPushButton[intent="primary"] {{ background: {st.accent_fill.name()};
     border-color: {st.accent.name()}; color: {st.accent.name()}; }}
 QPushButton[intent="primary"]:hover {{ background: {st.accent_dim.name()};
     color: {ink.bright.name()}; }}
+/* An attribute and a pseudo-class tie on specificity and the later rule wins,
+   so without this a disabled primary button would keep its accent fill. */
+QPushButton[intent="primary"]:disabled {{ background: transparent;
+    border-color: {s.hairline.name()}; color: {ink.muted.name()}; }}
 QPushButton[intent="quiet"] {{ background: transparent; border-color: transparent;
     color: {ink.muted.name()}; }}
 QPushButton[intent="quiet"]:hover {{ background: {s.raised.name()};

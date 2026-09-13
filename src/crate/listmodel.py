@@ -35,7 +35,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import QPainter, QPen
-from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
+from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTreeView
 
 from .catalog import Criteria, SampleRow, Section, SegmentRow, hit_label
 from .similarity import Hit, Scores
@@ -709,14 +709,6 @@ class AnchorDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index) -> None:  # noqa: N802
         column = index.column()
-        if column == 0 and option.state & QStyle.StateFlag.State_Selected:
-            # The accent edge down the selected row (2026-09-12, layer 3).
-            # Direction A quietened the selection from a saturated full-width
-            # bar to a low fill, which on its own read too quietly to find at
-            # a glance; the mark restores that without the bar coming back.
-            super().paint(painter, option, index)
-            selection_edge(painter, QRectF(option.rect))
-            return
         if column == self._anchor_column:
             full = QStyleOptionViewItem(option)
             self.initStyleOption(full, index)
@@ -747,3 +739,26 @@ class AnchorDelegate(QStyledItemDelegate):
             self.anchor_clicked.emit(index)
             return True
         return super().editorEvent(event, model, option, index)
+
+
+class SampleTreeView(QTreeView):
+    """The list's view: a `QTreeView` that marks the selected row.
+
+    The accent edge down the selected row (2026-09-12, layer 3): direction A
+    quietened the selection from a saturated full-width bar to a low fill,
+    which on its own read too quietly to find at a glance; the mark restores
+    that without the bar coming back.
+
+    It is the view's to draw, not the delegate's (the 2026-09-12 review). The
+    expander column is the tree position with root decoration on, so Qt hands
+    the column-0 delegate a rect that starts *after* the branch indentation:
+    20 px in on a sample row, where the edge sat between the expander and the
+    anchor circle, and 40 px in with a negative width on a section row, where
+    it vanished. `drawRow` gets the whole row from x = 0, for both kinds.
+    """
+
+    def drawRow(self, painter, option, index) -> None:  # noqa: N802
+        super().drawRow(painter, option, index)
+        selection = self.selectionModel()
+        if selection is not None and selection.rowIntersectsSelection(index.row(), index.parent()):
+            selection_edge(painter, QRectF(option.rect))

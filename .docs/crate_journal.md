@@ -1473,3 +1473,45 @@ Named here rather than left implied: the caption row still spends a whole row on
 
 - Those five, if the user wants them; otherwise the design system is at a natural stopping point.
 - Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
+
+## 2026-09-12 — Review of the design-system track: eight corrections
+
+**Phase:** design system, review · uncommitted at the time of writing
+
+The user: a code review of the finished UI implementation (the five design-system commits, `a85451e` → `ba2db04`); then "make sure the points you mentioned are corrected".
+
+**Found**
+
+Eight points, two of them real visual defects. Each was verified before it was reported — by rendering the window offscreen over the test library and measuring pixels, or by probing Qt directly — rather than argued from the code:
+
+1. **The selection edge sat in the wrong place and was missing on section rows.** It was painted in the column-0 delegate, but the expander column is the tree position with root decoration on, so Qt hands that delegate a rect starting *after* the branch indentation: 20 px in on a sample row (the edge sat between the expander and the anchor circle) and 40 px in with a negative width on a section row (no edge at all). Measured: accent pixels at x = 20–21 on a sample row, none on a selected section row.
+2. **Icons were one 16 px raster.** `icons.icon()` built its `QIcon` from a single pixmap at device pixel ratio 1. Asked for 16 px at 2×, Qt handed back the same 16 × 16 and stretched it — soft icons on any scaled display, which on Windows 11 is the usual case. The module's "any size is crisp" only held for the size the caller drew.
+3. **A comment in `vectorstrip.py` claimed a change that never happened**: "from the sunken ground rather than the field" — but `theme.FIELD` *is* `surface.sunken`, so the new `SUNKEN` constant was a duplicate. Damping was the whole change.
+4. **Dead rules, and a gallery row that stopped telling the truth**: `#play` and `#anchor` survived in the style sheet with no widget carrying those names (play is `intent="primary"`, the anchor is delegate-painted), and the gallery's primitives row showed `#play`, `#anchor` and a `#danger` that never had a rule.
+5. **Leftovers from the count's move to the tooltip**: `Toolbar.equalise`'s docstring still described the save label gaining a count; `WaveformPanel._buttons` was kept for that and never read.
+6. **A checked Spectrum button's icon stayed resting grey** under bright text — the icon had no `On` state. Related and latent: `[intent="primary"]` ties with `:disabled` on specificity and came later, so a disabled primary button would have kept its accent fill.
+7. **The map called `ramp()` per point per repaint** — cached, but two colour-name strings and a cache lookup each time, in the loop the change was meant to relieve.
+8. **`gallery.py` bound locals named `pixmap`** that shadowed the `icons.pixmap` import used later in the module.
+
+**Done**
+
+- **`SampleTreeView`** (`listmodel.py`): a `QTreeView` whose `drawRow` paints `selection_edge` on the full row rect when the row intersects the selection — from x = 0, for sample and section rows alike. The delegate's column-0 branch is gone; `main.py` builds the list from it.
+- **`PathIconEngine`** (`icons.py`): a `QIconEngine` that redraws the path at whatever size and device pixel ratio the style asks for — `paint`, `pixmap`, `scaledPixmap`, `clone` — and carries the colours by state: `disabled` when the control is, `on` when it is checked. `icon()` returns a `QIcon` on it; `pixmap()` takes a `scale` and stamps the ratio on the result; `make_button` passes `on=state.accent` for a checkable button.
+- The strip blends from `FIELD` again, with an honest comment; the three object-name rules and the three gallery buttons are gone, each place saying why; a `[intent="primary"]:disabled` rule; the `equalise` docstring says what the method is for now; `_buttons` dropped; `_SCORE_RAMP` is a module constant in `mapview.py`; the gallery locals renamed.
+
+**Decided**
+
+- **The edge is the view's, not the delegate's.** A delegate only ever sees a cell; the mark belongs to the row. `rowIntersectsSelection` rather than `State_Selected` on column 0, so it holds under item selection as well as row selection.
+- **A vector engine over a stack of pre-scaled pixmaps.** Adding 1×/1.5×/2× rasters would have covered the common scales; the engine covers every one and is what "any size is crisp" meant. PySide6 keeps a Python engine alive across `QIcon` copies and `clone()` — checked before committing to it: 300 buttons, copies outliving the original, garbage collection, `QIcon.paint`. The engine's `pixmap()` fills transparent first; Qt's default does not.
+- Not committed here: the user asked for the corrections, not a commit. The working tree holds them.
+
+**Verified**
+
+- `uv run pytest tests -q` → **252 passed, 3 skipped** (246 before); pyflakes clean over `src`, `tests` and `scripts`. Six tests added: the edge is at x = 0–1 on a selected sample row *and* a selected section row and on no other row (`test_gui.py`, rendering the real window); a 16 px icon served at 2× is 32 × 32 at ratio 2 and differs from a smooth-scaled 16 px raster; the icon's colour follows mode and state; copies outlive the original; a checkable button's icon differs between `On` and `Off` and a plain one's does not; no `#play` / `#anchor` / `#danger` rule and a `primary:disabled` rule (`test_design.py`).
+- Offscreen on the test library, under the shipped theme: the edge at the far left of a selected section row, the fill and label unchanged; the transport row with Spectrum checked — accent icon under bright text, play primary, the segment icons at rest; the spectrum icon at 2× is 32 px and crisp. Screenshots checked.
+
+**Next**
+
+- Commit (the user's call), and cite the hash here.
+- The five UI items still open from the previous entry, unchanged.
+- Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.

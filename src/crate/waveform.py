@@ -1022,7 +1022,6 @@ class WaveformPanel(QWidget):
         )
         buttons.add_stretch()
         buttons.add_widget(self.autoplay)
-        self._buttons = buttons
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)

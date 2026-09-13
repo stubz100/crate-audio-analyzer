@@ -32,7 +32,6 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTabBar,
     QTabWidget,
-    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -54,7 +53,14 @@ from .db import default_db_path, open_db
 from .embedding import ClapEncoder, EmbedSettings
 from .layout import LayoutSettings, fit_layout, load_current_layout, place_anchor
 from .headerfilter import ColumnSpec, FilterHeader
-from .listmodel import ANCHOR_COLUMN_WIDTH, TREE_COLUMN_WIDTH, AnchorDelegate, ListProxy, SampleTreeModel
+from .listmodel import (
+    ANCHOR_COLUMN_WIDTH,
+    TREE_COLUMN_WIDTH,
+    AnchorDelegate,
+    ListProxy,
+    SampleTreeModel,
+    SampleTreeView,
+)
 from .mapview import MapView
 from .library import scope_paths
 from .recompute import EncoderFactory, RecomputePanel, RunPlan
@@ -280,7 +286,7 @@ class MainWindow(QMainWindow):
         self._samples = SampleTreeModel(self._render)
         self._proxy = ListProxy(self)
         self._proxy.setSourceModel(self._samples)
-        self._table = QTreeView()
+        self._table = SampleTreeView()               # a QTreeView that draws the selected row's accent edge
         self._table.setModel(self._proxy)
         self._table.setSortingEnabled(False)       # a header click opens its filter popup; the popup's buttons sort
         self._header = FilterHeader(

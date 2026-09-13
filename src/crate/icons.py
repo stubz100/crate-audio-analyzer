@@ -6,11 +6,15 @@ its weight and metrics shift with whatever face resolves it, and a face that
 lacks it draws a box (⚓ and ↳ rasterised as boxes in the first gallery grab,
 before `seguisym.ttf` joined `design.FONT_FILES`).
 
-These are paths instead. `icon(name, colour, size)` returns a `QIcon` drawn
-at the colour asked for, so a control tints its icon from the token that
-matches its state, and `pixmap()` gives the same for a painter that wants to
-blit one. Everything is drawn in a 0..1 unit square and scaled, so any size
-is crisp; strokes are scaled with it and antialiased.
+These are paths instead. `icon(name, colour)` returns a `QIcon` whose engine
+(`PathIconEngine`) redraws the path at whatever size and display scale the
+style asks for, in the colour for the control's state — `disabled` when it
+is, `on` when it is checked — so a control tints its icon from the token that
+matches its state. `pixmap()` rasterises one for a painter that wants to blit
+it. Everything is drawn in a 0..1 unit square and scaled, so any size is
+crisp — on a display at 150 % or 200 % too, which a `QIcon` built from one
+16 px raster was not (the 2026-09-12 review: Qt stretched it); strokes are
+scaled with it and antialiased.
 
 No SVG and no asset files: Qt's own painter is enough for shapes this simple,
 and it keeps the package a pure import with nothing to package or find on
@@ -19,8 +23,8 @@ disk at runtime.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QRect, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QIcon, QIconEngine, QPainter, QPainterPath, QPen, QPixmap
 
 DEFAULT_SIZE = 16
 
@@ -140,32 +144,27 @@ SHAPES = {
 }
 
 
-def pixmap(
-    name: str,
-    colour: QColor,
-    size: int = DEFAULT_SIZE,
-    *,
-    stroke: float = 1.5,
-) -> QPixmap:
-    """One icon at one colour and size, on a transparent ground.
+def _draw(painter: QPainter, name: str, colour: QColor, rect: QRectF, stroke: float) -> None:
+    """Draw one icon into `rect`, centred, with the painter as it is.
 
-    `stroke` is in pixels at `DEFAULT_SIZE` and scales with the icon, so the
-    same weight reads at 12px and at 32px.
+    The painter's own transform is kept — including the device pixel ratio a
+    high-DPI pixmap or a scaled window gives it — which is what makes the icon
+    a vector rather than a raster.
     """
     if name not in SHAPES:
         raise KeyError(f"no icon named {name!r}")
     draw, filled = SHAPES[name]
-    result = QPixmap(size, size)
-    result.setDevicePixelRatio(1.0)
-    result.fill(Qt.GlobalColor.transparent)
-
     path = QPainterPath()
     draw(path)
+    side = min(rect.width(), rect.height())
 
-    painter = QPainter(result)
+    painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.translate(QPointF(0.5, 0.5))            # crisp odd-width strokes
-    painter.scale(size - 1, size - 1)
+    painter.translate(                              # the half pixel keeps odd-width strokes crisp
+        rect.x() + (rect.width() - side) / 2 + 0.5,
+        rect.y() + (rect.height() - side) / 2 + 0.5,
+    )
+    painter.scale(side - 1, side - 1)
     if filled:
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(colour)
@@ -177,24 +176,108 @@ def pixmap(
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawPath(path)
+    painter.restore()
+
+
+def pixmap(
+    name: str,
+    colour: QColor,
+    size: int = DEFAULT_SIZE,
+    *,
+    stroke: float = 1.5,
+    scale: float = 1.0,
+) -> QPixmap:
+    """One icon at one colour and size, on a transparent ground.
+
+    `stroke` is in pixels at `DEFAULT_SIZE` and scales with the icon, so the
+    same weight reads at 12px and at 32px. `scale` is a device pixel ratio:
+    the pixmap is `size × scale` pixels on a side and carries that ratio, so
+    it draws at `size` logical pixels — crisp — on a display scaled by it.
+    """
+    if name not in SHAPES:
+        raise KeyError(f"no icon named {name!r}")
+    side = int(round(size * scale))
+    result = QPixmap(side, side)
+    result.setDevicePixelRatio(scale)              # a painter on it scales by this on its own
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    _draw(painter, name, colour, QRectF(0, 0, size, size), stroke)
     painter.end()
     return result
+
+
+class PathIconEngine(QIconEngine):
+    """A `QIcon` engine that draws the path on demand — a vector at every scale.
+
+    A `QIcon` built from a pixmap holds one raster: asked for 16 px on a
+    display at 200 % it hands back the same 16 × 16 and Qt stretches it to 32
+    physical pixels, soft (the 2026-09-12 review). This engine redraws the
+    path at whatever size and device pixel ratio the style asks for instead,
+    which is what "any size is crisp" always meant.
+
+    It also carries the icon's colours by state: `disabled` for a control
+    that is, and `on` for a checked one — `QStyle` asks for `QIcon.State.On`
+    when a button is checked, so a checked Spectrum no longer keeps a
+    resting-grey icon under bright text.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        colour: QColor,
+        *,
+        disabled: QColor | None = None,
+        on: QColor | None = None,
+        stroke: float = 1.5,
+    ) -> None:
+        super().__init__()
+        if name not in SHAPES:
+            raise KeyError(f"no icon named {name!r}")
+        self._name = name
+        self._colour = QColor(colour)
+        self._disabled = None if disabled is None else QColor(disabled)
+        self._on = None if on is None else QColor(on)
+        self._stroke = stroke
+
+    def clone(self) -> QIconEngine:  # noqa: N802
+        return PathIconEngine(
+            self._name, self._colour, disabled=self._disabled, on=self._on, stroke=self._stroke
+        )
+
+    def colour_for(self, mode: QIcon.Mode, state: QIcon.State) -> QColor:
+        if mode == QIcon.Mode.Disabled and self._disabled is not None:
+            return self._disabled
+        if state == QIcon.State.On and self._on is not None:
+            return self._on
+        return self._colour
+
+    def paint(self, painter: QPainter, rect: QRect, mode: QIcon.Mode, state: QIcon.State) -> None:
+        _draw(painter, self._name, self.colour_for(mode, state), QRectF(rect), self._stroke)
+
+    def pixmap(self, size: QSize, mode: QIcon.Mode, state: QIcon.State) -> QPixmap:
+        return self.scaledPixmap(size, mode, state, 1.0)
+
+    def scaledPixmap(  # noqa: N802
+        self, size: QSize, mode: QIcon.Mode, state: QIcon.State, scale: float
+    ) -> QPixmap:
+        """What `QIcon.pixmap(size, devicePixelRatio)` asks for: `size` is logical."""
+        return pixmap(
+            self._name,
+            self.colour_for(mode, state),
+            min(size.width(), size.height()),
+            stroke=self._stroke,
+            scale=scale,
+        )
 
 
 def icon(
     name: str,
     colour: QColor,
-    size: int = DEFAULT_SIZE,
     *,
     disabled: QColor | None = None,
+    on: QColor | None = None,
     stroke: float = 1.5,
 ) -> QIcon:
-    """A `QIcon` carrying its normal and (optionally) disabled colours."""
-    result = QIcon(pixmap(name, colour, size, stroke=stroke))
-    if disabled is not None:
-        result.addPixmap(
-            pixmap(name, disabled, size, stroke=stroke),
-            QIcon.Mode.Disabled,
-            QIcon.State.Off,
-        )
-    return result
+    """A `QIcon` drawn at any size and display scale: `colour` at rest,
+    `disabled` when the control is, `on` when it is checked."""
+    return QIcon(PathIconEngine(name, colour, disabled=disabled, on=on, stroke=stroke))

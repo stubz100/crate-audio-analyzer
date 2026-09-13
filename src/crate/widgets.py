@@ -437,7 +437,17 @@ def make_button(
             "primary": TOKENS.state.accent,
             "danger": TOKENS.state.danger,
         }.get(intent, TOKENS.ink.secondary)
-        button.setIcon(icon(icon_name, colour, disabled=TOKENS.ink.muted))
+        # A checked button's text goes bright under `QPushButton:checked`; its
+        # icon follows to the accent through the icon's `on` state, which is
+        # what the style asks for when the button is checked.
+        button.setIcon(
+            icon(
+                icon_name,
+                colour,
+                disabled=TOKENS.ink.muted,
+                on=TOKENS.state.accent if checkable else None,
+            )
+        )
     return button
 
 
@@ -494,11 +504,12 @@ class Toolbar(QWidget):
         self.equalise()
 
     def equalise(self) -> None:
-        """Re-level every equal-width group.
+        """Re-level every equal-width group to the widest member's size hint.
 
-        Called again by a panel whose label changes — *Save segment* becomes
-        *Save 2 segments* — so the group does not go ragged the moment it
-        carries a count.
+        `add_group` calls this; a panel that later changes a member's label
+        (and so its size hint) calls it again so the group does not go ragged.
+        No panel does today — the transport row keeps its counts in tooltips —
+        but it is the contract a labelled group relies on.
         """
         for widgets, equal_width in self._groups:
             if not equal_width or len(widgets) < 2:

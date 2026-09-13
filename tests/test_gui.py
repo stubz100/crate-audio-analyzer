@@ -28,6 +28,7 @@ from test_embedding import FakeEncoder
 from crate.analysis import analyze_pending
 from crate.catalog import load_samples, load_segments
 from crate.db import open_db
+from crate.design import TOKENS
 from crate.embedding import embed_pending
 from crate.layout import PcaReducer
 from crate.library import add_library, normalize
@@ -1140,5 +1141,39 @@ def test_sorting_in_the_model_keeps_the_selection_and_the_open_samples(app, inde
         assert window._table.isExpanded(window._proxy.index(0, 0))
         window.reload()                                                     # the order survives a reload
         assert window._proxy.data(window._proxy.index(0, C.COL_FILE)) == "loop.wav"
+    finally:
+        window.close()
+
+
+def test_the_selection_edge_marks_both_row_kinds_at_the_left(app, index, tmp_path):
+    """The accent edge (2026-09-12, layer 3) is the view's to draw. Painted in
+    the column-0 delegate it sat 20 px in on a sample row, after the branch
+    indentation, and on a section row Qt handed the delegate a negative-width
+    rect and it vanished (the 2026-09-12 review)."""
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
+    try:
+        window._autoplay.setChecked(False)
+        window.show()
+        app.processEvents()
+        accent = TOKENS.state.accent.name()
+        parent = window._proxy.index(_proxy_row_named(window, "loop.wav"), 0)
+        window._table.expand(parent)
+        child = window._proxy.index(0, SampleTreeModel.COL_FILE, parent)
+        assert child.isValid(), "loop.wav should carry section rows"
+        sample = parent.siblingAtColumn(SampleTreeModel.COL_FILE)
+        for label, row in (("sample", sample), ("section", child)):
+            window._table.setCurrentIndex(row)
+            app.processEvents()
+            y = window._table.visualRect(row).center().y()
+            image = window._table.viewport().grab().toImage()
+            assert image.pixelColor(0, y).name() == accent, f"{label} row: no edge at x=0"
+            assert image.pixelColor(1, y).name() == accent, f"{label} row: the edge is 2 px wide"
+            assert image.pixelColor(4, y).name() != accent, f"{label} row: a mark, not a bar"
+            other = sample if row is child else child
+            other_y = window._table.visualRect(other).center().y()
+            assert image.pixelColor(0, other_y).name() != accent, f"{label} row: only the selected row is marked"
     finally:
         window.close()

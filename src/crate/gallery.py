@@ -69,13 +69,13 @@ def _swatch(colour: QColor, name: str, note: str = "") -> QWidget:
 
     chip = QLabel()
     chip.setFixedSize(SWATCH)
-    pixmap = QPixmap(SWATCH)
-    pixmap.fill(colour)
-    painter = QPainter(pixmap)
+    swatch = QPixmap(SWATCH)
+    swatch.fill(colour)
+    painter = QPainter(swatch)
     painter.setPen(TOKENS.surface.divider)
     painter.drawRect(0, 0, SWATCH.width() - 1, SWATCH.height() - 1)
     painter.end()
-    chip.setPixmap(pixmap)
+    chip.setPixmap(swatch)
     layout.addWidget(chip)
 
     caption = QLabel(f"{name}\n{colour.name()}" + (f"\n{note}" if note else ""))
@@ -101,12 +101,12 @@ def _ramp(low: QColor, high: QColor, steps: int = 12) -> QWidget:
     """The score gradient as the map actually blends it."""
     strip = QLabel()
     width, height = steps * 28, 26
-    pixmap = QPixmap(width, height)
-    painter = QPainter(pixmap)
+    gradient = QPixmap(width, height)
+    painter = QPainter(gradient)
     for i in range(steps):
         painter.fillRect(i * 28, 0, 28, height, mix(low, high, i / (steps - 1)))
     painter.end()
-    strip.setPixmap(pixmap)
+    strip.setPixmap(gradient)
     return strip
 
 
@@ -387,7 +387,12 @@ class GalleryWindow(QMainWindow):
         box = QGroupBox("Styled Qt primitives — what the style sheet does to stock widgets")
         layout = QVBoxLayout(box)
 
-        layout.addWidget(_section("Buttons — intent, not just state"))
+        # Stock buttons by state only; intent is the toolbar's business above.
+        # (Three object-name buttons — `#play`, `#anchor`, `#danger` — stood
+        # here until the 2026-09-12 review: no widget in the window carries
+        # those names any more, and `#danger` never had a rule, so the row was
+        # showing states the app does not have.)
+        layout.addWidget(_section("Buttons — by state"))
         default = QPushButton("Save segment")
         checked = QPushButton("Spectrum")
         checked.setCheckable(True)
@@ -396,13 +401,7 @@ class GalleryWindow(QMainWindow):
         disabled.setEnabled(False)
         flat = QPushButton("kick drum")
         flat.setFlat(True)
-        danger = QPushButton("Delete segment")
-        danger.setObjectName("danger")
-        play = QPushButton("▶")
-        play.setObjectName("play")
-        anchor = QPushButton("⚓ Anchor")
-        anchor.setObjectName("anchor")
-        layout.addWidget(_row(default, checked, disabled, flat, danger, play, anchor))
+        layout.addWidget(_row(default, checked, disabled, flat))
 
         layout.addWidget(_section("Inputs"))
         line = QLineEdit("kick drum")

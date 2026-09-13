@@ -102,6 +102,18 @@ def test_stylesheet_builds_from_tokens(app):
         assert selector in css
 
 
+def test_no_rule_dresses_a_widget_the_window_no_longer_has(app):
+    """`#play` and `#anchor` outlived the buttons that carried those names:
+    play is `intent="primary"` and the anchor is painted by the list's
+    delegate (the 2026-09-12 review). A rule with no widget is a promise
+    the gallery cannot show. The intent rules must also not leave a disabled
+    primary button looking enabled."""
+    css = design.stylesheet()
+    for selector in ("QPushButton#play", "QPushButton#anchor", "QPushButton#danger"):
+        assert selector not in css
+    assert 'QPushButton[intent="primary"]:disabled' in css
+
+
 def test_group_title_rule_makes_no_transform_claim(app):
     """`text-transform` reaches a QLabel but not the QGroupBox::title
     subcontrol (checked by rendering, 2026-09-10), so the group-title rule
