@@ -6,7 +6,13 @@ disposable cache — parent audio sliced at the markers, with a short fade so a
 cut mid-waveform does not click — and the path is remembered on the segment
 row so the next preview or drag is free. `update_segment` and a parent content
 change clear that path (the bounds or audio it was rendered from no longer
-hold); nothing evicts the files themselves yet — that is Phase 12.
+hold). **Eviction** (Phase 12, 2026-09-13): the cache has a size limit;
+`evict_cache` drops files the index no longer points at first, then the
+least recently used renders (a cache hit touches the file's mtime) until the
+cache fits, and clears the dropped rows' `cache_path`. `render_segment` runs
+it after writing a new file when a limit is given — one directory listing,
+tied to a preview or a drag, never a timer (§9.6). `clear_cache` is the
+Library panel's button.
 
 The cache is trivially regenerable from parent + offsets, which is why it
 lives under the per-user app data folder rather than in the library.
@@ -17,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -49,11 +56,118 @@ def _apply_fades(audio: np.ndarray, sr: int) -> np.ndarray:
     return audio
 
 
+@dataclass
+class CacheState:
+    """What the render cache holds on disk (the Library panel's readout)."""
+
+    files: int = 0
+    bytes: int = 0
+    orphans: int = 0            # files no segment row points at any more
+
+    def format(self) -> str:
+        text = f"{self.files} files, {self.bytes / 1e6:.0f} MB"
+        if self.orphans:
+            text += f" ({self.orphans} no longer referenced)"
+        return text
+
+
+@dataclass
+class EvictionSummary:
+    removed: int = 0
+    orphans: int = 0
+    bytes_freed: int = 0
+
+
+def _cache_files(cache_dir: Path) -> list[tuple[Path, int, float]]:
+    """(path, size, mtime) of every render in the cache directory."""
+    if not cache_dir.is_dir():
+        return []
+    out: list[tuple[Path, int, float]] = []
+    with os.scandir(cache_dir) as entries:
+        for entry in entries:
+            if entry.is_file() and entry.name.startswith("seg_") and entry.name.endswith(".wav"):
+                stat = entry.stat()
+                out.append((Path(entry.path), stat.st_size, stat.st_mtime))
+    return out
+
+
+def _referenced(conn: sqlite3.Connection) -> set[str]:
+    return {str(r[0]) for r in conn.execute("SELECT cache_path FROM segments WHERE cache_path IS NOT NULL")}
+
+
+def cache_state(conn: sqlite3.Connection, cache_dir: Path | str | None = None) -> CacheState:
+    """Count and size the cache; orphans are files the index no longer names."""
+    files = _cache_files(Path(cache_dir) if cache_dir is not None else default_cache_dir())
+    referenced = _referenced(conn)
+    return CacheState(
+        files=len(files),
+        bytes=sum(size for _, size, _ in files),
+        orphans=sum(1 for path, _, _ in files if str(path) not in referenced),
+    )
+
+
+def _forget(conn: sqlite3.Connection, paths: list[Path]) -> None:
+    conn.executemany(
+        "UPDATE segments SET cache_path = NULL, cache_rendered_at = NULL WHERE cache_path = ?",
+        [(str(p),) for p in paths],
+    )
+    conn.commit()
+
+
+def evict_cache(
+    conn: sqlite3.Connection, cache_dir: Path | str | None = None, max_bytes: int | None = None
+) -> EvictionSummary:
+    """Bring the cache under `max_bytes`: orphans go first (they are dead
+    weight whatever the limit), then the least recently used renders, oldest
+    mtime first — a cache hit touches the file, so "used" means previewed or
+    dragged, not rendered. The dropped rows forget their path. `None` for the
+    limit removes only orphans."""
+    directory = Path(cache_dir) if cache_dir is not None else default_cache_dir()
+    files = _cache_files(directory)
+    referenced = _referenced(conn)
+    summary = EvictionSummary()
+    total = sum(size for _, size, _ in files)
+    dropped: list[Path] = []
+
+    def drop(path: Path, size: int) -> None:
+        nonlocal total
+        try:
+            path.unlink()
+        except OSError as exc:
+            log.warning("could not evict %s (%s)", path, exc)
+            return
+        total -= size
+        summary.removed += 1
+        summary.bytes_freed += size
+        dropped.append(path)
+
+    for path, size, _ in files:
+        if str(path) not in referenced:
+            drop(path, size)
+            summary.orphans += 1
+    if max_bytes is not None:
+        for path, size, _ in sorted((f for f in files if str(f[0]) in referenced), key=lambda f: f[2]):
+            if total <= max_bytes:
+                break
+            drop(path, size)
+    if dropped:
+        _forget(conn, dropped)
+        log.info("render cache: evicted %d files (%d orphans), %.0f MB freed",
+                 summary.removed, summary.orphans, summary.bytes_freed / 1e6)
+    return summary
+
+
+def clear_cache(conn: sqlite3.Connection, cache_dir: Path | str | None = None) -> EvictionSummary:
+    """Every render gone, every row's path forgotten — the Library panel's button."""
+    return evict_cache(conn, cache_dir, max_bytes=0)
+
+
 def render_segment(
     conn: sqlite3.Connection,
     segment_id: int,
     cache_dir: Path | str | None = None,
     force: bool = False,
+    max_bytes: int | None = None,
 ) -> Path:
     """The cached WAV for a segment, rendering it on first use.
 
@@ -61,7 +175,9 @@ def render_segment(
     this file goes into a DAW), slices at the markers, fades, writes with the
     parent's PCM subtype where WAV supports it (24-bit otherwise). Raises
     LookupError for an unknown id and ValueError for a segment that lies
-    entirely past the end of its file (a `needs_review` case).
+    entirely past the end of its file (a `needs_review` case). With
+    `max_bytes`, a new render is followed by `evict_cache` so the cache stays
+    under the limit; a hit touches the file so eviction sees it as used.
     """
     row = conn.execute(
         "SELECT g.start_ms, g.end_ms, g.cache_path, s.filepath "
@@ -72,6 +188,10 @@ def render_segment(
         raise LookupError(f"no segment with id {segment_id}")
     start_ms, end_ms, cache_path, filepath = row[0], row[1], row[2], row[3]
     if not force and cache_path and Path(cache_path).exists():
+        try:
+            os.utime(cache_path)                       # used now: last in line for eviction
+        except OSError:
+            pass
         return Path(cache_path)
 
     info = sf.info(filepath)
@@ -97,6 +217,8 @@ def render_segment(
     )
     conn.commit()
     log.debug("rendered segment %d -> %s (%d frames, %s)", segment_id, out, end - start, subtype)
+    if max_bytes is not None:
+        evict_cache(conn, out_dir, max_bytes)
     return out
 
 

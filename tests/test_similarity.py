@@ -150,6 +150,28 @@ def test_search_folds_a_winning_segment_into_a_hit(index, table):
     assert ids["loop.wav"] == max(pads.sample, key=pads.sample.get)
 
 
+def test_vectors_are_held_compactly(index, table):
+    """Phase 12: only embedded items hold a row of the vector matrix; the
+    rest are a −1 in the index, and a full-matrix construction compacts to
+    the same thing."""
+    assert table.vector_count == int(table._has_vector.sum()) <= len(table)
+    assert table._vectors.shape == (table.vector_count, table._vectors.shape[1])
+    rows = np.arange(len(table))
+    block = table.vectors_for(rows)
+    assert block.shape == (len(table), table._vectors.shape[1])
+    assert np.array_equal(block[table._has_vector], table._vectors)
+    assert not block[~table._has_vector].any()
+    assert all(table.has_vector(int(r)) for r in np.flatnonzero(table._has_vector))
+    full = np.zeros((len(table), table._vectors.shape[1]), dtype=np.float32)
+    full[table._has_vector] = table._vectors
+    twin = FeatureTable(
+        table.ids, table.is_segment, table.parents, table.starts, table.ends,
+        table._features, full, table._has_vector, table.is_window,
+    )
+    assert np.array_equal(twin._vectors, table._vectors)
+    assert all(block.dtype == np.float32 for block in table._features.values())
+
+
 def test_axis_distances_by_sample_and_labels(index, table):
     conn, ids = index
     anchor = table.row_of("sample", ids["tone_a.wav"])

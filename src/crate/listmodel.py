@@ -50,6 +50,18 @@ SECTION_LABEL_ROLE = Qt.ItemDataRole.UserRole + 2   # a section row's "↳ hit @
 ANCHOR_COLUMN_WIDTH = 26                      # the fixed anchor column
 TREE_COLUMN_WIDTH = 24                        # the fixed expander column
 _TOP = 0  # internalId of a top-level index; a sub-hit carries its parent's row + 1
+UNREADABLE = "unreadable"   # the Type cell of a file whose header could not be read (Phase 12)
+
+
+def _type_cell(r: SampleRow) -> str:
+    """The Type column: the structural type — or `unreadable` for a file the
+    scanner could not read the header of (Phase 12, 2026-09-13), so those
+    rows say why they carry nothing and the Type filter can find or drop
+    them. Every stage skips such a sample; a rescan reads it again once the
+    file changes."""
+    if r.duration_s is None:
+        return UNREADABLE
+    return r.structural_type or ""
 
 
 def _fmt_seconds(value: float | None) -> str:
@@ -198,7 +210,7 @@ class SampleTreeModel(QAbstractItemModel):
         if column == self.COL_LENGTH:
             return lambda r: r.duration_s if r.duration_s is not None else -1.0
         if column == self.COL_TYPE:
-            return lambda r: r.structural_type or ""
+            return lambda r: _type_cell(r)
         if column == self.COL_BPM:
             return lambda r: r.tempo_bpm if r.tempo_bpm is not None else -1.0
         if column == self.COL_KEY:
@@ -408,6 +420,11 @@ class SampleTreeModel(QAbstractItemModel):
             return "" if display else None
         r = self._rows[index.row()]
         if role == Qt.ItemDataRole.ToolTipRole:
+            if r.duration_s is None:
+                return (
+                    f"{r.filepath}\n\nHeader unreadable at scan: not analysed, not segmented, not "
+                    "embedded — it never ranks or matches. A rescan reads it again once the file changes."
+                )
             return r.filepath
         if role == ANCHOR_ROLE:
             return self._anchor == ("sample", r.id)
@@ -424,7 +441,7 @@ class SampleTreeModel(QAbstractItemModel):
         if col == self.COL_LENGTH:
             return _fmt_seconds(r.duration_s) if display else (r.duration_s if r.duration_s is not None else -1.0)
         if col == self.COL_TYPE:
-            return r.structural_type or ""
+            return _type_cell(r)
         if col == self.COL_BPM:
             if display:
                 return "" if r.tempo_bpm is None else f"{r.tempo_bpm:.0f}"

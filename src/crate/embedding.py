@@ -45,6 +45,7 @@ from typing import Protocol
 import numpy as np
 
 from .db import WINDOW_METHOD, ids_clause, now_iso, scope_clause
+from .progress import eta_text
 
 log = logging.getLogger(__name__)
 
@@ -673,7 +674,28 @@ def embed_pending(
         sql += f" LIMIT {int(limit)}"
     worklist = conn.execute(sql, params).fetchall()
     total = len(worklist)
-    log.info("embedding: %d samples to visit", total)
+    # The opening line says what the run is made of (Phase 12): every clip —
+    # a whole file or a segment — is one fixed-cost 10-s CLAP pass, so the
+    # segment count is the number that decides whether this is an hour or a
+    # night, and the user's first full run found that out hours in.
+    parents = sum(1 for row in worklist if reembed or row[4])
+    if settings.embed_segments:
+        segment_count = conn.execute(
+            "SELECT COUNT(*) FROM segments g JOIN samples s ON s.id = g.sample_id "
+            "WHERE g.detection_method != ? AND g.end_ms - g.start_ms >= ? "
+            "AND NOT EXISTS (SELECT 1 FROM segment_embedding se "
+            "                WHERE se.segment_id = g.id AND se.model_name = ?)"
+            + scope_sql + ids_sql,
+            [WINDOW_METHOD, settings.min_segment_length_ms, MODEL_NAME, *scope_params, *ids_params],
+        ).fetchone()[0]
+        log.info(
+            "embedding: %d samples to visit — %d whole-file clips + %d segments of at least %d ms; "
+            "a segment costs the same CLAP pass as a file — untick Embed segments (or raise the "
+            "minimum length) for a first pass over the samples alone",
+            total, parents, segment_count, settings.min_segment_length_ms,
+        )
+    else:
+        log.info("embedding: %d samples to visit — %d whole-file clips, no segments", total, parents)
     if not worklist:
         summary.elapsed_s = time.perf_counter() - started
         return summary
@@ -714,11 +736,13 @@ def embed_pending(
             summary.samples_embedded += 1
         if progress_every and visited % progress_every == 0:
             elapsed = time.perf_counter() - started
+            clips = summary.samples_embedded + summary.segments_embedded + summary.windows_stored
             log.info(
-                "visited %d/%d (%.2f s/sample, %d samples + %d segments embedded, "
-                "%d windows kept, %d failed)",
-                visited, total, elapsed / visited, summary.samples_embedded,
+                "visited %d/%d (%.2f s/sample, %.2f s/clip, %d samples + %d segments embedded, "
+                "%d windows kept, %d failed, %s)",
+                visited, total, elapsed / visited, elapsed / max(clips, 1), summary.samples_embedded,
                 summary.segments_embedded, summary.windows_stored, summary.failed,
+                eta_text(elapsed, visited, total),
             )
     summary.elapsed_s = time.perf_counter() - started
     return summary

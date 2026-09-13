@@ -1257,3 +1257,38 @@ def test_corrections_from_the_attributes_tab(app, index, tmp_path):
         assert {r[0] for r in conn.execute("SELECT content_class_confirmed FROM classification")} == {1}
     finally:
         window.close()
+
+
+def test_an_unreadable_file_shows_as_such_and_the_render_cache_has_a_readout(app, index, tmp_path):
+    """Phase 12: a file whose header could not be read says so in its Type
+    cell (and filters as such) instead of sitting blank; the Library panel
+    reads out the render cache and clears it."""
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    C = SampleTreeModel
+    (tmp_path / "lib" / "broken.wav").write_bytes(b"this is not a wav file at all")
+    scan_library(conn, tmp_path / "lib")                    # a row with NULL metadata
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
+    try:
+        window._autoplay.setChecked(False)
+        row = _proxy_row_named(window, "broken.wav")
+        assert window._proxy.data(window._proxy.index(row, C.COL_TYPE)) == "unreadable"
+        tip = window._proxy.data(window._proxy.index(row, C.COL_FILE), Qt.ItemDataRole.ToolTipRole)
+        assert "unreadable" in tip.lower()
+        window._on_column_filter(C.COL_TYPE, ColumnFilter(values=frozenset({"unreadable"})))
+        assert window._proxy.rowCount() == 1
+        window._on_column_filter(C.COL_TYPE, None)
+        assert window._proxy.rowCount() == 3
+
+        panel = window._recompute
+        assert panel._cache_readout.text().startswith("0 files")
+        loop_id = conn.execute("SELECT id FROM samples WHERE filename = 'loop.wav'").fetchone()[0]
+        seg = load_segments(conn, loop_id)[0]
+        rendered = window._render(seg.id)
+        assert rendered.exists() and panel._cache_readout.text().startswith("1 files")
+        panel.clear_render_cache()
+        assert not rendered.exists() and panel._cache_readout.text().startswith("0 files")
+        assert conn.execute("SELECT cache_path FROM segments WHERE id = ?", (seg.id,)).fetchone()[0] is None
+    finally:
+        window.close()

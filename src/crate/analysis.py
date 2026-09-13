@@ -70,6 +70,7 @@ from pathlib import Path
 import numpy as np
 
 from .db import ids_clause, now_iso, scope_clause
+from .progress import eta_text
 from .wavmeta import read_embedded_metadata
 
 log = logging.getLogger(__name__)
@@ -394,96 +395,222 @@ class LoopEvidence:
     bpm_candidates: list[float] = field(default_factory=list)
 
 
-def describe_buffer(
-    y: np.ndarray, sr: int = ANALYSIS_SR
-) -> tuple[CoreDescriptors, LoopEvidence]:
-    """Node `C`'s descriptor work on one buffer — a whole file, or a segment
-    window (node `C2`, spec §7). Never touches the filesystem."""
-    import librosa
+@dataclass
+class FrameFeatures:
+    """Node `C`'s per-frame work on one buffer, kept (Phase 12, 2026-09-13)
+    so the buffer's descriptors *and* every segment window's can be read off
+    it — instead of decoding the file twice and running HPSS and the seven
+    spectral transforms once per file and again per segment. HPSS was 7.4 of
+    ~10 s per long file measured on the user's library, run twice.
 
-    c = CoreDescriptors()
-    ev = LoopEvidence()
-    if y.size == 0:
-        c.peak_db = c.rms_db = _SILENCE_FLOOR_DB
-        return c, ev
+    `harmonic` / `percussive` are HPSS's time-domain outputs over `y_spec`
+    (the buffer, zero-padded to a frame when shorter); `onset_env` is the
+    superflux envelope at `_HOP` with the lead-in removed; the spectral
+    arrays are per frame at `_HOP`; `rms_env` is over the *true* buffer at
+    `_ENV_HOP`. `f0` is filled on demand by `pitch_frames()`.
+    """
+
+    sr: int
+    harmonic: np.ndarray | None
+    percussive: np.ndarray
+    onset_env_padded: np.ndarray     # with the lead-in frames: what onset detection sees
+    rms_env: np.ndarray
+    mfcc: np.ndarray
+    contrast: np.ndarray
+    centroid: np.ndarray
+    bandwidth: np.ndarray
+    rolloff: np.ndarray
+    flatness: np.ndarray
+    _f0: np.ndarray | None = None
+    _y: np.ndarray | None = None
+
+    @property
+    def n_frames(self) -> int:
+        return int(self.mfcc.shape[1])
+
+    @property
+    def onset_env(self) -> np.ndarray:
+        """The onset envelope aligned to the signal (lead-in removed)."""
+        return self.onset_env_padded[_ONSET_LEAD_IN_FRAMES:]
+
+    def pitch_frames(self) -> np.ndarray:
+        """yin over the whole buffer at `_HOP`, computed once, for the
+        windows that pass the pitch gate. Cheap (28 ms on 80 s of audio)."""
+        import librosa
+
+        if self._f0 is None:
+            y = self._y if self._y is not None else np.zeros(0, dtype=np.float32)
+            if y.size < _MIN_SPECTRAL_SAMPLES:
+                y = np.pad(y, (0, _MIN_SPECTRAL_SAMPLES - y.size))
+            self._f0 = librosa.yin(y, fmin=PITCH_FMIN_HZ, fmax=PITCH_FMAX_HZ, sr=self.sr, hop_length=_HOP)
+        return self._f0
+
+
+def frame_features(y: np.ndarray, sr: int = ANALYSIS_SR) -> FrameFeatures:
+    """The transforms of node `C` over one buffer, once: HPSS, the onset
+    envelope on the percussive part, the RMS envelope, and the per-frame
+    timbre / spectrum features. Never touches the filesystem."""
+    import librosa
 
     # A segment window can be shorter than one FFT frame. Zero-pad a working
     # copy for every transform-based descriptor (HPSS included) so they are
-    # well defined; the amplitude descriptors below still use the true buffer.
+    # well defined; the amplitude descriptors still use the true buffer.
     # Padding at the tail leaves onset times unchanged.
-    y_spec = (
-        y
-        if y.size >= _MIN_SPECTRAL_SAMPLES
-        else np.pad(y, (0, _MIN_SPECTRAL_SAMPLES - y.size))
-    )
-
-    # --- Harmonic / percussive split (§5.1 pitch gate; also the onset source) ---
+    y_spec = y if y.size >= _MIN_SPECTRAL_SAMPLES else np.pad(y, (0, _MIN_SPECTRAL_SAMPLES - y.size))
     try:
         harmonic, percussive = librosa.effects.hpss(y_spec)
-        h_energy = float(np.sum(np.square(harmonic, dtype=np.float64)))
-        p_energy = float(np.sum(np.square(percussive, dtype=np.float64)))
-        total = h_energy + p_energy
-        c.harmonic_ratio = float(h_energy / total) if total > 0 else None
     except Exception:  # pragma: no cover - librosa edge cases
-        c.harmonic_ratio = None
-        percussive = y_spec
-
-    # --- Amplitude envelope, onsets, periodicity, tempo candidates ---
-    rms_env = _rms_envelope(y)
+        harmonic, percussive = None, y_spec
     lead_in = np.zeros(_ONSET_LEAD_IN_FRAMES * _HOP, dtype=percussive.dtype)
     padded_env = librosa.onset.onset_strength(
         y=np.concatenate([lead_in, percussive]), sr=sr, hop_length=_HOP, **_SUPERFLUX
     )
-    ev.onsets = _dominant_onsets(padded_env, sr, rms_env, _ONSET_LEAD_IN_FRAMES)
+    return FrameFeatures(
+        sr=sr,
+        harmonic=harmonic,
+        percussive=percussive,
+        onset_env_padded=padded_env,
+        rms_env=_rms_envelope(y),
+        mfcc=librosa.feature.mfcc(y=y_spec, sr=sr, n_mfcc=N_MFCC, hop_length=_HOP),
+        contrast=librosa.feature.spectral_contrast(y=y_spec, sr=sr, hop_length=_HOP),
+        centroid=librosa.feature.spectral_centroid(y=y_spec, sr=sr, hop_length=_HOP)[0],
+        bandwidth=librosa.feature.spectral_bandwidth(y=y_spec, sr=sr, hop_length=_HOP)[0],
+        rolloff=librosa.feature.spectral_rolloff(y=y_spec, sr=sr, hop_length=_HOP)[0],
+        flatness=librosa.feature.spectral_flatness(y=y_spec, hop_length=_HOP)[0],
+        _y=y,
+    )
+
+
+def _harmonic_ratio(harmonic: np.ndarray | None, percussive: np.ndarray) -> float | None:
+    if harmonic is None:
+        return None
+    h_energy = float(np.sum(np.square(harmonic, dtype=np.float64)))
+    p_energy = float(np.sum(np.square(percussive, dtype=np.float64)))
+    total = h_energy + p_energy
+    return float(h_energy / total) if total > 0 else None
+
+
+def _amplitude(c: CoreDescriptors, y: np.ndarray, sr: int, first_onset_s: float | None, rms_env: np.ndarray) -> None:
+    peak = float(np.max(np.abs(y)))
+    rms = float(np.sqrt(np.mean(np.square(y, dtype=np.float64))))
+    c.peak_db, c.rms_db = _db_scale(peak), _db_scale(rms)
+    c.crest_factor = float(peak / rms) if rms > 0 else None
+    c.attack_ms, c.decay_ms = _envelope_times(y, sr, first_onset_s, env=rms_env)
+
+
+def _timbre_spectrum(
+    c: CoreDescriptors, f: FrameFeatures, frames: slice
+) -> None:
+    mfcc = f.mfcc[:, frames]
+    c.mfcc_mean = _json_vector(mfcc.mean(axis=1))
+    c.mfcc_var = _json_vector(mfcc.var(axis=1))
+    c.spectral_contrast = _json_vector(f.contrast[:, frames].mean(axis=1))
+    c.spectral_centroid = float(f.centroid[frames].mean())
+    c.spectral_bandwidth = float(f.bandwidth[frames].mean())
+    c.spectral_rolloff = float(f.rolloff[frames].mean())
+    c.spectral_flatness = float(f.flatness[frames].mean())
+
+
+def _pitch_from_frames(f0: np.ndarray) -> tuple[float | None, float | None]:
+    """`_pitch`'s median-and-agreement over a run of yin frames."""
+    f0 = f0[np.isfinite(f0)]
+    f0 = f0[(f0 >= PITCH_FMIN_HZ) & (f0 <= PITCH_FMAX_HZ)]
+    if f0.size == 0:
+        return None, None
+    median = float(np.median(f0))
+    ratio = _PITCH_STABLE_SEMITONES / 12.0
+    low, high = median * 2.0**-ratio, median * 2.0**ratio
+    return median, float(np.mean((f0 >= low) & (f0 <= high)))
+
+
+def describe_from_frames(f: FrameFeatures, y: np.ndarray, sr: int) -> tuple[CoreDescriptors, LoopEvidence]:
+    """The whole buffer's descriptors from its frame features — exactly what
+    `describe_buffer` computed before the split; that function is now this."""
+    import librosa
+
+    c = CoreDescriptors()
+    ev = LoopEvidence()
+    c.harmonic_ratio = _harmonic_ratio(f.harmonic, f.percussive)
+
+    # --- onsets, periodicity, tempo candidates ---
+    ev.onsets = _dominant_onsets(f.onset_env_padded, sr, f.rms_env, _ONSET_LEAD_IN_FRAMES)
     c.onset_count = len(ev.onsets)
-    onset_env = padded_env[_ONSET_LEAD_IN_FRAMES:]
-    confidence, ac_bpm = _periodicity(onset_env, sr)
+    confidence, ac_bpm = _periodicity(f.onset_env, sr)
     c.tempo_confidence = confidence
     if ac_bpm:
         ev.bpm_candidates.append(ac_bpm)
     if confidence:
         try:
-            tempo, _beats = librosa.beat.beat_track(
-                onset_envelope=onset_env, sr=sr, hop_length=_HOP
-            )
+            tempo, _beats = librosa.beat.beat_track(onset_envelope=f.onset_env, sr=sr, hop_length=_HOP)
             bt_bpm = float(np.atleast_1d(tempo)[0])
             if bt_bpm > 0:
                 ev.bpm_candidates.append(bt_bpm)
         except Exception:  # pragma: no cover - librosa edge cases
             pass
 
-    # --- Amplitude (§5.1) ---
-    peak = float(np.max(np.abs(y)))
-    rms = float(np.sqrt(np.mean(np.square(y, dtype=np.float64))))
-    c.peak_db, c.rms_db = _db_scale(peak), _db_scale(rms)
-    c.crest_factor = float(peak / rms) if rms > 0 else None
-    c.attack_ms, c.decay_ms = _envelope_times(
-        y, sr, ev.onsets[0] if ev.onsets else None, env=rms_env
-    )
-
-    # --- Timbre / spectrum (§5.1) ---
-    mfcc = librosa.feature.mfcc(y=y_spec, sr=sr, n_mfcc=N_MFCC, hop_length=_HOP)
-    c.mfcc_mean = _json_vector(mfcc.mean(axis=1))
-    c.mfcc_var = _json_vector(mfcc.var(axis=1))
-    contrast = librosa.feature.spectral_contrast(y=y_spec, sr=sr, hop_length=_HOP)
-    c.spectral_contrast = _json_vector(contrast.mean(axis=1))
-    c.spectral_centroid = float(
-        librosa.feature.spectral_centroid(y=y_spec, sr=sr, hop_length=_HOP).mean()
-    )
-    c.spectral_bandwidth = float(
-        librosa.feature.spectral_bandwidth(y=y_spec, sr=sr, hop_length=_HOP).mean()
-    )
-    c.spectral_rolloff = float(
-        librosa.feature.spectral_rolloff(y=y_spec, sr=sr, hop_length=_HOP).mean()
-    )
-    c.spectral_flatness = float(
-        librosa.feature.spectral_flatness(y=y_spec, hop_length=_HOP).mean()
-    )
-
+    _amplitude(c, y, sr, ev.onsets[0] if ev.onsets else None, f.rms_env)
+    _timbre_spectrum(c, f, slice(0, f.n_frames))
     # --- Pitch, gated on the HPSS harmonic share (§5.1) ---
     if c.harmonic_ratio is not None and c.harmonic_ratio >= PITCH_GATE_HARMONIC_RATIO:
         c.f0_hz, c.pitch_confidence = _pitch(y, sr)
     return c, ev
+
+
+def describe_buffer(
+    y: np.ndarray, sr: int = ANALYSIS_SR
+) -> tuple[CoreDescriptors, LoopEvidence]:
+    """Node `C`'s descriptor work on one buffer — a whole file, or a segment
+    window (node `C2`, spec §7). Never touches the filesystem."""
+    if y.size == 0:
+        c = CoreDescriptors()
+        c.peak_db = c.rms_db = _SILENCE_FLOOR_DB
+        return c, LoopEvidence()
+    return describe_from_frames(frame_features(y, sr), y, sr)
+
+
+def describe_window(f: FrameFeatures, y: np.ndarray, sr: int, start_ms: int, end_ms: int) -> CoreDescriptors:
+    """Node `C2`'s descriptor half for one window of a buffer, read off the
+    buffer's frame features (Phase 12): the frames on the buffer's grid whose
+    span falls in the window, the HPSS outputs and the envelopes sliced to
+    it, yin frames over the parent for a window that passes the pitch gate.
+    The same transforms as `describe_buffer`, without running them per window.
+
+    This is *the* definition of a window's descriptors since 2026-09-13 —
+    the frames are the parent's, on its grid, so a window's numbers no longer
+    depend on where its own frame grid happened to start. Thresholds are the
+    window's own, as before: an onset counts against the window's strongest,
+    loudness against its loudest frame.
+    """
+    return describe_span(f, y, sr, max(0, int(start_ms * sr / 1000)), min(y.size, int(end_ms * sr / 1000)))
+
+
+def describe_span(f: FrameFeatures, y: np.ndarray, sr: int, start: int, end: int) -> CoreDescriptors:
+    """`describe_window` in samples of the buffer the frames were made from."""
+    c = CoreDescriptors()
+    if end <= start:
+        c.peak_db = c.rms_db = _SILENCE_FLOOR_DB
+        return c
+    y_win = y[start:end]
+    frames = slice(start // _HOP, max(start // _HOP + 1, min(f.n_frames, -(-end // _HOP))))
+    env = slice(start // _ENV_HOP, max(start // _ENV_HOP + 1, -(-end // _ENV_HOP)))
+    rms_env = f.rms_env[env]
+
+    c.harmonic_ratio = _harmonic_ratio(
+        None if f.harmonic is None else f.harmonic[start:end], f.percussive[start:end]
+    )
+    onset_env = f.onset_env[frames]
+    onsets = _dominant_onsets(onset_env, sr, rms_env) if onset_env.size else []
+    c.onset_count = len(onsets)
+    c.tempo_confidence, _bpm = _periodicity(onset_env, sr)
+    _amplitude(c, y_win, sr, onsets[0] if onsets else None, rms_env)
+    _timbre_spectrum(c, f, frames)
+    if (
+        c.harmonic_ratio is not None
+        and c.harmonic_ratio >= PITCH_GATE_HARMONIC_RATIO
+        and y_win.size >= sr // 10
+    ):
+        c.f0_hz, c.pitch_confidence = _pitch_from_frames(f.pitch_frames()[frames])
+    return c
 
 
 def load_audio(path: Path | str) -> tuple[np.ndarray, int] | None:
@@ -505,8 +632,18 @@ def analyze_file(path: Path | str) -> Descriptors | None:
     if loaded is None:
         return None
     y, sr = loaded
+    return analyze_loaded(path, y, sr, frame_features(y, sr) if y.size else None)
 
-    core, evidence = describe_buffer(y, sr)
+
+def analyze_loaded(path: Path | str, y: np.ndarray, sr: int, frames: FrameFeatures | None) -> Descriptors:
+    """Node `C` for one decoded file, from frame features already computed —
+    the fused pass (`describe.py`, Phase 12) shares them with segmentation.
+    `frames` is None only for an empty buffer."""
+    path = Path(path)
+    if frames is None or y.size == 0:
+        core, evidence = describe_buffer(y, sr)
+    else:
+        core, evidence = describe_from_frames(frames, y, sr)
     d = Descriptors(**asdict(core))
     embedded = read_embedded_metadata(path) or {}
     if embedded:
@@ -826,8 +963,9 @@ def analyze_pending(
         if progress_every and summary.analyzed % progress_every == 0:
             elapsed = time.perf_counter() - started
             log.info(
-                "analyzed %d/%d (%.2f s/file, %d failed)",
+                "analyzed %d/%d (%.2f s/file, %d failed, %s)",
                 summary.analyzed, total, elapsed / summary.analyzed, summary.failed,
+                eta_text(elapsed, summary.analyzed, total),
             )
 
     if workers > 1 and worklist:

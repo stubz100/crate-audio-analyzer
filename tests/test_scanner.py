@@ -14,7 +14,7 @@ import pytest
 import soundfile as sf
 
 from crate.db import now_iso, open_db
-from crate.scanner import _under_root_prefix, scan_library
+from crate.scanner import APPLEDOUBLE_KEY, _under_root_prefix, scan_library
 
 
 def _write_audio(path: Path, seconds: float = 0.05, samplerate: int = 8000) -> Path:
@@ -407,6 +407,60 @@ def test_junction_cycle_terminates(tmp_path):
     finally:
         conn.close()
         os.rmdir(root / "loop")              # unlink the junction, never its target
+
+
+def test_appledouble_files_are_skipped_and_an_old_row_vanishes(scanned_tree):
+    """Phase 12: macOS `._name.wav` resource forks carry the audio extension
+    but are never audio — 189 of the user's 360 unreadable-header rows. They
+    are skipped like any unsupported file, and a row scanned in before the
+    rule goes at the next rescan like any file no longer seen."""
+    root, conn = scanned_tree
+    (root / "._a.wav").write_bytes(b"\x00\x05\x16\x07" + b"\x00" * 60)   # the AppleDouble magic
+    stale = str(root / "._b.wav")
+    conn.execute(
+        "INSERT INTO samples (filepath, filename, folder, added_at, last_scanned_at, file_size, file_mtime) "
+        "VALUES (?, '._b.wav', '', 't', 't', 64, 1.0)", (stale,),
+    )
+    conn.commit()
+    (root / "._b.wav").write_bytes(b"\x00\x05\x16\x07" + b"\x00" * 60)
+
+    summary = scan_library(conn, root)
+
+    assert summary.skipped_other.get(APPLEDOUBLE_KEY) == 2
+    assert summary.unreadable == 0
+    assert not any(p.endswith(("._a.wav", "._b.wav")) for p in _rows(conn))
+    assert summary.removed == 1
+
+
+def test_a_stop_during_the_read_phase_writes_nothing_and_the_scan_reports_its_phases(tmp_path, caplog):
+    """Phase 12: the scan walks first, then reads headers on threads with
+    progress. A stop that lands in the read phase still writes nothing, and
+    the log says what the walk found before the reads begin."""
+    import logging
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    for name in ("a.wav", "b.wav", "c.wav"):
+        sf.write(lib / name, np.zeros(2205, dtype="float32"), 22050)
+    conn = open_db(tmp_path / "index.db")
+    calls = {"n": 0}
+
+    def stop_after_the_walk() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 3                        # once per file in the walk, then the reads
+
+    with caplog.at_level(logging.INFO, logger="crate.scanner"):
+        summary = scan_library(conn, lib, should_stop=stop_after_the_walk)
+    assert summary.stopped
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 0
+    assert any("reading 3 new" in m for m in caplog.messages), caplog.messages
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="crate.scanner"):
+        summary = scan_library(conn, lib)
+    assert summary.added == 3 and summary.unreadable == 0
+    assert any(m.startswith("walk:") for m in caplog.messages)
+    conn.close()
 
 
 def test_a_stopped_scan_writes_nothing(tmp_path):

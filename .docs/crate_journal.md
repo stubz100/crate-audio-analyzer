@@ -27,7 +27,7 @@ Session-by-session record of what was actually built, decided, and verified — 
 | 9 | Header Interactions | ✅ done — preview + drag-out since 4.5, the ⚓ anchor since Phase 7 (`4756a35`; on every row since 2026-09-08), the waveform panel with segment markers, envelope and playhead `5acfcd4`; marker editing — drag, draw, Save / Discard / Delete segment — `06a7ec5` (2026-09-08) |
 | 10 | Bitwig Integration | ⬜ not started |
 | 11 | Correction Workflow | ✅ done — pulled ahead of Phase 10 (2026-09-13): `corrections.py`, schema v11 (per-facet protection flags, `tags` / `sample_tags`), the Attributes tab's Correct section, a "My tags" column |
-| 12 | Scale & Polish Hardening | ⬜ not started |
+| 12 | Scale & Polish Hardening | ✅ done (2026-09-13): the profiling pass over the real index (`.docs/phase12_profile.md`) — the feature-table load column-wise with compact vectors, 12.6 s / 943 MB → 4 s / ~130 MB, no Rust; render-cache eviction under a Library-panel limit; AppleDouble files skipped, header-less rows shown as `unreadable` |
 | 13 | Stretch | ⬜ not started |
 
 **Target: first daily-drivable milestone = Phases 1–4 + 4.5 + 7** (scan → analyze → embed → list/search/filter → audition → drag into Bitwig), per spec §12. **Reached 2026-09-07.**
@@ -1556,3 +1556,84 @@ The user: "I want to pull phase 11 ahead, can you start with that?" — ahead of
 - Phase 10 (Bitwig: reveal in Explorer, crate export) — the phase this one was pulled ahead of.
 - Possible follow-ups, not started: a mark on a corrected Type cell in the list; promoting from the header's tag bars; a Type header filter value for "corrected".
 - Unchanged: captions as a search channel; the five open design-system items from 2026-09-12.
+
+## 2026-09-13 — Phase 12: the profiling pass, and what it changed
+
+**Phase:** 12 — Scale & Polish Hardening · uncommitted at the time of writing
+
+The user: "Let's start with phase 12" — after asking whether Phase 10 held anything Phase 12 needed (it does not; if anything the dependency runs the other way, since crate export's dangling-link check wants the rescan semantics settled first). Phase 10 stays next.
+
+**Done**
+
+- **`scripts/phase12_profile.py`** — the pass spec §10 and §12 asked for: the window's hot paths timed read-only against the real index (84,372 samples, 310,207 sections, 394,219 feature-table items, 458 MB, all of `D:\_soundPacks` in scope). Findings and the before/after table in **`.docs/phase12_profile.md`**.
+- **The feature-table load, column-wise** (`similarity.py`): rows out of SQLite as tuples, transposed once; the three JSON-list descriptor columns parsed as *one* array each instead of 1.17 million `json.loads`; every transform over a whole column; NULL scalars through a SQL sentinel so a column converts in one C call. The vectors are **compact** — one row per item that has one, `_vector_index` = −1 for the rest — and the feature blocks float32. `distances`, `search` and `weighted_matrix` read through the index; `vectors_for(rows)` gives the layout its zero-filled block. 12.6 s cold / 7.9 s warm and 943 MB of arrays → **4.2 s and ~130 MB**, behaviour unchanged.
+- **Render-cache eviction** (`render.py`): `cache_state`, `evict_cache` (orphans the index no longer names first, then least recently *used* — a cache hit touches the file's mtime — until under the limit; the dropped rows forget their path), `clear_cache`; `render_segment(..., max_bytes=)` evicts after writing a new file. The Library panel (`recompute.py`) reads the cache out, holds the limit (`recompute/render_cache_mb`, default 1,024) and has *Clear*; the window's `_render` passes the limit and refreshes the readout. The user's cache held 35 orphaned files, 90 MB.
+- **Corrupt and exotic files**: the scanner skips AppleDouble `._name.wav` resource forks and counts them (`APPLEDOUBLE_KEY`); an existing row goes at the next rescan like any file no longer seen. The list's Type cell reads **`unreadable`** for a row whose header could not be read (`listmodel._type_cell`), filterable, with a tooltip saying every stage skips it and a rescan reads it again once the file changes.
+- Spec: §6.5 (eviction), §10 (the Rust verdict), §12 (Phase 12 built), §13 risk #2 (the lazier section model not needed).
+
+**Found**
+
+- The list path is fine at library scale: 0.08 s to build the tree, 0.45 s to filter, sorts in tens of ms. The "lazier per-sample section fetch" pencilled in since 2026-09-08 is not needed and was not built.
+- `load_samples` at 0.64 s warm: the 3.9 s the first run showed was the cold page cache, not the query. A pre-aggregated rewrite measured 0.50 s — dropped as not worth it.
+- The scanner's walk over the whole library is 0.54 s (108,932 files, 365 GB, warm directory cache): a rescan's cost is the hashing of changed files, by design. Nothing to harden.
+- The 360 rows with no analysis were all header-less WAVs: 189 AppleDouble forks, and of a 40-file probe of the rest, 39 with no RIFF marker at all and one unrecognised format. The stages already skipped them (`WHERE s.duration_s IS NOT NULL`) — the rows were simply blank in the list. A decode failure *after* a readable header is counted and logged per run but not recorded on the row; on this library there are none, so no column for it.
+- The cProfile split of the old load: 8.8 of 12.6 s in the per-row parser, 5.7 s of that in `json.loads`, 1.2 s the SQLite fetch, 0.4 s standardising.
+
+**Decided**
+
+- **No Rust.** The one hot path was Python-level parsing; vectorising it was the fix. What remains of the load is SQLite, a transpose and numpy — a cached on-disk table rebuilt after a recompute would be the next step if the anchor-time wait ever matters, and it is not scheduled.
+- **Eviction is tied to a render, never a timer** (§9.6): one directory listing after a new file is written. Orphans go whatever the limit; `None` for the limit removes only orphans.
+- **A cache hit touches the file** so "recently used" means previewed or dragged, not rendered. One render test that read a hit off an unchanged mtime now reads the index's render stamp.
+- **Header-less rows stay in the index and in the list**, marked, rather than being hidden: the file exists, the user should see why it carries nothing, and a rescan picks it up if it changes. AppleDouble forks are the exception — never audio, so never a row.
+- The window's search and the Recompute tab keep one CLAP model each when both are used: memory only; sharing one across two threads is not worth the locking today.
+
+**Verified**
+
+- `uv run pytest tests -q` → **275 passed, 3 skipped** (269 before); pyflakes clean over `src`, `tests` and `scripts`. New: the compact vectors (`test_similarity.py`: count, `vectors_for`, a full-matrix construction compacting to the same, float32 blocks); eviction (`test_render.py`: LRU with a hit counting as use, orphans first and Clear, a render under a limit evicting after writing); the AppleDouble skip with an old row vanishing (`test_scanner.py`); the `unreadable` Type cell, its filter, the cache readout and Clear through the window (`test_gui.py`). The similarity, layout and search tests pass unchanged against the rewritten loader.
+- The profile before and after, warm, on the real index: `FeatureTable.load` 7.93 s → 4.18 s; distances 0.15 → 0.09 s; the rest within noise. Arrays measured after: 130 MB (features 68 MB, vectors 62 MB at (30,263 × 512)); the process working set grows 230 MB across the load.
+
+**Next**
+
+- Phase 10 (Bitwig: reveal in Explorer, crate export).
+- Unchanged: captions as a search channel; the five open design-system items from 2026-09-12; Phase 11's follow-ups.
+
+## 2026-09-13 — Phase 12, second round: the recompute pass after the first full run
+
+**Phase:** 12 — Scale & Polish Hardening · uncommitted at the time of writing
+
+The user, after recomputing the whole library: the window "locks up instantly for over 10 minutes while it scans the folder with no feedback", analysis and segmentation took over an hour at ~0.08 s per item, and CLAP at 0.48 s a clip projected to 16 hours. Asked for recommendations, and whether a local vector database for CLAP would help. Six were given (`.docs/phase12_profile.md`, "The recompute pass"); the steer was items 1–3, then 4.
+
+**Measured first** (real files from the library; the scratch scripts' numbers are in the profile doc)
+
+- One long file (80 s): decode 0.8 s, HPSS 3.7 s — run **twice**, once for the descriptors and once for the transients — 7.4 of ~10 s. Short files: the same two HPSS runs were about half. Per-segment descriptor passes: 3 % on long files, up to a third on short multi-hits.
+- Worker processes are at their limit: on 1,616 real files, analysis at 8 workers 63 ms/file, 16 → 72, 32 → 82. The saved setting was 8, the default cap. So the saving had to be algorithmic.
+- The scan runs on the job thread by design; what it lacked was any line before its summary. The ten minutes were 109k header reads, one at a time.
+- The user's index: `embed_segments` on with a 193 ms minimum, and 310k segments — the segment count, not the sample count, is what made 16 hours.
+
+**Done**
+
+- **Scan feedback and threaded reads** (`scanner.py`): the walk first, nothing read; then headers for new files and hashes for changed ones on `READ_THREADS` (8) threads via `ThreadPoolExecutor.map`, results applied in walk order on the main thread; a line after the walk saying what it found, a progress line every 5,000 reads with the rate and an ETA; a stop in either phase writes nothing. `_probe` is the pure per-file read; `_metadata_or_null` keeps the unreadable bookkeeping on the main thread.
+- **`progress.py`** — `eta_text` / `duration_text`; every stage's progress line now ends in an ETA. The embedding stage opens with the whole-file clip count and the segment count under the minimum length, and says a segment costs the same CLAP pass as a file; its progress line adds seconds per clip.
+- **The fused pass** (`describe.py`): `describe_file` (pure, one decode, `analysis.frame_features` once) → `analyze_loaded` for the descriptors, `structural_type` for the rule's call, node S with a confirmed type winning (Phase 11), `detect_loaded` on the shared percussive component, every window described off the frames. `describe_pending` runs the worklist (either stage stale, or everything with `full`) through the same pool and writes both stages' rows on the main thread with per-file isolation, returning the two summaries. `jobs.recompute_attributes` uses it.
+- **`analysis.py` split**: `FrameFeatures` (HPSS outputs, the padded onset envelope, the RMS envelope, per-frame MFCC / contrast / centroid / bandwidth / rolloff / flatness, yin on demand), `frame_features`, `describe_from_frames` (whole-buffer aggregation, identical to before — the analysis tests pass unchanged), `describe_window` / `describe_span` (a window from its parent's frames). `describe_buffer` is now the two in sequence.
+- **`segmentation.py`**: `_envelopes` / `detect_transients` / `detect` take the percussive component; `detect_loaded` describes every window off the frames (the stand-alone stage computes them once per file); `_describe_window` — the manual save's path — computes frames over a grid-aligned excerpt with 32 frames of context, so it lands on the parent's frames without a long parent's whole pass.
+- Spec §9.6 and §12; the profile doc's new section.
+
+**Decided**
+
+- **A window's descriptors are the parent's frames inside it**, on the parent's grid, by one definition everywhere. The slice-based computation depended on where the slice's own frame grid started: on a mostly-silent window with one transient the spectral centroid differed by 60 % between the two framings. Not more right, just consistent — and the full recompute the user is about to run recomputes every segment this way. One known residue: MFCCs carry an 80 dB floor relative to the loudest frame in view, so the energy coefficient of a near-silent frame differs by a few percent between the excerpt path and the parent path; the shape coefficients are exact.
+- **The stages stay** (`analyze_pending`, `segment_pending`) for the CLI and the tests; they share the frame path, so their numbers agree with the fused pass — the test asserts equality row for row.
+- **The worker cap stays at 8**; the measurement says more is slower.
+- **No vector database.** The cost is producing the vectors, not storing or searching them (90 ms over 394k with numpy); the ranking blends five axes an approximate index cannot serve; a second store would need syncing on every recompute and correction. Recorded in the profile doc with the CLAP options not taken: samples first with *Embed segments* off, a quantisation spike, a GPU (the user's constraint, the user's call).
+- The report's `notes` stay for skipped or failed things; the one-pass fact is a log line, and the job's stop test now expects both summaries with `stopped` set.
+
+**Verified**
+
+- `uv run pytest tests -q` → **281 passed, 3 skipped** (276 before); pyflakes clean. New: `tests/test_describe.py` (the fused pass writes exactly what the two stages write — descriptors, types, segments, segment descriptors, parent stamps — and visits nothing twice; a window's descriptors are the same whether read off the parent's frames or the excerpt; a confirmed type drives the detection and is kept; a stale parent's manual segments are refreshed and flagged; the worker path matches the serial one; a stop ends the pass), a scanner test for the two-phase stop and the phase lines. The stop test in `test_jobs.py` updated to the one-pass shape.
+- On 1,616 real files with 8 workers: the two stages 194.6 s, the fused pass **106.0 s (1.84×)**, identical segments. Analysis alone on those files unchanged in cost; the saving is the second decode and HPSS and the per-window transforms.
+
+**Next**
+
+- The user's full recompute with the new pass — the scan's phases and every ETA are the first thing to look at; samples first with *Embed segments* off is the recommended first embedding pass.
+- The CLAP quantisation spike (recommendation 5), if wanted; Phase 10 (Bitwig: reveal in Explorer, crate export) otherwise.
+- Unchanged: captions as a search channel; the design-system and Phase 11 follow-ups.

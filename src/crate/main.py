@@ -426,7 +426,8 @@ class MainWindow(QMainWindow):
         self._tag_bars.tag_clicked.connect(self._search_panel.search_for)         # a bar in the header too
         self._waveform_panel.caption_requested.connect(self._caption_current)   # the caption line's button
         self._recompute = RecomputePanel(
-            self._db_path, self._settings, encoder_factory, captioner_factory, parent=self
+            self._db_path, self._settings, encoder_factory, captioner_factory,
+            cache_dir=self._cache_dir, parent=self,
         )
         self._recompute.index_changed.connect(self.reload)
         self._recompute.index_changed.connect(self._close_if_pending)
@@ -616,7 +617,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"feature table unavailable: {error}")
 
     def _render(self, segment_id: int) -> Path:
-        return render_segment(self._conn, segment_id, self._cache_dir)
+        """A segment's cached render, under the Library panel's size limit
+        (Phase 12): a new render may evict the least recently used ones."""
+        path = render_segment(
+            self._conn, segment_id, self._cache_dir, max_bytes=self._recompute.render_cache_limit_bytes()
+        )
+        self._recompute.refresh_cache_readout()
+        return path
 
     @staticmethod
     def _configure_drag_view(view: QAbstractItemView) -> None:

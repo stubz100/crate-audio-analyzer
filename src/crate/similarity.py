@@ -26,7 +26,7 @@ import json
 import logging
 import sqlite3
 import warnings
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -82,49 +82,68 @@ class Scores:
     hits: dict[int, Hit] = field(default_factory=dict)
 
 
-def _log_or_nan(value: float | None) -> float:
-    return float(np.log(value)) if value is not None and value > 0 else np.nan
+#: The scalar descriptor columns in the order the loader's SELECT lists them.
+_SCALAR_COLUMNS = (
+    "peak_db", "rms_db", "crest_factor", "attack_ms", "decay_ms", "f0_hz",
+    "spectral_centroid", "spectral_bandwidth", "spectral_rolloff", "spectral_flatness",
+)
+#: The JSON-list descriptor columns and their lengths.
+_LIST_COLUMNS = (("mfcc_mean", 13), ("mfcc_var", 13), ("spectral_contrast", 7))
+#: What a NULL scalar comes back as, so a whole column converts in one C call
+#: and NaN is put back afterwards. No descriptor is ever this.
+_NULL = -1.0e300
 
 
-def _log1p_or_nan(value: float | None) -> float:
-    return float(np.log1p(value)) if value is not None and value >= 0 else np.nan
+def _list_column(texts: Sequence[str | None], size: int) -> np.ndarray:
+    """An (n, size) float32 block from a column of JSON lists — parsed as
+    *one* JSON array, not one `json.loads` per row (Phase 12: 1.17 million
+    of those were 5.7 s of a 12.6 s load). A missing or wrong-length list is
+    a row of NaN, as before."""
+    n = len(texts)
+    parsed = json.loads("[" + ",".join(t if t else "null" for t in texts) + "]")
+    keep = np.fromiter((v is not None and len(v) == size for v in parsed), dtype=bool, count=n)
+    out = np.full((n, size), np.nan, dtype=np.float32)
+    if keep.any():
+        out[keep] = np.asarray([v for v, k in zip(parsed, keep) if k], dtype=np.float32)
+    return out
 
 
-def _or_nan(value: float | None) -> float:
-    return np.nan if value is None else float(value)
+def _log_where_positive(values: np.ndarray, fn=np.log) -> np.ndarray:
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(values > 0, fn(np.where(values > 0, values, 1.0)), np.nan).astype(np.float32)
 
 
-def _vector_or_nan(text: str | None, size: int) -> list[float]:
-    if not text:
-        return [np.nan] * size
-    values = json.loads(text)
-    if len(values) != size:
-        return [np.nan] * size
-    return [float(v) for v in values]
+def _log1p_where_nonnegative(values: np.ndarray) -> np.ndarray:
+    with np.errstate(invalid="ignore"):
+        return np.where(values >= 0, np.log1p(np.where(values >= 0, values, 0.0)), np.nan).astype(np.float32)
 
 
-def _axis_features(row: Mapping[str, object]) -> dict[str, list[float]]:
-    """Raw (not yet standardised) per-axis feature lists for one item."""
+def _axis_blocks(scalars: np.ndarray, lists: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Raw (not yet standardised) per-axis feature blocks for every item at
+    once — the same transforms the per-row parser applied, vectorised.
+    `scalars` is (n, len(_SCALAR_COLUMNS)) with NaN for NULL."""
+    col = {name: scalars[:, i] for i, name in enumerate(_SCALAR_COLUMNS)}
+    amplitude = np.column_stack([
+        col["peak_db"], col["rms_db"],
+        _log1p_where_nonnegative(col["crest_factor"]),
+        _log1p_where_nonnegative(col["attack_ms"]),
+        _log1p_where_nonnegative(col["decay_ms"]),
+    ])
+    pitch = _log_where_positive(col["f0_hz"], np.log2).reshape(-1, 1)
+    timbre = np.hstack([
+        lists["mfcc_mean"], _log1p_where_nonnegative(lists["mfcc_var"]), lists["spectral_contrast"],
+    ])
+    spectrum = np.column_stack([
+        _log_where_positive(col["spectral_centroid"]),
+        _log_where_positive(col["spectral_bandwidth"]),
+        _log_where_positive(col["spectral_rolloff"]),
+        col["spectral_flatness"],
+    ])
     return {
-        "amplitude": [
-            _or_nan(row["peak_db"]),
-            _or_nan(row["rms_db"]),
-            _log1p_or_nan(row["crest_factor"]),
-            _log1p_or_nan(row["attack_ms"]),
-            _log1p_or_nan(row["decay_ms"]),
-        ],
-        "pitch": [np.log2(row["f0_hz"]) if row["f0_hz"] else np.nan],
-        "timbre": (
-            _vector_or_nan(row["mfcc_mean"], 13)
-            + [float(np.log1p(v)) if v == v and v >= 0 else np.nan for v in _vector_or_nan(row["mfcc_var"], 13)]
-            + _vector_or_nan(row["spectral_contrast"], 7)
-        ),
-        "spectrum": [
-            _log_or_nan(row["spectral_centroid"]),
-            _log_or_nan(row["spectral_bandwidth"]),
-            _log_or_nan(row["spectral_rolloff"]),
-            _or_nan(row["spectral_flatness"]),
-        ],
+        "amplitude": amplitude.astype(np.float32),
+        "pitch": pitch,
+        "timbre": timbre.astype(np.float32),
+        "spectrum": spectrum.astype(np.float32),
     }
 
 
@@ -144,8 +163,15 @@ def _standardise(matrix: np.ndarray) -> np.ndarray:
 
 class FeatureTable:
     """Every analysed sample and segment as standardised per-axis features
-    plus its CLAP vector (zeros and `has_vector=False` when not embedded).
-    Loaded once per index; rebuilt after a recompute."""
+    plus its CLAP vector. Loaded once per index; rebuilt after a recompute.
+
+    The vectors are held **compactly** (Phase 12, 2026-09-13): one row per
+    item that *has* one, with `_vector_index` mapping an item row to it or
+    −1. On the user's index 30k of 394k items are embedded, and a full
+    (n, 512) float32 matrix was 807 MB of mostly zeros — the whole table is
+    ~130 MB this way. The per-axis feature blocks are float32 for the same
+    reason (68 MB against 136).
+    """
 
     def __init__(
         self,
@@ -158,7 +184,12 @@ class FeatureTable:
         vectors: np.ndarray,
         has_vector: np.ndarray,
         is_window: np.ndarray | None = None,
+        *,
+        compact: bool = False,
     ) -> None:
+        """`vectors` is either the full (n, dim) matrix with `has_vector`
+        saying which rows are real, or — with `compact=True` — only the
+        rows that have one, in item order (what `load` builds)."""
         self.ids = ids
         self.is_segment = is_segment
         self.is_window = np.zeros(len(ids), dtype=bool) if is_window is None else is_window
@@ -166,8 +197,11 @@ class FeatureTable:
         self.starts = starts
         self.ends = ends
         self._features = features
-        self._vectors = vectors
-        self._has_vector = has_vector
+        self._has_vector = np.asarray(has_vector, dtype=bool)
+        self._vector_rows = np.flatnonzero(self._has_vector)
+        self._vectors = np.asarray(vectors if compact else vectors[self._vector_rows], dtype=np.float32)
+        self._vector_index = np.full(len(ids), -1, dtype=np.int64)
+        self._vector_index[self._vector_rows] = np.arange(len(self._vector_rows))
         self._row_of: dict[tuple[str, int], int] = {
             (KIND_SEGMENT if seg else KIND_SAMPLE, int(item_id)): i
             for i, (item_id, seg) in enumerate(zip(ids, is_segment))
@@ -177,9 +211,18 @@ class FeatureTable:
 
     @classmethod
     def load(cls, conn: sqlite3.Connection) -> "FeatureTable":
-        sample_rows = conn.execute(
-            f"SELECT a.sample_id AS item_id, a.sample_id AS parent_id, 0 AS start_ms, 0 AS end_ms, "
-            f"{', '.join('a.' + c for c in _DESCRIPTOR_COLUMNS)}, e.vector AS vector "
+        """Column-wise, not row-wise (Phase 12): the rows come out of SQLite
+        as plain tuples, are transposed once, and every transform runs over a
+        whole column. 12.6 s and 943 MB became a few seconds and ~130 MB on
+        the user's 394k-item index — the pass that decided no native code is
+        needed here (§10)."""
+        scalars = ", ".join(f"COALESCE({{t}}.{c}, {_NULL!r})" for c in _SCALAR_COLUMNS)
+        lists = ", ".join(f"{{t}}.{c}" for c, _ in _LIST_COLUMNS)
+        cursor = conn.cursor()
+        cursor.row_factory = None                      # tuples: one transpose, no per-row mapping
+        sample_rows = cursor.execute(
+            f"SELECT a.sample_id, a.sample_id, 0, 0, 0, "
+            f"{scalars.format(t='a')}, {lists.format(t='a')}, e.vector "
             "FROM analysis a LEFT JOIN embedding e "
             "  ON e.sample_id = a.sample_id AND e.model_name = ? ORDER BY a.sample_id",
             (MODEL_NAME,),
@@ -188,55 +231,51 @@ class FeatureTable:
         # vector; a CLAP window of a long file (§6.4) has its vector only, so
         # it is a conceptual-axis item — the blend and the search skip what an
         # item lacks.
-        segment_rows = conn.execute(
-            f"SELECT g.id AS item_id, g.sample_id AS parent_id, g.start_ms, g.end_ms, "
-            f"g.detection_method AS method, "
-            f"{', '.join('sa.' + c for c in _DESCRIPTOR_COLUMNS)}, se.vector AS vector "
+        segment_rows = cursor.execute(
+            f"SELECT g.id, g.sample_id, g.start_ms, g.end_ms, g.detection_method = ?, "
+            f"{scalars.format(t='sa')}, {lists.format(t='sa')}, se.vector "
             "FROM segments g "
             "LEFT JOIN segment_analysis sa ON sa.segment_id = g.id "
             "LEFT JOIN segment_embedding se ON se.segment_id = g.id AND se.model_name = ? "
             "WHERE sa.segment_id IS NOT NULL OR se.segment_id IS NOT NULL "
             "ORDER BY g.id",
-            (MODEL_NAME,),
+            (WINDOW_METHOD, MODEL_NAME),
         ).fetchall()
-        rows = [(r, False) for r in sample_rows] + [(r, True) for r in segment_rows]
-        n = len(rows)
-        ids = np.zeros(n, dtype=np.int64)
-        is_segment = np.zeros(n, dtype=bool)
-        is_window = np.zeros(n, dtype=bool)
-        parents = np.zeros(n, dtype=np.int64)
-        starts = np.zeros(n, dtype=np.int64)
-        ends = np.zeros(n, dtype=np.int64)
-        per_axis: dict[str, list[list[float]]] = {axis: [] for axis in AXES[:4]}
-        vectors: list[np.ndarray | None] = []
-        for i, (row, seg) in enumerate(rows):
-            ids[i] = row["item_id"]
-            is_segment[i] = seg
-            is_window[i] = seg and row["method"] == WINDOW_METHOD
-            parents[i] = row["parent_id"]
-            starts[i] = row["start_ms"]
-            ends[i] = row["end_ms"]
-            feats = _axis_features(row)
-            for axis in AXES[:4]:
-                per_axis[axis].append(feats[axis])
-            blob = row["vector"]
-            vectors.append(blob_to_vector(blob) if blob is not None else None)
-        features = {
-            axis: _standardise(np.asarray(values, dtype=np.float64).reshape(n, -1))
-            for axis, values in per_axis.items()
+        n_samples, n = len(sample_rows), len(sample_rows) + len(segment_rows)
+        columns = list(zip(*sample_rows, *segment_rows)) if n else [()] * (5 + len(_SCALAR_COLUMNS) + len(_LIST_COLUMNS) + 1)
+
+        ids = np.fromiter(columns[0], dtype=np.int64, count=n)
+        parents = np.fromiter(columns[1], dtype=np.int64, count=n)
+        starts = np.fromiter(columns[2], dtype=np.int64, count=n)
+        ends = np.fromiter(columns[3], dtype=np.int64, count=n)
+        is_window = np.fromiter(columns[4], dtype=bool, count=n)
+        is_segment = np.arange(n) >= n_samples
+
+        first = 5
+        scalar_block = np.array(columns[first:first + len(_SCALAR_COLUMNS)], dtype=np.float64).T.reshape(n, -1)
+        scalar_block[scalar_block <= _NULL / 10] = np.nan
+        first += len(_SCALAR_COLUMNS)
+        list_blocks = {
+            name: _list_column(columns[first + k], size) for k, (name, size) in enumerate(_LIST_COLUMNS)
         }
-        dim = next((v.shape[0] for v in vectors if v is not None), 0)
-        matrix = np.zeros((n, dim), dtype=np.float32)
-        has_vector = np.zeros(n, dtype=bool)
-        for i, v in enumerate(vectors):
-            if v is not None and v.shape[0] == dim:
-                matrix[i] = v
-                has_vector[i] = True
+        features = {
+            axis: _standardise(block) for axis, block in _axis_blocks(scalar_block, list_blocks).items()
+        }
+
+        blobs = columns[first + len(_LIST_COLUMNS)]
+        has_vector = np.fromiter((b is not None for b in blobs), dtype=bool, count=n)
+        present = [blob_to_vector(b) for b in blobs if b is not None]
+        dim = present[0].shape[0] if present else 0
+        sized = [v.shape[0] == dim for v in present]
+        if not all(sized):                              # a vector of another width does not count
+            has_vector[np.flatnonzero(has_vector)[~np.asarray(sized)]] = False
+            present = [v for v, ok in zip(present, sized) if ok]
+        compact = np.asarray(present, dtype=np.float32).reshape(len(present), dim)
         log.info(
             "feature table: %d samples + %d segments (%d of them CLAP windows), %d with vectors",
-            int((~is_segment).sum()), int(is_segment.sum()), int(is_window.sum()), int(has_vector.sum()),
+            n_samples, n - n_samples, int(is_window.sum()), int(has_vector.sum()),
         )
-        return cls(ids, is_segment, parents, starts, ends, features, matrix, has_vector, is_window)
+        return cls(ids, is_segment, parents, starts, ends, features, compact, has_vector, is_window, compact=True)
 
     # --- lookups ---
 
@@ -248,6 +287,25 @@ class FeatureTable:
 
     def sample_rows(self) -> np.ndarray:
         return np.flatnonzero(~self.is_segment)
+
+    def has_vector(self, row: int) -> bool:
+        return bool(self._has_vector[row])
+
+    @property
+    def vector_count(self) -> int:
+        """How many items carry a CLAP vector — the compact matrix's rows."""
+        return int(self._vectors.shape[0]) if self._vectors.ndim == 2 else 0
+
+    def vectors_for(self, rows: np.ndarray) -> np.ndarray:
+        """The CLAP vectors of `rows` as a (len(rows), dim) block, zeros for
+        an item without one — the shape the layout's projection wants."""
+        rows = np.asarray(rows, dtype=np.int64)
+        dim = self._vectors.shape[1] if self._vectors.ndim == 2 else 0
+        out = np.zeros((len(rows), dim), dtype=np.float32)
+        index = self._vector_index[rows]
+        have = index >= 0
+        out[have] = self._vectors[index[have]]
+        return out
 
     # --- anchoring (§9.5) ---
 
@@ -270,9 +328,8 @@ class FeatureTable:
             out[:, j] = d
         j = AXES.index("conceptual")
         if self._has_vector[anchor_row] and self._vectors.size:
-            d = 1.0 - self._vectors @ self._vectors[anchor_row]
-            d[~self._has_vector] = np.nan
-            out[:, j] = d
+            anchor_vector = self._vectors[self._vector_index[anchor_row]]
+            out[self._vector_rows, j] = 1.0 - self._vectors @ anchor_vector
         for j in range(len(AXES)):
             column = out[:, j]
             finite = column[np.isfinite(column)]
@@ -318,8 +375,8 @@ class FeatureTable:
         norm = float(np.linalg.norm(q))
         if norm > 0:
             q = q / norm
-        cosine = self._vectors @ q
-        cosine = np.where(self._has_vector, cosine, np.nan)
+        cosine = np.full(len(self.ids), np.nan, dtype=np.float32)
+        cosine[self._vector_rows] = self._vectors @ q
         return self.fold(cosine, sample_ids)
 
     def fold(self, values: np.ndarray, sample_ids: Iterable[int] | None = None) -> Scores:
@@ -366,7 +423,7 @@ class FeatureTable:
             blocks.append(block * np.sqrt(weight / block.shape[1]))
         weight = max(0.0, float(weights.get("conceptual", 0.0)))
         if weight > 0.0 and self._vectors.size:
-            blocks.append(self._vectors[rows].astype(np.float64) * np.sqrt(weight))
+            blocks.append(self.vectors_for(rows).astype(np.float64) * np.sqrt(weight))
         if not blocks:
             raise ValueError("every weight is zero: nothing to project")
         return np.hstack(blocks).astype(np.float32)

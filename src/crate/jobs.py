@@ -18,9 +18,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from .analysis import ONE_SHOT_MAX_DURATION_S, AnalysisSummary, analyze_pending
+from .analysis import ONE_SHOT_MAX_DURATION_S, AnalysisSummary
+from .describe import describe_pending
 from .embedding import ClapEncoder, EmbedSettings, EmbedSummary, Encoder, embed_pending
-from .segmentation import SegmentationSettings, SegmentationSummary, segment_pending
+from .segmentation import SegmentationSettings, SegmentationSummary
 
 log = logging.getLogger(__name__)
 
@@ -113,36 +114,28 @@ def recompute_attributes(
     else:
         mode = "force full re-index" if settings.force_full else "new/changed only"
         log.info(
-            "recompute attributes (%s) over %d scope folder(s), %d worker process(es)",
+            "recompute attributes (%s) over %d scope folder(s), %d worker process(es); "
+            "analysis + segmentation as one pass per file, then embedding",
             mode, len(scope), max(1, workers),
         )
         for folder in scope:
             log.info("  scope: %s", folder)
 
-    report.analysis = analyze_pending(
+    # Analysis and segmentation as one pass per file (Phase 12, `describe.py`):
+    # one decode and one set of frame features serve both, where the two
+    # stages in sequence decoded and split every file twice.
+    report.analysis, report.segmentation = describe_pending(
         conn,
-        reanalyze=full,
-        progress_every=progress_every,
+        settings.segmentation,
+        full=full,
         one_shot_max_duration_s=settings.one_shot_max_duration_s,
         scope=scope,
         sample_ids=sample_ids,
         should_stop=should_stop,
         workers=workers,
-    )
-    if report.analysis.stopped:
-        return _finish(report, started, stopped=True)
-
-    report.segmentation = segment_pending(
-        conn,
-        settings=settings.segmentation,
-        resegment=full,
         progress_every=progress_every,
-        scope=scope,
-        sample_ids=sample_ids,
-        should_stop=should_stop,
-        workers=workers,
     )
-    if report.segmentation.stopped:
+    if report.analysis.stopped or report.segmentation.stopped:
         return _finish(report, started, stopped=True)
 
     try:

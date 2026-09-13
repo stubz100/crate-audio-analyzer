@@ -55,10 +55,15 @@ from .analysis import (
     _ONSET_LEAD_IN_FRAMES,
     _SUPERFLUX,
     CoreDescriptors,
+    FrameFeatures,
     describe_buffer,
+    describe_span,
+    describe_window,
+    frame_features,
     load_audio,
 )
 from .db import ids_clause, now_iso, scope_clause
+from .progress import eta_text
 
 log = logging.getLogger(__name__)
 
@@ -238,18 +243,25 @@ def _percussive(y: np.ndarray) -> np.ndarray:
 
 
 def _envelopes(
-    y: np.ndarray, sr: int, profile: str
+    y: np.ndarray, sr: int, profile: str, percussive: np.ndarray | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
     """(onset envelope, energy envelope) for `profile`, both at `_HOP`.
 
     Both are computed on audio with `_ONSET_LEAD_IN_FRAMES` of silence
     prepended: a transient at sample 0 otherwise collides with the frame
-    centering pad and is never picked (measured in Phase 2).
+    centering pad and is never picked (measured in Phase 2). `percussive`
+    is the HPSS component already computed for the same buffer by the
+    analysis pass (Phase 12): the tight profile uses it instead of running
+    HPSS again — 3.7 s of a long file's 10 s, twice, before.
     """
     import librosa
 
     lead = np.zeros(_ONSET_LEAD_IN_FRAMES * _HOP, dtype=y.dtype)
-    source = np.concatenate([lead, _percussive(y) if profile == PROFILE_TIGHT else y])
+    if profile == PROFILE_TIGHT:
+        body = percussive[: y.size] if percussive is not None else _percussive(y)
+    else:
+        body = y
+    source = np.concatenate([lead, body])
     energy = librosa.feature.rms(y=source, frame_length=_RMS_FRAME, hop_length=_HOP)[0]
     if profile == PROFILE_TIGHT:
         onset_env = librosa.onset.onset_strength(
@@ -279,7 +291,11 @@ def _merge_close(
 
 
 def detect_transients(
-    y: np.ndarray, sr: int, settings: SegmentationSettings, profile: str
+    y: np.ndarray,
+    sr: int,
+    settings: SegmentationSettings,
+    profile: str,
+    percussive: np.ndarray | None = None,
 ) -> list[tuple[float, float]]:
     """Candidate transients as (time_s, normalized strength), in time order.
 
@@ -291,7 +307,7 @@ def detect_transients(
 
     if y.size == 0:
         return []
-    onset_env, energy = _envelopes(y, sr, profile)
+    onset_env, energy = _envelopes(y, sr, profile, percussive)
     if onset_env.size == 0 or not np.any(onset_env > 0):
         return []
     frames = librosa.onset.onset_detect(
@@ -375,10 +391,12 @@ def detect(
     settings: SegmentationSettings,
     structural_type_value: str = "multi-hit",
     content_class: str | None = None,
+    percussive: np.ndarray | None = None,
 ) -> DetectionResult:
-    """Node `T` end to end on one decoded buffer."""
+    """Node `T` end to end on one decoded buffer. `percussive`: the HPSS
+    component the analysis pass already has for this buffer (Phase 12)."""
     profile = choose_profile(settings, structural_type_value, content_class)
-    transients = detect_transients(y, sr, settings, profile)
+    transients = detect_transients(y, sr, settings, profile, percussive)
     result = build_segments(transients, y.size / sr if sr else 0.0, settings)
     result.profile = profile
     return result
@@ -410,13 +428,29 @@ def _write_segment_analysis(
     _store_segment_analysis(conn, segment_id, _describe_window(y, sr, start_ms, end_ms))
 
 
+#: HPSS's median filter spans 31 frames; this much context on each side of an
+#: excerpt makes the frames inside the window equal the parent's own.
+_WINDOW_CONTEXT_FRAMES = 32
+
+
 def _describe_window(y: np.ndarray, sr: int, start_ms: int, end_ms: int):
-    """The descriptor half of node `C2` on one window — pure, so a worker
-    process can do it (`detect_file`)."""
+    """The descriptor half of node `C2` on one window when the parent's frame
+    features are not at hand — a manual save (§6.3). Frame features over an
+    excerpt on the parent's grid with enough context that the frames inside
+    the window are the parent's frames (Phase 12: one definition of a
+    window's descriptors, without paying for a long parent's whole frame
+    pass on every manual save). One known difference: MFCCs carry an 80 dB
+    floor relative to the loudest frame in view, so a near-silent frame's
+    energy coefficient is floored against the excerpt's peak here and the
+    parent's in the fused pass — a few percent on that coefficient alone."""
     start = max(0, int(start_ms * sr / 1000))
     end = min(y.size, int(end_ms * sr / 1000))
-    core, _evidence = describe_buffer(y[start:end], sr)
-    return core
+    if end <= start:
+        return describe_buffer(y[:0], sr)[0]
+    lo = max(0, (start // _HOP - _WINDOW_CONTEXT_FRAMES) * _HOP)
+    hi = min(y.size, (-(-end // _HOP) + _WINDOW_CONTEXT_FRAMES) * _HOP)
+    excerpt = y[lo:hi]
+    return describe_span(frame_features(excerpt, sr), excerpt, sr, start - lo, end - lo)
 
 
 def _store_segment_analysis(conn: sqlite3.Connection, segment_id: int, core) -> None:
@@ -475,9 +509,11 @@ def _refresh_manual_segments(
     instead of silently indexing air. Returns the number flagged.
     """
     duration_ms = int(round(y.size / sr * 1000.0))
+    rows = _manual_rows(conn, sample_id)
+    frames = frame_features(y, sr) if analyze_segments and rows and y.size else None
     manual = [
-        (seg_id, start_ms, end_ms, _describe_window(y, sr, start_ms, end_ms) if analyze_segments else None)
-        for seg_id, start_ms, end_ms in _manual_rows(conn, sample_id)
+        (seg_id, start_ms, end_ms, describe_window(frames, y, sr, start_ms, end_ms) if frames is not None else None)
+        for seg_id, start_ms, end_ms in rows
     ]
     return _apply_manual_refresh(conn, duration_ms, manual)
 
@@ -564,15 +600,38 @@ def detect_file(
     if loaded is None:
         return None
     y, sr = loaded
-    result = detect(y, sr, settings, structural_type_value, content_class)
-    descriptors = [
-        _describe_window(y, sr, c.start_ms, c.end_ms) if analyze_segments else None
-        for c in result.segments
-    ]
-    manual = [
-        (seg_id, start_ms, end_ms, _describe_window(y, sr, start_ms, end_ms) if analyze_segments else None)
-        for seg_id, start_ms, end_ms in manual_rows
-    ]
+    return detect_loaded(y, sr, structural_type_value, settings, content_class, analyze_segments, manual_rows)
+
+
+def detect_loaded(
+    y: np.ndarray,
+    sr: int,
+    structural_type_value: str,
+    settings: SegmentationSettings,
+    content_class: str | None = None,
+    analyze_segments: bool = True,
+    manual_rows=(),
+    frames: FrameFeatures | None = None,
+) -> SegmentWork:
+    """Node `T` + the descriptor half of `C2` on a decoded buffer, from its
+    frame features (Phase 12): one HPSS for the detection, and every window
+    described off the same frames instead of by its own transforms. The
+    fused pass (`describe.py`) hands in the frames it computed for the
+    analysis; the stand-alone stage computes them here."""
+    if frames is None and y.size:
+        frames = frame_features(y, sr)
+    percussive = frames.percussive if frames is not None else None
+    result = detect(y, sr, settings, structural_type_value, content_class, percussive)
+
+    def describe(start_ms: int, end_ms: int):
+        if not analyze_segments:
+            return None
+        if frames is None:
+            return _describe_window(y, sr, start_ms, end_ms)
+        return describe_window(frames, y, sr, start_ms, end_ms)
+
+    descriptors = [describe(c.start_ms, c.end_ms) for c in result.segments]
+    manual = [(seg_id, start_ms, end_ms, describe(start_ms, end_ms)) for seg_id, start_ms, end_ms in manual_rows]
     return SegmentWork(result, descriptors, int(round(y.size / sr * 1000.0)), manual)
 
 
@@ -710,9 +769,10 @@ def segment_pending(
         if progress_every and summary.samples_segmented % progress_every == 0:
             elapsed = time.perf_counter() - started
             log.info(
-                "segmented %d/%d (%.2f s/sample, %d segments)",
+                "segmented %d/%d (%.2f s/sample, %d segments, %s)",
                 summary.samples_segmented, total,
                 elapsed / summary.samples_segmented, summary.segments_created,
+                eta_text(elapsed, summary.samples_segmented, total),
             )
 
     def stop_now() -> bool:

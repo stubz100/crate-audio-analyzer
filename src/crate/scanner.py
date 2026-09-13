@@ -33,6 +33,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,14 +41,53 @@ import soundfile as sf
 
 from .db import now_iso
 from .library import register_scan
+from .progress import eta_text
 
 log = logging.getLogger(__name__)
 
 SUPPORTED_EXTS = {".wav", ".flac"}
+APPLEDOUBLE_KEY = "._ (AppleDouble)"   # how the summary counts macOS resource-fork files (Phase 12)
 RX2_EXT = ".rx2"
 _HASH_CHUNK_BYTES = 1024 * 1024
 _COMMIT_BATCH = 5000  # a crash mid-scan loses at most one batch, not the run
 _ERROR_SAMPLES = 5    # per-issue examples surfaced in the summary
+# The read phase (Phase 12, 2026-09-13): header reads and hashes are I/O that
+# releases the GIL (libsndfile through cffi, `f.read` in C), so a few threads
+# overlap the seeks a first scan of 109k files is made of. Not a process pool:
+# the work is waiting on the disk, not the CPU.
+READ_THREADS = max(1, min(8, os.cpu_count() or 1))
+READ_PROGRESS_EVERY = 5000
+
+
+@dataclass
+class _Pending:
+    """A new or changed file the walk found: read in the second phase."""
+
+    path: str
+    name: str
+    folder: str
+    size: int
+    mtime: float
+    old: sqlite3.Row | None     # the known row for a changed file; None for a new one
+
+
+def _probe(p: _Pending) -> tuple[_Pending, bool, tuple | None, str | None, OSError | None]:
+    """The disk work for one pending file, off the main thread: the hash for
+    a changed file, and the header unless the content proved identical.
+    Returns (pending, identical, metadata, hash, error); bookkeeping happens
+    on the main thread, in walk order."""
+    try:
+        new_hash = _hash_file(Path(p.path)) if p.old is not None else None
+    except OSError as exc:
+        return p, False, None, None, exc
+    if (
+        p.old is not None
+        and p.old["file_size"] == p.size
+        and p.old["file_hash"] is not None
+        and p.old["file_hash"] == new_hash
+    ):
+        return p, True, None, new_hash, None
+    return p, False, _read_metadata(Path(p.path)), new_hash, None
 
 
 @dataclass
@@ -137,13 +177,13 @@ def _read_metadata(path: Path) -> tuple[float, int, int] | None:
         return None
 
 
-def _metadata_or_null(path: Path, summary: ScanSummary) -> tuple:
-    """`_read_metadata` + unreadable bookkeeping — shared by both branches,
-    so first-scan and re-scan can never silently diverge (2026-09-06)."""
-    meta = _read_metadata(path)
+def _metadata_or_null(meta: tuple | None, path_str: str, summary: ScanSummary) -> tuple:
+    """The unreadable bookkeeping for one header read — shared by the new-file
+    and changed-file branches, so first-scan and re-scan can never silently
+    diverge (2026-09-06). The read itself happened in `_probe`."""
     if meta is None:
         summary.unreadable += 1
-        _sample_error(summary, f"unreadable header: {path}")
+        _sample_error(summary, f"unreadable header: {path_str}")
         return (None, None, None)
     return meta
 
@@ -335,13 +375,30 @@ def scan_library(
         if subtree:
             failed_dirs.append(os.path.join(path_str, ""))
 
+    def _stopped() -> ScanSummary:
+        summary.stopped = True
+        summary.elapsed_s = time.perf_counter() - started
+        log.info("scan stopped by request: nothing written")
+        return summary
+
+    # --- 1. the walk (Phase 12: nothing is read here; the disk work comes
+    # after, in threads, with progress — a first scan of 109k files gave ten
+    # silent minutes when every header was read inline) ---
+    log.info("scanning %s: walking the folders…", root)
+    pending: list[_Pending] = []
     for entry, rel_folder in _walk_files(root, _on_walk_error):
         if should_stop is not None and should_stop():
-            summary.stopped = True
-            summary.elapsed_s = time.perf_counter() - started
-            log.info("scan stopped by request: nothing written")
-            return summary
+            return _stopped()
         name = entry.name
+        if name.startswith("._"):
+            # AppleDouble resource forks (Phase 12, 2026-09-13): macOS leaves a
+            # `._name.wav` beside every file it copies to a non-HFS volume — a
+            # few KB of metadata under the audio extension, never audio. 189
+            # of the user's 360 unreadable-header rows were these. Skipped
+            # like any unsupported file; an existing row vanishes at the next
+            # rescan like any file that is no longer seen.
+            summary.skipped_other[APPLEDOUBLE_KEY] = summary.skipped_other.get(APPLEDOUBLE_KEY, 0) + 1
+            continue
         ext = os.path.splitext(name)[1].lower()
         if ext not in SUPPORTED_EXTS:
             if ext == RX2_EXT:
@@ -360,48 +417,44 @@ def scan_library(
 
         seen.add(path_str)
         old = known.get(path_str)
-        if old is None:
-            meta = _metadata_or_null(Path(path_str), summary)
-            inserts.append(
-                (
-                    path_str, name, rel_folder,
-                    meta[0], meta[1], meta[2],
-                    now, now, now, st.st_size, st.st_mtime,
-                )
-            )
-            summary.added += 1
-        elif old["file_size"] == st.st_size and old["file_mtime"] == st.st_mtime:
+        if old is not None and old["file_size"] == st.st_size and old["file_mtime"] == st.st_mtime:
             touches.append((now, rel_folder, path_str))
             summary.unchanged += 1
         else:
-            try:
-                new_hash = _hash_file(Path(path_str))
-            except OSError as exc:
-                _on_walk_error(path_str, exc, subtree=False)
-                continue  # already in `seen`: row kept as-is
-            size_same = old["file_size"] == st.st_size
-            if (
-                size_same
-                and old["file_hash"] is not None
-                and old["file_hash"] == new_hash
-            ):
+            pending.append(_Pending(path_str, name, rel_folder, st.st_size, st.st_mtime, old))
+    new_count = sum(1 for p in pending if p.old is None)
+    log.info(
+        "walk: %d audio files seen — %d unchanged; reading %d new and hashing %d changed on %d threads",
+        len(seen), summary.unchanged, new_count, len(pending) - new_count, READ_THREADS,
+    )
+
+    # --- 2. the reads: headers for new files, hash (+ header) for changed ones ---
+    read_started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=READ_THREADS) as pool:
+        for done, (p, identical, meta, new_hash, error) in enumerate(pool.map(_probe, pending), start=1):
+            if should_stop is not None and should_stop():
+                pool.shutdown(cancel_futures=True)
+                return _stopped()
+            if error is not None:
+                _on_walk_error(p.path, error, subtree=False)   # already in `seen`: row kept as-is
+            elif p.old is None:
+                meta = _metadata_or_null(meta, p.path, summary)
+                inserts.append((p.path, p.name, p.folder, meta[0], meta[1], meta[2], now, now, now, p.size, p.mtime))
+                summary.added += 1
+            elif identical:
                 # Content identical despite mtime change (backup restore, NAS
                 # re-sync, touch): refresh the change key but don't mark
                 # changed — later phases must not re-analyze identical bytes.
-                retouches.append(
-                    (now, rel_folder, st.st_size, st.st_mtime, path_str)
-                )
+                retouches.append((now, p.folder, p.size, p.mtime, p.path))
                 summary.unchanged += 1
             else:
-                meta = _metadata_or_null(Path(path_str), summary)
-                updates.append(
-                    (
-                        name, rel_folder,
-                        meta[0], meta[1], meta[2],
-                        now, now, st.st_size, st.st_mtime, new_hash, path_str,
-                    )
-                )
+                meta = _metadata_or_null(meta, p.path, summary)
+                updates.append((p.name, p.folder, meta[0], meta[1], meta[2], now, now, p.size, p.mtime, new_hash, p.path))
                 summary.changed += 1
+            if done % READ_PROGRESS_EVERY == 0:
+                elapsed = time.perf_counter() - read_started
+                log.info("read %d/%d (%.0f files/s, %s)", done, len(pending), done / max(elapsed, 1e-9),
+                         eta_text(elapsed, done, len(pending)))
 
     def _executemany(sql: str, rows: list[tuple]) -> None:
         """Chunked executemany: a crash mid-scan loses at most one batch,

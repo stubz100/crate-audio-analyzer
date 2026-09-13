@@ -86,6 +86,7 @@ from .library import (
     set_root,
 )
 from .scanner import scan_library
+from .render import cache_state, clear_cache, default_cache_dir
 from .theme import SqueezableWidget
 from .segmentation import (
     BOUNDARY_MODES,
@@ -104,6 +105,7 @@ SETTINGS_KEY_LIBRARY_PATH = "library/root_path"   # pre-2026-09-08 settings: a s
 # 16 slower than 8 (process start-up and per-file hand-off outweigh the work).
 DEFAULT_WORKERS = max(1, min(8, (os.cpu_count() or 2) // 2))
 _KEY = "recompute/"
+DEFAULT_RENDER_CACHE_MB = 1024      # Phase 12: the render cache's size limit
 _COL_ROOT, _COL_SCOPE, _COL_PATH, _COL_FILES = range(4)
 
 EncoderFactory = Callable[[EmbedSettings], Encoder]
@@ -215,11 +217,13 @@ class RecomputePanel(QWidget):
         settings: QSettings,
         encoder_factory: EncoderFactory | None = None,
         captioner_factory: CaptionerFactory | None = None,
+        cache_dir: Path | str | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._db_path = Path(db_path)
         self._settings = settings
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else default_cache_dir()
         self._encoder_factory = encoder_factory
         self._captioner_factory = captioner_factory
         self._captioner_instance: Captioner | None = None   # loaded once, kept: 16 GB memory-mapped
@@ -291,6 +295,34 @@ class RecomputePanel(QWidget):
         library_layout.addWidget(library_hint)
         library_layout.addWidget(self._folders)
         library_layout.addLayout(folder_buttons)
+
+        # --- the render cache (Phase 12, 2026-09-13): what it holds, its limit, Clear ---
+        self._cache_readout = QLabel()
+        self._cache_readout.setObjectName("caption")
+        self._cache_limit = QSpinBox()
+        self._cache_limit.setRange(0, 1_000_000)
+        self._cache_limit.setSuffix(" MB")
+        self._cache_limit.setValue(v(_KEY + "render_cache_mb", DEFAULT_RENDER_CACHE_MB, type=int))
+        self._cache_limit.setToolTip(
+            "Rendered segments on disk are kept under this size: a new render evicts the least "
+            "recently previewed or dragged ones (§6.5). Renders the index no longer points at go first."
+        )
+        self._cache_limit.valueChanged.connect(
+            lambda mb: self._settings.setValue(_KEY + "render_cache_mb", int(mb))
+        )
+        self._cache_clear = QPushButton("Clear")
+        self._cache_clear.setToolTip(
+            "Delete every rendered segment; each is rendered again on its next preview or drag."
+        )
+        self._cache_clear.clicked.connect(self.clear_render_cache)
+        cache_row = QHBoxLayout()
+        cache_row.addWidget(QLabel("Render cache:"))
+        cache_row.addWidget(self._cache_readout, stretch=1)
+        cache_row.addWidget(QLabel("limit"))
+        cache_row.addWidget(self._cache_limit)
+        cache_row.addWidget(self._cache_clear)
+        library_layout.addLayout(cache_row)
+        self.refresh_cache_readout()
 
         # --- Recompute: three steps, one Run ---
         self._step_attributes = QCheckBox("Attributes")
@@ -537,6 +569,22 @@ class RecomputePanel(QWidget):
     def note(self, text: str) -> None:
         """A line in the log from outside a job (the window's notes)."""
         self._append_log(text)
+
+    # --- the render cache (Phase 12) ---
+
+    def render_cache_limit_bytes(self) -> int:
+        """The Library panel's limit, for `render_segment`'s eviction."""
+        return int(self._cache_limit.value()) * 1_000_000
+
+    def refresh_cache_readout(self) -> None:
+        self._cache_readout.setText(cache_state(self._conn, self._cache_dir).format())
+
+    def clear_render_cache(self) -> None:
+        summary = clear_cache(self._conn, self._cache_dir)
+        self._append_log(
+            f"render cache cleared: {summary.removed} files, {summary.bytes_freed / 1e6:.0f} MB"
+        )
+        self.refresh_cache_readout()
 
     def confidence_threshold(self) -> float:
         """Node E's flag threshold as set on the tab — a class reset (Phase 11)

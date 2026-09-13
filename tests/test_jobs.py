@@ -115,8 +115,11 @@ def test_stop_ends_the_stage_and_skips_the_rest(library):
     )
 
     assert report.stopped and report.analysis.stopped and report.analysis.analyzed == 1
-    assert report.segmentation is None and report.embedding is None
-    assert "[segmentation] not run" in report.format()
+    # Analysis and segmentation are one pass per file (Phase 12): the stop
+    # ends that pass after its first file, and the embedding never runs.
+    assert report.segmentation.stopped
+    assert report.segmentation.samples_segmented + report.segmentation.one_shots_skipped == 1
+    assert report.embedding is None and "[embedding] not run" in report.format()
     assert _count(conn, "SELECT COUNT(*) FROM analysis") == 1   # committed work kept
 
 

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import time
+
 import numpy as np
 import pytest
 import soundfile as sf
 
 from crate.analysis import analyze_pending
 from crate.db import open_db
-from crate.render import FADE_OUT_MS, preview_source, render_segment
+from crate.render import FADE_OUT_MS, cache_state, clear_cache, evict_cache, preview_source, render_segment
 from crate.scanner import scan_library
 from crate.segmentation import create_manual_segment, update_segment
 
@@ -51,19 +54,76 @@ def test_render_slices_at_native_rate_keeps_channels_and_fades(parent):
     assert row[0] == str(out) and row[1] is not None
 
 
+def _rendered_at(conn, seg):
+    return conn.execute("SELECT cache_rendered_at FROM segments WHERE id = ?", (seg,)).fetchone()[0]
+
+
 def test_render_is_cached_and_force_rerenders(parent):
     conn, sid, cache = parent
     seg = create_manual_segment(conn, sid, 100, 300)
     first = render_segment(conn, seg, cache)
-    stamp = first.stat().st_mtime_ns
+    stamp, size = _rendered_at(conn, seg), first.stat().st_size
 
     assert render_segment(conn, seg, cache) == first
-    assert first.stat().st_mtime_ns == stamp               # not rewritten
+    # A hit is not rewritten — the render stamp and the bytes stand. (Its mtime
+    # *is* touched: that is how eviction knows it was used, Phase 12.)
+    assert _rendered_at(conn, seg) == stamp and first.stat().st_size == size
 
     import time
     time.sleep(0.01)
     render_segment(conn, seg, cache, force=True)
-    assert first.stat().st_mtime_ns != stamp
+    assert _rendered_at(conn, seg) != stamp
+
+
+# --- eviction (Phase 12, 2026-09-13) ---
+
+
+def test_eviction_drops_the_least_recently_used_and_a_hit_counts_as_use(parent):
+    conn, sid, cache = parent
+    a, b, c = (create_manual_segment(conn, sid, s, s + 200) for s in (100, 400, 700))
+    pa, pb, pc = (render_segment(conn, seg, cache) for seg in (a, b, c))
+    now = time.time()
+    for path, age in ((pa, 30), (pb, 20), (pc, 10)):
+        os.utime(path, (now - age, now - age))
+    render_segment(conn, a, cache)                          # a hit: a is the most recent now
+    assert pa.stat().st_mtime > pb.stat().st_mtime
+
+    one = pa.stat().st_size
+    summary = evict_cache(conn, cache, max_bytes=2 * one + 1)
+    assert (summary.removed, summary.orphans, summary.bytes_freed) == (1, 0, pb.stat().st_size if pb.exists() else one)
+    assert pa.exists() and pc.exists() and not pb.exists()
+    assert conn.execute("SELECT cache_path FROM segments WHERE id = ?", (b,)).fetchone()[0] is None
+    assert conn.execute("SELECT cache_path FROM segments WHERE id = ?", (a,)).fetchone()[0] == str(pa)
+
+
+def test_orphans_go_first_and_clear_empties_the_cache(parent):
+    conn, sid, cache = parent
+    a, b = (create_manual_segment(conn, sid, s, s + 200) for s in (100, 400))
+    pa, pb = (render_segment(conn, seg, cache) for seg in (a, b))
+    conn.execute("UPDATE segments SET cache_path = NULL WHERE id = ?", (a,))    # the index forgot it
+    conn.commit()
+    state = cache_state(conn, cache)
+    assert (state.files, state.orphans) == (2, 1) and "1 no longer referenced" in state.format()
+
+    summary = evict_cache(conn, cache, max_bytes=None)     # no limit: orphans only
+    assert (summary.removed, summary.orphans) == (1, 1)
+    assert not pa.exists() and pb.exists()
+
+    summary = clear_cache(conn, cache)
+    assert summary.removed == 1 and not pb.exists()
+    assert cache_state(conn, cache).files == 0
+    assert conn.execute("SELECT cache_path FROM segments WHERE id = ?", (b,)).fetchone()[0] is None
+
+
+def test_a_render_under_a_limit_evicts_after_writing(parent):
+    conn, sid, cache = parent
+    a, b = (create_manual_segment(conn, sid, s, s + 200) for s in (100, 400))
+    pa = render_segment(conn, a, cache, max_bytes=10_000_000)
+    time.sleep(0.02)
+    pb = render_segment(conn, b, cache, max_bytes=pa.stat().st_size + 1)   # room for one
+    assert pb.exists() and not pa.exists()
+    assert conn.execute("SELECT cache_path FROM segments WHERE id = ?", (a,)).fetchone()[0] is None
+    assert cache_state(conn, cache).files == 1
 
 
 def test_editing_a_segment_forces_a_fresh_render(parent):
