@@ -1476,7 +1476,7 @@ Named here rather than left implied: the caption row still spends a whole row on
 
 ## 2026-09-12 — Review of the design-system track: eight corrections
 
-**Phase:** design system, review · uncommitted at the time of writing
+**Phase:** design system, review · `98a9b93`
 
 The user: a code review of the finished UI implementation (the five design-system commits, `a85451e` → `ba2db04`); then "make sure the points you mentioned are corrected".
 
@@ -1512,6 +1512,5 @@ Eight points, two of them real visual defects. Each was verified before it was r
 
 **Next**
 
-- Commit (the user's call), and cite the hash here.
 - The five UI items still open from the previous entry, unchanged.
 - Unchanged on the roadmap: Phase 10 (Bitwig: reveal in Explorer, crate export); captions as a search channel; Phase 11's corrections.
