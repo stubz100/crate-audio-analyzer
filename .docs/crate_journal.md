@@ -1517,7 +1517,7 @@ Eight points, two of them real visual defects. Each was verified before it was r
 
 ## 2026-09-13 — Phase 11, pulled ahead: the correction workflow
 
-**Phase:** 11 — Correction Workflow · uncommitted at the time of writing
+**Phase:** 11 — Correction Workflow · `6607a55`
 
 The user: "I want to pull phase 11 ahead, can you start with that?" — ahead of Phase 10 (Bitwig: reveal in Explorer, crate export), which stays next.
 
@@ -1545,7 +1545,6 @@ The user: "I want to pull phase 11 ahead, can you start with that?" — ahead of
 - **The two legacy protection tests now write through `corrections.py`** rather than setting the old flag by hand: the facet flag is the path, and the migration covers old rows.
 - A tag no sample carries any more is forgotten, so the box's completions are what the library actually carries.
 - The header's tag bars are untouched: promoting lives on the panel's Suggested row. `text_tags.is_user_confirmed` stays unused — promotion is a row in `sample_tags`, and the machine layer stays disposable.
-- Not committed by me: the user asked to start the phase; the working tree holds it.
 
 **Verified**
 
