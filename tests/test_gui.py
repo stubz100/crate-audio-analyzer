@@ -581,7 +581,7 @@ def test_closing_the_window_mid_job_waits_for_the_job(app, tmp_path):
         time.sleep(0.2)                                   # "the current file" after the stop
         return Done()
 
-    panel._start("slow job", slow_job)
+    panel.start_job("slow job", slow_job)
     assert panel.running
 
     assert not window.close() and window.isVisible()      # refused: the job is still running
@@ -1290,5 +1290,40 @@ def test_an_unreadable_file_shows_as_such_and_the_render_cache_has_a_readout(app
         panel.clear_render_cache()
         assert not rendered.exists() and panel._cache_readout.text().startswith("0 files")
         assert conn.execute("SELECT cache_path FROM segments WHERE id = ?", (seg.id,)).fetchone()[0] is None
+    finally:
+        window.close()
+
+
+def test_a_recompute_runs_in_the_background_with_a_small_job_between_its_files(app, index, tmp_path):
+    """Phase 12's job queue through the window: Run starts a batch that
+    follows the list's order and reports progress to the status bar; a small
+    job queued meanwhile is not refused and finishes before the batch does;
+    every job's end reloads the list."""
+    from crate.main import MainWindow
+
+    db, conn, cache = index
+    window = MainWindow(db_path=db, cache_dir=cache, settings=_ini(tmp_path), encoder_factory=_encoder)
+    try:
+        window._autoplay.setChecked(False)
+        jobs = window._recompute
+        jobs._force_full.setChecked(True)                          # everything again: three files
+        jobs._workers.setValue(1)                                  # no pool spawn in a test
+        orders: list[list[int]] = []
+        real_order = window._list_order
+        jobs.set_order_provider(lambda: orders.append(real_order()) or orders[-1])
+        assert jobs.run_attributes()
+        assert jobs.batch_running and orders and len(orders[0]) == 2   # the list's order was taken
+
+        class _Touch:
+            def format(self) -> str:
+                return "touched"
+
+        assert jobs.start_job("touch", lambda conn_, _stop: _Touch())   # never refused
+        _wait_until(app, lambda: not jobs.running)
+        log = jobs.log_text()
+        assert "touched" in log and "— recompute attributes —" in log
+        assert log.index("touched") < log.index("[embedding]"), "the small job ran before the batch's summary"
+        assert not window._progress_bar.isVisible() and not jobs.batch_running
+        assert conn.execute("SELECT COUNT(*) FROM analysis").fetchone()[0] == 2
     finally:
         window.close()

@@ -266,29 +266,59 @@ class SampleTreeModel(QAbstractItemModel):
         self.changePersistentIndexList(persistent, moved)
         self.layoutChanged.emit()
 
-    def _rebuild_children(self) -> None:
-        """The child rows: every segment, plus the CLAP windows that carry a
-        score — by score, best first, unscored ones after in time order; in
-        time order when nothing is scored."""
+    def _shown_children(self, sample_id: int) -> list[Section]:
+        """One sample's child rows in their order: every segment, plus the
+        CLAP windows that carry a score — by score, best first, unscored
+        ones after in time order; in time order when nothing is scored."""
         scores = self._match if self._match is not None else self._similarity
+        shown = []
+        for section in self._sections.get(sample_id, ()):
+            score = None if scores is None else scores.segment.get(section.segment_id)
+            if section.window and score is None:
+                continue
+            shown.append((-(score if score is not None else -1.0), section.start_ms, section))
+        shown.sort(key=lambda t: (t[0], t[1]))
+        return [s for _, _, s in shown]
+
+    def _rebuild_children(self) -> None:
         self._children = {}
         self._parent_of = {}
         for r in self._rows:
-            sections = self._sections.get(r.id)
-            if not sections:
-                continue
-            shown = []
-            for section in sections:
-                score = None if scores is None else scores.segment.get(section.segment_id)
-                if section.window and score is None:
-                    continue
-                shown.append((-(score if score is not None else -1.0), section.start_ms, section))
+            shown = self._shown_children(r.id)
             if not shown:
                 continue
-            shown.sort(key=lambda t: (t[0], t[1]))
-            self._children[r.id] = [s for _, _, s in shown]
-            for section in self._children[r.id]:
+            self._children[r.id] = shown
+            for section in shown:
                 self._parent_of[section.segment_id] = r.id
+
+    def update_sample(self, row: SampleRow, sections: list[Section]) -> None:
+        """One sample's row *and* its child rows replaced in place — what a
+        running job just finished (Phase 12: the list fills in while the
+        recompute goes on). No reset: the selection, the other samples'
+        expansion and the scroll position stay."""
+        i = self._row_index.get(row.id)
+        if i is None:
+            return
+        self._rows[i] = row
+        parent = self.index(i, 0)
+        old = self._children.pop(row.id, [])
+        if old:
+            self.beginRemoveRows(parent, 0, len(old) - 1)
+            for section in old:
+                self._parent_of.pop(section.segment_id, None)
+            self.endRemoveRows()
+        if sections:
+            self._sections[row.id] = list(sections)
+        else:
+            self._sections.pop(row.id, None)
+        shown = self._shown_children(row.id)
+        if shown:
+            self.beginInsertRows(parent, 0, len(shown) - 1)
+            self._children[row.id] = shown
+            for section in shown:
+                self._parent_of[section.segment_id] = row.id
+            self.endInsertRows()
+        self.dataChanged.emit(self.index(i, 0), self.index(i, len(self.COLUMNS) - 1))
 
     def row_of(self, sample_id: int) -> int | None:
         """The sample's row in this model as it is ordered now."""

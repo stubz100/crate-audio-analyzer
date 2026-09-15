@@ -1637,3 +1637,33 @@ The user, after recomputing the whole library: the window "locks up instantly fo
 - The user's full recompute with the new pass — the scan's phases and every ETA are the first thing to look at; samples first with *Embed segments* off is the recommended first embedding pass.
 - The CLAP quantisation spike (recommendation 5), if wanted; Phase 10 (Bitwig: reveal in Explorer, crate export) otherwise.
 - Unchanged: captions as a search channel; the design-system and Phase 11 follow-ups.
+
+## 2026-09-13 — Phase 12, third round: the job queue — recompute in the background, the window in use
+
+**Phase:** 12 — Scale & Polish Hardening · uncommitted at the time of writing
+
+The user: make the recompute a background job with progress feedback; once the scan is done the files should be in the list; the recompute should start from the top of the list and skip what is done; normal use of the application in the meantime; "a job queue where recompute tasks and user tasks mix". Then, on reading "as a separate OS process" in the steer: a clarifying exchange — that was the alternative weighed against, not the recommendation — and a follow-up question on whether another database would make multi-process recompute worthwhile. Answered in the session and recorded in spec §9.6: the database is not where the parallelism is lost (the DSP already runs in worker processes; the DB is milliseconds a file; CLAP saturates the cores in one process), no backend would speed the recompute, and a detached recompute process is feasible with SQLite as it is — a `crate-recompute` entry, a `jobs` table for progress and Stop, the window polling `analyzed_at` / `embedded_at` for its live rows — at the cost of the priority interleaving and the simplicity of signals; kept as the contained next step if the window stutters under a real run.
+
+**Done**
+
+- **`jobqueue.py`** — `JobWorker`: one `QThread`, one connection, a priority queue. A **batch** job `(conn, stop, hooks)` calls `hooks.after_file(stage, sample_id, done, total)` after each committed file; there the worker runs every waiting **interactive** job `(conn, stop)` on the same thread and connection, reports progress (throttled to 0.5 s, always at the end) and hands the finished ids on (every 2 s or 500 ids). Signals: `started_job`, `succeeded`, `failed`, `finished_job(name, completed, batch)`, `progress`, `rows_done`. Stop is consumed by the job in flight — running or still queued — and cleared when it ends; a job inside a batch's hook leaves the batch's stop standing. `shutdown` stops the batch, drops the queue and joins.
+- **The stages take the hook and the order**: `describe_pending`, `embed_pending`, `caption_pending` (`after_file`), `scan_library` (`on_progress`); `RecomputeSettings.order`; `recompute_attributes(after_file=)`. A worklist sorts by the list's order, ids not in it last.
+- **`RecomputePanel`** on the worker: `start_job` (interactive, never refused) and `start_batch` (one at a time); `run_attributes` a batch taking the order from `set_order_provider`, and an interactive job for *anchor only*; rescan, add-folder scan, captions, the library layout and folder removal are batches; *Caption this sample* interactive. `running` and `batch_running` are counted on the GUI thread — up when queued, down when the finish signal arrives — so a caller waiting on `running` sees the log and the reload already done. `job_ended` fires for batches only, so the window's plan chain is not advanced by an interleaved save. Removing a folder still waits for a quiet queue.
+- **The window**: `_list_order` (the proxy's rows top to bottom), a progress line and bar added to the status bar while a batch reports and removed after, `_refresh_rows` → `SampleTreeModel.update_sample(row, sections)` — the row and its child rows replaced in place, selection and expansion kept; `catalog.load_samples` / `load_sections` take `sample_ids`. The "a job is running" refusals on segment save and delete are gone.
+- Spec §9.6: the queue, and the separate-process alternative weighed.
+
+**Decided**
+
+- **In-process, not a separate OS process** — for now. The queue gives priority between files, no channel to build, and one model instance for the tab. The honest case for a process — crash isolation of torch, memory returned on exit, running without the window, no interpreter contention — stands, and the batch job's shape (one function with a per-file hook) makes the move contained. Corrected in the session: SQLite's locking is file-based, so the window's and the worker's connections are already two writers in its eyes; and a detached recompute would not add a model copy, the tab's would move out with it.
+- **A hidden permanent widget still sets the status bar's height** (27 px against a 22 px hint, measured): the progress widgets are added to the bar only while a batch reports. Found by the pane-position test, which failed only after the design tests had themed the shared application.
+- **`running` is a GUI-side count**, not the worker's state: the worker goes idle a queued signal before the log line and the reload land, and a test reading the log on `not running` saw it too early.
+
+**Verified**
+
+- `uv run pytest tests -q` → **286 passed, 3 skipped** (281 before); pyflakes clean. New: `tests/test_jobqueue.py` (an interactive job runs between a batch's files, not after — with the finished ids and the progress arriving; an interactive job runs ahead of a waiting batch; Stop ends the batch after its file with `completed` False; a failing job is reported and the worker goes on) and a window test (Run starts a batch that takes the list's order and reports to the status bar, a small job queued meanwhile is not refused and finishes before the batch's summary, every job's end reloads). The close-mid-job test moved to the public `start_job`.
+- Offscreen: the status bar reading "describe 21 / 40 · ETA 2 s" with the bar beside it during a synthetic batch, both gone after; the status bar 22 px idle and the panes' saved sizes restored exactly.
+
+**Next**
+
+- The user's full recompute of the library on the queue: the window's responsiveness under it is the one thing not measured here; if it stutters, the separate-process path in spec §9.6.
+- The CLAP quantisation spike; Phase 10 (Bitwig: reveal in Explorer, crate export).

@@ -616,8 +616,13 @@ def embed_pending(
     scope: Sequence[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
     sample_ids: Sequence[int] | None = None,
+    order: Sequence[int] | None = None,
+    after_file: Callable[[str, int | None, int, int], None] | None = None,
 ) -> EmbedSummary:
     """Nodes D, C2, X, E over samples that need them.
+
+    `order` / `after_file` as in `describe.describe_pending` (Phase 12: the
+    list's order, and the job queue's hook after each committed file).
 
     A sample needs a visit when it has been analysed (Phase 2 — node E's
     tie-break reads `harmonic_ratio`) and either its own vector is missing or
@@ -673,6 +678,9 @@ def embed_pending(
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     worklist = conn.execute(sql, params).fetchall()
+    if order:
+        rank = {int(sid): i for i, sid in enumerate(order)}
+        worklist.sort(key=lambda row: rank.get(int(row[0]), len(rank)))
     total = len(worklist)
     # The opening line says what the run is made of (Phase 12): every clip —
     # a whole file or a segment — is one fixed-cost 10-s CLAP pass, so the
@@ -734,6 +742,8 @@ def embed_pending(
         visited += 1
         if embed_parent:
             summary.samples_embedded += 1
+        if after_file is not None:
+            after_file("embed", int(sample_id), visited, total)
         if progress_every and visited % progress_every == 0:
             elapsed = time.perf_counter() - started
             clips = summary.samples_embedded + summary.segments_embedded + summary.windows_stored

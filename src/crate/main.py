@@ -26,8 +26,10 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QHBoxLayout,
+    QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QSplitter,
     QStackedWidget,
     QTabBar,
@@ -432,6 +434,12 @@ class MainWindow(QMainWindow):
         self._recompute.index_changed.connect(self.reload)
         self._recompute.index_changed.connect(self._close_if_pending)
         self._recompute.index_changed.connect(self._show_correction)    # after the reload: a job may have re-typed the sample
+        # The job queue (Phase 12): a recompute takes the list's order, reports
+        # its progress to the status bar, and hands back the rows it finished
+        # so they fill in while it runs.
+        self._recompute.set_order_provider(self._list_order)
+        self._recompute.progress.connect(self._on_job_progress)
+        self._recompute.rows_done.connect(self._refresh_rows)
         self._recompute.scope_changed.connect(self.reload)
         self._recompute.run_requested.connect(self._run_plan)
         self._recompute.job_ended.connect(self._advance_plan)
@@ -465,6 +473,18 @@ class MainWindow(QMainWindow):
         header_layout.addLayout(bars_column, stretch=1)
         header_widget.setFixedHeight(112)            # room for the bars
         self._header_widget = header_widget
+
+        # The job queue's progress (Phase 12): a line and a bar at the right
+        # of the status bar while a batch runs. Added to the bar only then and
+        # removed after: a hidden permanent widget still sets the status bar's
+        # height (27 px against its 22 px hint, measured), which moved the
+        # panes' restored sizes by the difference.
+        self._progress_label = QLabel()
+        self._progress_label.setObjectName("caption")
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setFixedWidth(180)
+        self._progress_bar.setTextVisible(False)
+        self._progress_shown = False
 
         # --- the window (2026-09-08, the user's steer): the right half is the list
         # or the map, top to bottom; the left half stacks the header (view switch,
@@ -910,10 +930,8 @@ class MainWindow(QMainWindow):
                 "exempt from the automatic rules and never overwritten (§6.3)"
             )
 
-        if self._recompute.start_job(f"save {len(staged)} segment(s) of {name}", job):
-            self._waveform.discard()                    # written by the job; the reload shows them
-        else:
-            self.statusBar().showMessage("a job is running: the markers stay unsaved until it ends")
+        self._recompute.start_job(f"save {len(staged)} segment(s) of {name}", job)
+        self._waveform.discard()                        # written by the job; the reload shows them
 
     def _delete_segment(self, segment_id: int) -> None:
         """*Delete segment*: automatic or manual, deliberately — asked first.
@@ -925,11 +943,10 @@ class MainWindow(QMainWindow):
             "a recompute does not bring a manual segment back."
         ):
             return
-        if not self._recompute.start_job(
+        self._recompute.start_job(
             f"delete {label}",
             lambda conn, _stop: _Outcome("deleted" if delete_segment(conn, segment_id) else "already gone"),
-        ):
-            self.statusBar().showMessage("a job is running: try again when it ends")
+        )
 
     def _confirm(self, question: str) -> bool:
         answer = QMessageBox.question(
@@ -1279,6 +1296,50 @@ class MainWindow(QMainWindow):
         self._select_sample(sample_id)
         self._play_current()
 
+    # --- the job queue's side of the window (Phase 12) ---
+
+    def _list_order(self) -> list[int]:
+        """The samples in the list's current order, top to bottom — what a
+        recompute visits first. Filtered-out rows are not in it and come last."""
+        order: list[int] = []
+        for r in range(self._proxy.rowCount()):
+            row = self._samples.row_at(self._proxy.mapToSource(self._proxy.index(r, 0)))
+            if row is not None:
+                order.append(row.id)
+        return order
+
+    def _on_job_progress(self, stage: str, done: int, total: int, eta: str) -> None:
+        """The status bar's progress bar while a batch runs."""
+        finished = total <= 0 or done >= total
+        if finished:
+            if self._progress_shown:
+                self.statusBar().removeWidget(self._progress_label)
+                self.statusBar().removeWidget(self._progress_bar)
+                self._progress_shown = False
+            return
+        if not self._progress_shown:
+            self.statusBar().addPermanentWidget(self._progress_label)
+            self.statusBar().addPermanentWidget(self._progress_bar)
+            self._progress_label.show()
+            self._progress_bar.show()
+            self._progress_shown = True
+        self._progress_bar.setRange(0, total)
+        self._progress_bar.setValue(min(done, total))
+        self._progress_label.setText(f"{stage} {done:,} / {total:,}" + (f" · {eta}" if eta else ""))
+
+    def _refresh_rows(self, sample_ids: list) -> None:
+        """Rows a running batch just finished, refreshed in place — the list
+        fills in while the recompute goes on, without a reload."""
+        ids = [int(i) for i in sample_ids if int(i) in self._rows_by_id]
+        if not ids:
+            return
+        sections = load_sections(self._conn, sample_ids=ids)
+        for row in load_samples(self._conn, sample_ids=ids):
+            self._rows_by_id[row.id] = row
+            self._samples.update_sample(row, sections.get(row.id, []))
+        if self._current_sample in ids:
+            self._show_correction()
+
     def _run_plan(self, plan: RunPlan) -> None:
         """The Recompute tab's Run: its ticked steps in order — Attributes,
         then Map layout — each job's end (`job_ended`) starting the next; a
@@ -1347,13 +1408,12 @@ class MainWindow(QMainWindow):
         settings = LayoutSettings(weights=weights, scope=scope, scope_description=description[:80])
         layout_dir = self._layout_dir
         reducer = self._reducer_factory() if self._reducer_factory is not None else None
-        self._recompute.start_job(
+        return self._recompute.start_batch(
             "recompute map layout",
-            lambda conn, stop: fit_layout(
+            lambda conn, stop, _hooks: fit_layout(
                 conn, settings, layout_dir, reducer=reducer, should_stop=stop
             ),
         )
-        return True
 
     # --- lifecycle ---
 

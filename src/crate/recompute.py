@@ -35,11 +35,11 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, Signal
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -71,6 +71,7 @@ from .analysis import ONE_SHOT_MAX_DURATION_S
 from .config import DEFAULT_LIBRARY_PATH
 from .db import open_db
 from .embedding import ClapEncoder, EmbedSettings, Encoder
+from .jobqueue import BatchJob, JobWorker
 from .jobs import RecomputeSettings, recompute_attributes
 from .qwen_audio import Captioner, QwenAudio, caption_pending
 from .library import (
@@ -147,48 +148,6 @@ class _LogHandler(logging.Handler):
             self.handleError(record)
 
 
-class JobThread(QThread):
-    """Runs `job(conn, should_stop)` on a connection of its own and reports
-    the formatted summary, or the error, back to the GUI thread."""
-
-    succeeded = Signal(str, str)   # job name, formatted summary
-    failed = Signal(str, str)      # job name, error text
-
-    def __init__(self, db_path: Path, name: str, job: Job, parent=None) -> None:
-        super().__init__(parent)
-        self._db_path = db_path
-        self._name = name
-        self._job = job
-        self._stop_requested = False
-        self._failed = False
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def completed(self) -> bool:
-        """Ran to the end: neither failed nor asked to stop."""
-        return not (self._failed or self._stop_requested)
-
-    def request_stop(self) -> None:
-        self._stop_requested = True
-
-    def run(self) -> None:  # worker thread
-        try:
-            conn = open_db(self._db_path)
-            try:
-                result = self._job(conn, lambda: self._stop_requested)
-            finally:
-                conn.close()
-        except Exception as exc:  # noqa: BLE001 - reported to the panel, never lost
-            self._failed = True
-            log.warning("%s failed: %s: %s", self._name, type(exc).__name__, exc)
-            self.failed.emit(self._name, f"{type(exc).__name__}: {exc}")
-            return
-        self.succeeded.emit(self._name, result.format())
-
-
 class _ScanReport:
     """Rescan's summary over several folders, one scanner summary each."""
 
@@ -209,7 +168,9 @@ class RecomputePanel(QWidget):
     index_changed = Signal()
     scope_changed = Signal()
     run_requested = Signal(object)
-    job_ended = Signal(str, bool)
+    job_ended = Signal(str, bool)              # a *batch* job's end: the window's plan chain
+    progress = Signal(str, int, int, str)      # a batch's stage, done, total, ETA (the window's bar)
+    rows_done = Signal(list)                   # sample ids a batch just finished (refreshed in place)
 
     def __init__(
         self,
@@ -229,7 +190,17 @@ class RecomputePanel(QWidget):
         self._captioner_instance: Captioner | None = None   # loaded once, kept: 16 GB memory-mapped
         self._encoder_instance: Encoder | None = None       # CLAP, loaded once, kept (see _encoder)
         self._encoder_key: tuple[str, int] | None = None
-        self._thread: JobThread | None = None
+        # The job queue (Phase 12, `jobqueue.py`): one worker for every job,
+        # made on the first one; interactive jobs run between a batch's files.
+        self._worker: JobWorker | None = None
+        self._batch_name = ""
+        self._order_provider: Callable[[], Sequence[int]] | None = None
+        # Counted on the GUI thread — up when queued, down when the finish
+        # signal arrives — so `running` agrees with what the log and the
+        # reload have already shown, not with a worker that went idle a
+        # queued-signal ago.
+        self._jobs_in_flight = 0
+        self._batches_in_flight = 0
         self._anchor_available = False
         self._refreshing = False
         self._relay = _LogRelay(self)
@@ -528,7 +499,19 @@ class RecomputePanel(QWidget):
 
     @property
     def running(self) -> bool:
-        return self._thread is not None
+        """A job is running or waiting — batch or interactive."""
+        return self._jobs_in_flight > 0
+
+    @property
+    def batch_running(self) -> bool:
+        """A batch job (a recompute, a rescan, a layout, a caption run) is
+        running or waiting; only one at a time."""
+        return self._batches_in_flight > 0
+
+    def set_order_provider(self, provider: Callable[[], Sequence[int]] | None) -> None:
+        """Where a recompute takes its order from: the window's list, top to
+        bottom, as sorted and filtered when Run is pressed (Phase 12)."""
+        self._order_provider = provider
 
     @property
     def library_root(self) -> str | None:
@@ -704,8 +687,8 @@ class RecomputePanel(QWidget):
         if not folder.is_dir():
             self._append_log(f"not a folder: {folder}")
             return False
-        if self.running:
-            self._append_log("a job is already running")
+        if self.batch_running:
+            self._append_log(f"a batch job is already running ({self._batch_name})")
             return False
         text = add_library(self._conn, folder)
         self.refresh_folders()
@@ -713,11 +696,13 @@ class RecomputePanel(QWidget):
         root = self.library_root
         if root is not None and not is_inside(text, root):
             self._append_log(f"note: {text} lies outside the root {root}")
-        self._start(
+        return self.start_batch(
             f"scan {folder.name or text}",
-            lambda conn, stop: scan_library(conn, text, should_stop=stop),
+            lambda conn, stop, hooks: scan_library(
+                conn, text, should_stop=stop,
+                on_progress=lambda done, total: hooks.progress("scan", done, total),
+            ),
         )
-        return True
 
     def remove_folder(self, path: Path | str | None = None, confirm: bool = True) -> bool:
         """Delete a folder's samples from the index and forget it — after
@@ -727,7 +712,9 @@ class RecomputePanel(QWidget):
             self._append_log("select a folder to remove")
             return False
         if self.running:
-            self._append_log("a job is already running")
+            # Removing rows a running job may be writing is the one thing the
+            # queue does not interleave: wait for the quiet.
+            self._append_log("a job is running: remove the folder when it ends")
             return False
         text = str(text)
         count = next((lib.sample_count for lib in list_libraries(self._conn) if lib.path == text), 0)
@@ -742,7 +729,9 @@ class RecomputePanel(QWidget):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return False
-        self._start(f"remove {Path(text).name or text}", lambda conn, _stop: remove_library(conn, text))
+        self.start_batch(
+            f"remove {Path(text).name or text}", lambda conn, _stop, _hooks: remove_library(conn, text)
+        )
         return True
 
     # --- actions (§9.6) ---
@@ -759,17 +748,19 @@ class RecomputePanel(QWidget):
             self._append_log("folder does not exist: " + ", ".join(missing))
             return False
 
-        def job(conn, stop):
+        def job(conn, stop, hooks):
             report = _ScanReport()
             for folder in folders:
                 if stop():
                     break
-                summary = scan_library(conn, folder, should_stop=stop)
+                summary = scan_library(
+                    conn, folder, should_stop=stop,
+                    on_progress=lambda done, total: hooks.progress("scan", done, total),
+                )
                 report.parts.append(summary.format())
             return report
 
-        self._start("rescan", job)
-        return True
+        return self.start_batch("rescan", job)
 
     def run(self) -> None:
         """Run: hand the ticked steps to the window, which runs them in order."""
@@ -777,8 +768,8 @@ class RecomputePanel(QWidget):
         if plan.empty:
             self._append_log("tick at least one step: Attributes, Map layout or Captions")
             return
-        if self.running:
-            self._append_log("a job is already running")
+        if self.batch_running:
+            self._append_log("a batch job is already running")
             return
         self.save_settings()
         self.run_requested.emit(plan)
@@ -800,13 +791,23 @@ class RecomputePanel(QWidget):
             return False
         self.save_settings()
         encoder = self._encoder(settings.embedding)
-        self._start(
-            "recompute attributes (anchor only)" if settings.sample_ids else "recompute attributes",
-            lambda conn, stop: recompute_attributes(
-                conn, settings, should_stop=stop, encoder=encoder
+        if self._order_provider is not None and not settings.sample_ids:
+            # The list's order, top to bottom (Phase 12): what the user is
+            # looking at is done first; what the filter hides comes last.
+            settings = replace(settings, order=tuple(int(i) for i in self._order_provider()))
+        if settings.sample_ids:
+            # ⚓ anchored only: one file, seconds — an interactive job, so it
+            # runs between a batch's files rather than after the batch.
+            return self.start_job(
+                "recompute attributes (anchor only)",
+                lambda conn, stop: recompute_attributes(conn, settings, should_stop=stop, encoder=encoder),
+            )
+        return self.start_batch(
+            "recompute attributes",
+            lambda conn, stop, hooks: recompute_attributes(
+                conn, settings, should_stop=stop, encoder=encoder, after_file=hooks.after_file
             ),
         )
-        return True
 
     def _encoder(self, settings: EmbedSettings) -> Encoder:
         """The CLAP encoder for a job. A test's factory makes one per run;
@@ -834,73 +835,92 @@ class RecomputePanel(QWidget):
         if not scope:
             self._append_log("nothing in scope: tick a folder (or add one) before captioning")
             return False
-        if self.running:
-            self._append_log("a job is already running")
-            return False
         self.save_settings()
         captioner = self._captioner()
-        self._start(
+        return self.start_batch(
             f"captions ({limit or 'all'} per run)",
-            lambda conn, stop: caption_pending(
-                conn, captioner, limit=limit or None, scope=scope, should_stop=stop
+            lambda conn, stop, hooks: caption_pending(
+                conn, captioner, limit=limit or None, scope=scope, should_stop=stop,
+                after_file=hooks.after_file,
             ),
         )
-        return True
 
     def caption_sample(self, sample_id: int, name: str = "") -> bool:
         """The Attributes tab's *Caption this sample*: one file, written or
-        rewritten, through the same job machinery (log, Stop, reload)."""
-        if self.running:
-            self._append_log("a job is already running")
-            return False
+        rewritten, through the same job machinery (log, reload) — an
+        interactive job, so it runs between a batch's files."""
         captioner = self._captioner()
-        self._start(
+        return self.start_job(
             f"caption {name or sample_id}",
             lambda conn, _stop: caption_pending(conn, captioner, recaption=True, sample_ids=[sample_id]),
         )
-        return True
 
     def stop(self) -> None:
-        if self._thread is None:
+        """Stop the running job: a batch after its current file; an
+        interactive one wherever it polls the flag."""
+        if self._worker is None or not self.running:
             return
-        self._thread.request_stop()
+        self._worker.request_stop()
         self._stop_button.setEnabled(False)
         self._append_log("stop requested: finishing the current file; later steps are dropped")
 
     def shutdown(self) -> None:
         """Last resort for a caller tearing the panel down while a job runs:
-        ask it to stop and wait — unbounded, because the stop lands after the
-        current file and a thread destroyed mid-run takes the process down.
-        The window itself defers its close instead (`MainWindow.closeEvent`)."""
-        thread = self._thread
-        if thread is not None:
-            thread.request_stop()
-            thread.wait()
+        stop the batch, drop the queue and wait — bounded by the current
+        file, because a thread destroyed mid-run takes the process down. The
+        window itself defers its close instead (`MainWindow.closeEvent`)."""
+        if self._worker is not None:
+            self._worker.shutdown()
             logging.getLogger("crate").removeHandler(self._handler)
+            self._worker = None
         self._conn.close()
 
     def start_job(self, name: str, job: Job) -> bool:
-        """Run `job(conn, should_stop)` on the worker — the window's map-layout
-        step and its segment saves come through here so every job shares the
-        log, Stop and reload. False if one is already running."""
-        return self._start(name, job)
+        """Queue an interactive job — `job(conn, should_stop)`: a segment save
+        or delete, an anchored map placement, one caption. Never refused: it
+        runs ahead of a waiting batch, or between the files of a running one,
+        on the same thread and connection, and shares the log and the reload."""
+        self._enqueue(name, job, batch=False)
+        return True
+
+    def start_batch(self, name: str, job: BatchJob) -> bool:
+        """Queue a batch job — `job(conn, should_stop, hooks)`, calling
+        `hooks.after_file(...)` after each file it commits. One at a time:
+        False, with a log line, while another is running or waiting."""
+        if self.batch_running:
+            self._append_log(f"a batch job is already running ({self._batch_name}): {name} not started")
+            return False
+        self._batch_name = name
+        self._enqueue(name, job, batch=True)
+        return True
 
     # --- plumbing ---
 
-    def _start(self, name: str, job: Job) -> bool:
-        if self.running:
-            self._append_log("a job is already running")
-            return False
-        self._append_log(f"— {name} —")
-        logging.getLogger("crate").addHandler(self._handler)
-        thread = JobThread(self._db_path, name, job, self)
-        thread.succeeded.connect(self._on_succeeded)
-        thread.failed.connect(self._on_failed)
-        thread.finished.connect(self._on_finished)
-        self._thread = thread
-        self._set_running(True)
-        thread.start()
-        return True
+    def _ensure_worker(self) -> JobWorker:
+        if self._worker is None:
+            worker = JobWorker(self._db_path, self)
+            worker.started_job.connect(self._on_started)
+            worker.succeeded.connect(self._on_succeeded)
+            worker.failed.connect(self._on_failed)
+            worker.finished_job.connect(self._on_job_finished)
+            worker.progress.connect(self.progress)
+            worker.rows_done.connect(self.rows_done)
+            logging.getLogger("crate").addHandler(self._handler)
+            self._worker = worker
+            worker.start()
+        return self._worker
+
+    def _enqueue(self, name: str, job: Callable, batch: bool) -> None:
+        self._append_log(f"— {name} —" + (" (queued)" if self.running else ""))
+        self._jobs_in_flight += 1
+        if batch:
+            self._batches_in_flight += 1
+            self._set_running(True)
+        self._ensure_worker().enqueue(name, job, batch=batch)
+
+    def _on_started(self, name: str, batch: bool) -> None:
+        if batch:
+            self._set_running(True)
 
     def _on_succeeded(self, name: str, text: str) -> None:
         self._append_log(text)
@@ -908,17 +928,18 @@ class RecomputePanel(QWidget):
     def _on_failed(self, name: str, error: str) -> None:
         self._append_log(f"{name} failed: {error}")
 
-    def _on_finished(self) -> None:
-        logging.getLogger("crate").removeHandler(self._handler)
-        thread, self._thread = self._thread, None
-        name, completed = "", False
-        if thread is not None:
-            name, completed = thread.name, thread.completed
-            thread.deleteLater()
-        self._set_running(False)
+    def _on_job_finished(self, name: str, completed: bool, batch: bool) -> None:
+        """Every job's end reloads the window (`index_changed`); a batch's end
+        also frees the buttons and drives the window's plan chain."""
+        self._jobs_in_flight = max(0, self._jobs_in_flight - 1)
+        if batch:
+            self._batches_in_flight = max(0, self._batches_in_flight - 1)
+            self._batch_name = ""
+            self._set_running(False)
         self.refresh_folders()
         self.index_changed.emit()
-        self.job_ended.emit(name, completed)
+        if batch:
+            self.job_ended.emit(name, completed)
 
     def _set_running(self, running: bool) -> None:
         for widget in (

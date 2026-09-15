@@ -274,6 +274,7 @@ def caption_pending(
     scope: Sequence[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
     sample_ids: Sequence[int] | None = None,
+    after_file: Callable[[str, int | None, int, int], None] | None = None,
 ) -> CaptionSummary:
     """One Qwen2-Audio sentence per sample that has none, or whose content
     changed since it was written (`text_tags`, `source_model` =
@@ -341,6 +342,8 @@ def caption_pending(
             continue
         summary.captioned += 1
         summary.model_seconds += result.seconds
+        if after_file is not None:
+            after_file("captions", int(sample_id), n + 1, total)   # the job queue's hook (Phase 12)
         if progress_every and summary.captioned % progress_every == 0:
             log.info(
                 "captioned %d/%d (%.1f s/sample in the model): %s",

@@ -328,6 +328,7 @@ def scan_library(
     conn: sqlite3.Connection,
     root: Path | str,
     should_stop: Callable[[], bool] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> ScanSummary:
     """Run node `A` over `root` against the DB on `conn`. Returns a summary.
 
@@ -455,6 +456,8 @@ def scan_library(
                 elapsed = time.perf_counter() - read_started
                 log.info("read %d/%d (%.0f files/s, %s)", done, len(pending), done / max(elapsed, 1e-9),
                          eta_text(elapsed, done, len(pending)))
+            if on_progress is not None and (done % 250 == 0 or done == len(pending)):
+                on_progress(done, len(pending))              # the window's progress bar (Phase 12)
 
     def _executemany(sql: str, rows: list[tuple]) -> None:
         """Chunked executemany: a crash mid-scan loses at most one batch,

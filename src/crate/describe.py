@@ -135,11 +135,19 @@ def describe_pending(
     should_stop: Callable[[], bool] | None = None,
     workers: int = 1,
     progress_every: int = 100,
+    order: Sequence[int] | None = None,
+    after_file: Callable[[str, int | None, int, int], None] | None = None,
 ) -> tuple[AnalysisSummary, SegmentationSummary]:
     """Analysis and segmentation over every sample that needs either — one
     decode and one set of frame features per file. `full` redoes both for
     every sample in scope. Returns the two stages' summaries, as the report
-    and the tests have always read them."""
+    and the tests have always read them.
+
+    `order`: sample ids in the order to visit them — the list's, top to
+    bottom, so what the user is looking at is done first (the job queue,
+    Phase 12); ids not in it come last, in id order. `after_file(stage,
+    sample_id, done, total)` is called after each file is committed — where
+    the queue runs waiting interactive jobs and reports progress."""
     settings = settings or SegmentationSettings()
     analysis = AnalysisSummary()
     segmentation = SegmentationSummary()
@@ -168,6 +176,9 @@ def describe_pending(
     sql += scope_sql + ids_sql + " ORDER BY s.id"
     params += ids_params
     worklist = conn.execute(sql, params).fetchall()
+    if order:
+        rank = {int(sid): i for i, sid in enumerate(order)}
+        worklist.sort(key=lambda row: rank.get(int(row["id"]), len(rank)))
     total = len(worklist)
     log.info("describing %d samples: analysis + segmentation in one pass per file", total)
 
@@ -245,6 +256,8 @@ def describe_pending(
                 done, total, elapsed / done, analysis.analyzed, segmentation.segments_created,
                 analysis.failed + segmentation.failed, eta_text(elapsed, done, total),
             )
+        if after_file is not None:
+            after_file("describe", sample_id, done, total)
 
     def stopped() -> None:
         analysis.stopped = segmentation.stopped = True

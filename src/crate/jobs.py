@@ -36,6 +36,7 @@ class RecomputeSettings:
                                          # else — the folder scope is not consulted, every stage redoes them
     one_shot_max_duration_s: float | None = ONE_SHOT_MAX_DURATION_S
     workers: int = 1                     # worker processes for analysis + segmentation (parallel.py)
+    order: tuple[int, ...] = ()          # sample ids in the order to visit them (the list's, Phase 12); () = id order
     segmentation: SegmentationSettings = field(default_factory=SegmentationSettings)
     embedding: EmbedSettings = field(default_factory=EmbedSettings)
 
@@ -79,6 +80,7 @@ def recompute_attributes(
     should_stop: Callable[[], bool] | None = None,
     encoder: Encoder | None = None,
     progress_every: int = 25,
+    after_file: Callable[[str, int | None, int, int], None] | None = None,
 ) -> RecomputeReport:
     """§9.6 *Recompute attributes*: the three stages in order over the files
     under `settings.scope` — or, with `settings.sample_ids`, over those
@@ -134,6 +136,8 @@ def recompute_attributes(
         should_stop=should_stop,
         workers=workers,
         progress_every=progress_every,
+        order=settings.order or None,
+        after_file=after_file,
     )
     if report.analysis.stopped or report.segmentation.stopped:
         return _finish(report, started, stopped=True)
@@ -151,6 +155,8 @@ def recompute_attributes(
             scope=scope,
             sample_ids=sample_ids,
             should_stop=should_stop,
+            order=settings.order or None,
+            after_file=after_file,
         )
     except ImportError as exc:
         note = (

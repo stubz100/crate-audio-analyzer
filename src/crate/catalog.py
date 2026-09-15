@@ -155,10 +155,20 @@ def _parse_scores(text: str) -> dict[str, float]:
     return scores
 
 
-def load_samples(conn: sqlite3.Connection, top_tags: int = 3, scope=None) -> list[SampleRow]:
+def load_samples(
+    conn: sqlite3.Connection, top_tags: int = 3, scope=None, sample_ids=None
+) -> list[SampleRow]:
     """The samples in scope (§9.6: the folders ticked on the Recompute tab;
-    None = every sample), one row each, with what the list displays."""
+    None = every sample), one row each, with what the list displays.
+    `sample_ids`: those rows only — the ones a running job just finished
+    (Phase 12), refreshed in place."""
     clause, params = _scope(scope)
+    if sample_ids is not None:
+        ids = [int(i) for i in sample_ids]
+        if not ids:
+            return []
+        clause += f" AND s.id IN ({','.join('?' for _ in ids)})"
+        params = [*params, *ids]
     rows: list[SampleRow] = []
     for row in conn.execute(_SAMPLES_SQL.replace("{scope}", clause), [top_tags, *params]):
         *fields, clap = row
@@ -195,10 +205,16 @@ class Section:
     manual: bool = False
 
 
-def load_sections(conn: sqlite3.Connection, scope=None) -> dict[int, list[Section]]:
+def load_sections(conn: sqlite3.Connection, scope=None, sample_ids=None) -> dict[int, list[Section]]:
     """Every sample's sections in scope, in time order, by sample id — the
-    list's child rows."""
+    list's child rows. `sample_ids`: those samples only (Phase 12)."""
     clause, params = _scope(scope)
+    if sample_ids is not None:
+        ids = [int(i) for i in sample_ids]
+        if not ids:
+            return {}
+        clause += f" AND s.id IN ({','.join('?' for _ in ids)})"
+        params = [*params, *ids]
     sections: dict[int, list[Section]] = {}
     for seg_id, sample_id, start_ms, end_ms, method in conn.execute(
         "SELECT g.id, g.sample_id, g.start_ms, g.end_ms, g.detection_method FROM segments g "
