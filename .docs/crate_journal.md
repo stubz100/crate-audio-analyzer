@@ -1640,7 +1640,7 @@ The user, after recomputing the whole library: the window "locks up instantly fo
 
 ## 2026-09-13 — Phase 12, third round: the job queue — recompute in the background, the window in use
 
-**Phase:** 12 — Scale & Polish Hardening · uncommitted at the time of writing
+**Phase:** 12 — Scale & Polish Hardening · `f93b96e`
 
 The user: make the recompute a background job with progress feedback; once the scan is done the files should be in the list; the recompute should start from the top of the list and skip what is done; normal use of the application in the meantime; "a job queue where recompute tasks and user tasks mix". Then, on reading "as a separate OS process" in the steer: a clarifying exchange — that was the alternative weighed against, not the recommendation — and a follow-up question on whether another database would make multi-process recompute worthwhile. Answered in the session and recorded in spec §9.6: the database is not where the parallelism is lost (the DSP already runs in worker processes; the DB is milliseconds a file; CLAP saturates the cores in one process), no backend would speed the recompute, and a detached recompute process is feasible with SQLite as it is — a `crate-recompute` entry, a `jobs` table for progress and Stop, the window polling `analyzed_at` / `embedded_at` for its live rows — at the cost of the priority interleaving and the simplicity of signals; kept as the contained next step if the window stutters under a real run.
 
